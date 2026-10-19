@@ -253,8 +253,9 @@ def _remove_lines(mask: np.ndarray) -> np.ndarray:
     """Remove straight lines that cross (almost) the whole image, e.g. panel borders."""
     H, W = mask.shape
     mask = mask.copy()
-    rows = mask.mean(axis=1) > 0.92
-    cols = mask.mean(axis=0) > 0.92
+    # include the blurred edges of each line (+-2 px)
+    rows = ndi.binary_dilation(mask.mean(axis=1) > 0.92, iterations=2)
+    cols = ndi.binary_dilation(mask.mean(axis=0) > 0.92, iterations=2)
     mask[rows, :] = False
     mask[:, cols] = False
     return mask
@@ -278,7 +279,7 @@ def detect_bands(signal: np.ndarray, settings: DetectSettings, row_names: Option
             continue
         y0, x0, y1, x1 = rp.bbox
         w, h = x1 - x0, y1 - y0
-        if h <= 4 and w > 0.6 * W:  # thin line across the membrane: panel border
+        if h <= max(6, 0.02 * H) and w > 0.6 * W:  # thin line across the membrane: panel border
             continue
         if h > 0.5 * H:
             continue
