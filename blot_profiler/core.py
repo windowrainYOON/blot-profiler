@@ -11,6 +11,9 @@ Conventions
 * Bands that sit on the same horizontal line form a *row* (one protein). All
   boxes in a row share the same width and height so every lane is measured
   with an identical area.
+* Rows (protein groups) and lanes (lane groups) carry the user's names; a band's
+  ID is built from them, e.g. ``Kras_IgG_12h``. Several physical lanes may share
+  a lane name: they are replicates of that lane group.
 """
 
 from __future__ import annotations
@@ -143,10 +146,9 @@ class Row:
 @dataclass
 class Band:
     row: int  # index into rows
-    lane: int  # 0-based lane index
+    lane: int  # 0-based physical lane index
     cx: float  # box centre x
     cy: float  # box centre y
-    groups: List[str] = field(default_factory=list)
 
     def box(self, rows: Sequence[Row]):
         r = rows[self.row]
@@ -157,12 +159,10 @@ class Band:
 
 @dataclass
 class Analysis:
-    rows: List[Row] = field(default_factory=list)
+    rows: List[Row] = field(default_factory=list)  # protein groups
     bands: List[Band] = field(default_factory=list)
-    lane_labels: List[str] = field(default_factory=list)
-    lane_conditions: List[str] = field(default_factory=list)  # replicate groups
-    groups: List[str] = field(default_factory=list)  # custom band groups
-    formulas: List[Dict[str, str]] = field(default_factory=list)  # {name, expr}
+    lane_labels: List[str] = field(default_factory=list)  # lane group name of each physical lane
+    formulas: List[Dict[str, str]] = field(default_factory=list)  # {name, expr, normalize}
 
     @property
     def n_lanes(self) -> int:
@@ -171,13 +171,53 @@ class Analysis:
 
     def ensure_lane_labels(self):
         n = self.n_lanes
+        used = set(self.lane_labels)
+        k = 1
         while len(self.lane_labels) < n:
-            self.lane_labels.append(f"Lane {len(self.lane_labels) + 1}")
-        while len(self.lane_conditions) < n:
-            self.lane_conditions.append("")
+            while f"L{k}" in used:
+                k += 1
+            self.lane_labels.append(f"L{k}")
+            used.add(f"L{k}")
+
+    def lane_groups(self) -> List[str]:
+        """Lane group names in left-to-right order (each once)."""
+        out = []
+        for name in self.lane_labels:
+            if name not in out:
+                out.append(name)
+        return out
+
+    def band_ids(self) -> Dict[int, str]:
+        """``id(band) -> ID`` built from the protein and lane group names.
+
+        Bands sharing a protein and lane group (replicate lanes, or several
+        bands of one protein in a lane) get ``_1``, ``_2`` … suffixes.
+        """
+        self.ensure_lane_labels()
+        base = {}
+        for b in self.bands:
+            base[id(b)] = f"{_safe_name(self.rows[b.row].name)}_{_safe_name(self.lane_labels[b.lane])}"
+        count: Dict[str, int] = {}
+        for v in base.values():
+            count[v] = count.get(v, 0) + 1
+        # unique IDs first, then numbered duplicates (skipping numbers already taken)
+        out = {k: v for k, v in base.items() if count[v] == 1}
+        used = set(out.values())
+        nxt: Dict[str, int] = {}
+        for b in sorted(self.bands, key=lambda b: (b.row, b.lane, b.cy)):
+            v = base[id(b)]
+            if count[v] == 1:
+                continue
+            k = nxt.get(v, 1)
+            while f"{v}_{k}" in used:
+                k += 1
+            out[id(b)] = f"{v}_{k}"
+            used.add(out[id(b)])
+            nxt[v] = k + 1
+        return out
 
     def band_id(self, band: Band) -> str:
-        return f"R{band.row + 1}L{band.lane + 1}"
+        return self.band_ids()[id(band)]
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -186,10 +226,8 @@ class Analysis:
     def from_dict(cls, d: dict) -> "Analysis":
         a = cls()
         a.rows = [Row(**r) for r in d.get("rows", [])]
-        a.bands = [Band(**b) for b in d.get("bands", [])]
+        a.bands = [Band(**{k: b[k] for k in ("row", "lane", "cx", "cy")}) for b in d.get("bands", [])]
         a.lane_labels = list(d.get("lane_labels", []))
-        a.lane_conditions = list(d.get("lane_conditions", []))
-        a.groups = list(d.get("groups", []))
         a.formulas = [dict(f) for f in d.get("formulas", [])]
         return a
 
@@ -396,7 +434,7 @@ def _build_analysis(regs, settings: DetectSettings, row_names, signal: np.ndarra
         if len(lane_x) > 1:
             pitch = float(np.median(np.diff(lane_x)))
             w = int(min(max(w, 0.7 * pitch), 0.95 * pitch))
-        name = row_names[ri] if row_names and ri < len(row_names) else f"Row {ri + 1}"
+        name = row_names[ri] if row_names and ri < len(row_names) else f"R{ri + 1}"
         a.rows.append(Row(name=name, width=max(w, 4), height=max(h, 4)))
         seen = {}
         for i in c:
@@ -452,7 +490,7 @@ def fill_missing_lanes(a: Analysis) -> int:
 def add_band(a: Analysis, x: float, y: float) -> Band:
     """Add a band at (x, y): it joins the nearest row (by y) and nearest lane (by x)."""
     if not a.rows:
-        a.rows.append(Row(name="Row 1", width=40, height=16))
+        a.rows.append(Row(name="R1", width=40, height=16))
         row = 0
     else:
         dists = []
@@ -463,7 +501,7 @@ def add_band(a: Analysis, x: float, y: float) -> Band:
         d, row = min(dists)
         if d > a.rows[row].height * 1.5:
             ref = a.rows[row]
-            a.rows.append(Row(name=f"Row {len(a.rows) + 1}", width=ref.width, height=ref.height))
+            a.rows.append(Row(name=unique_name(f"R{len(a.rows) + 1}", [r.name for r in a.rows]), width=ref.width, height=ref.height))
             row = len(a.rows) - 1
     lane_x = lane_centers(a)
     if lane_x:
@@ -475,17 +513,13 @@ def add_band(a: Analysis, x: float, y: float) -> Band:
     if lane == -1:  # new leftmost lane: shift everything right
         for b in a.bands:
             b.lane += 1
-        a.lane_labels.insert(0, "Lane")
-        a.lane_conditions.insert(0, "")
+        a.lane_labels.insert(0, unique_name("L0", a.lane_labels))
         lane = 0
     # replace an existing band in the same row/lane
     a.bands = [b for b in a.bands if not (b.row == row and b.lane == lane)]
     band = Band(row=row, lane=lane, cx=float(x), cy=float(y))
     a.bands.append(band)
     a.ensure_lane_labels()
-    for i, lab in enumerate(a.lane_labels):
-        if lab == "Lane":
-            a.lane_labels[i] = f"Lane {i + 1}"
     return band
 
 
@@ -517,6 +551,102 @@ def refine_vertical(img: np.ndarray, a: Analysis, search: float = 0.75) -> int:
             b.cy = float(new_cy)
             moved += 1
     return moved
+
+
+def unique_name(name: str, existing: Sequence[str]) -> str:
+    """``name``, or ``name_2``, ``name_3`` … if it is already taken."""
+    name = name.strip()
+    taken = set(existing)
+    if name not in taken:
+        return name
+    k = 2
+    while f"{name}_{k}" in taken:
+        k += 1
+    return f"{name}_{k}"
+
+
+def remove_empty(a: Analysis):
+    """Drop rows without bands and empty lanes; renumber lanes left to right."""
+    for ri in reversed(range(len(a.rows))):
+        if not any(b.row == ri for b in a.bands):
+            a.remove_row(ri)
+    a.ensure_lane_labels()
+    used = sorted({b.lane for b in a.bands})
+    xs = {l: float(np.median([b.cx for b in a.bands if b.lane == l])) for l in used}
+    order = sorted(used, key=lambda l: xs[l])
+    remap = {old: new for new, old in enumerate(order)}
+    a.lane_labels = [a.lane_labels[old] for old in order]
+    for b in a.bands:
+        b.lane = remap[b.lane]
+    a.bands.sort(key=lambda b: (b.row, b.lane))
+
+
+def make_row_group(a: Analysis, bands: Sequence[Band], name: str) -> str:
+    """Move ``bands`` into a new protein group (row) called ``name``.
+
+    The row's box size is the largest of the rows the bands came from. If the
+    name is taken by another row it gets a numeric suffix. Returns the name used.
+    """
+    bands = list(bands)
+    if not bands:
+        return ""
+    ids = {id(b) for b in bands}
+    src = {b.row for b in bands}
+    # a row that is entirely replaced may keep (or give up) its name
+    others = [r.name for i, r in enumerate(a.rows) if any(b.row == i and id(b) not in ids for b in a.bands)]
+    final = unique_name(name or "Protein", others)
+    w = max(a.rows[i].width for i in src)
+    h = max(a.rows[i].height for i in src)
+    role = a.rows[min(src)].role
+    a.rows.append(Row(name=final, width=w, height=h, role=role))
+    new = len(a.rows) - 1
+    for b in bands:
+        b.row = new
+    remove_empty(a)
+    a.sort()
+    return final
+
+
+def make_lane_group(a: Analysis, bands: Sequence[Band], name: str) -> str:
+    """Name the lane(s) of ``bands`` as one lane group.
+
+    * One band per protein (a single column): the bands become one lane.
+    * Several bands of the same protein (several columns): every lane they are
+      in gets the name; those lanes are replicates of the group.
+    If another lane group already uses the name it gets a numeric suffix.
+    Returns the name used.
+    """
+    bands = list(bands)
+    if not bands:
+        return ""
+    a.ensure_lane_labels()
+    ids = {id(b) for b in bands}
+    rows = [b.row for b in bands]
+    multi = len(rows) != len(set(rows))
+    if multi:
+        lanes = {b.lane for b in bands}
+    else:
+        lanes = {min(b.lane for b in bands)}
+        # move the selected bands into one lane; bands of the same protein that
+        # were there already (not selected) move to a new lane of their own
+        target = next(iter(lanes))
+        spare = a.n_lanes
+        for b in a.bands:
+            if b.lane == target and id(b) not in ids and b.row in set(rows):
+                b.lane = spare
+        if any(b.lane == spare for b in a.bands):
+            k = 1
+            while f"L{k}" in a.lane_labels:
+                k += 1
+            a.lane_labels.append(f"L{k}")
+        for b in bands:
+            b.lane = target
+    others = [lab for i, lab in enumerate(a.lane_labels) if i not in lanes]
+    final = unique_name(name or "Lane", others)
+    for l in lanes:
+        a.lane_labels[l] = final
+    remove_empty(a)
+    return final
 
 
 def lane_centers(a: Analysis) -> List[float]:
@@ -630,8 +760,11 @@ class FormulaError(ValueError):
 
 
 def _safe_name(name: str) -> str:
-    """Make a row/group name usable in a formula: spaces and symbols -> underscore."""
+    """Make a group name usable in a formula: spaces and symbols -> underscore."""
     out = "".join(ch if ch.isalnum() else "_" for ch in name.strip())
+    while "__" in out:
+        out = out.replace("__", "_")
+    out = out.strip("_")
     if not out or out[0].isdigit():
         out = "_" + out
     return out
@@ -688,43 +821,29 @@ def evaluate(expr: str, variables: Dict[str, object]):
     return ev(tree)
 
 
+def row_vector(a: Analysis, meas: List[Measurement], row: int) -> np.ndarray:
+    """Net intensity of one protein group per physical lane (bands in one lane are summed)."""
+    vec = np.zeros(a.n_lanes)
+    has = np.zeros(a.n_lanes, bool)
+    for m in meas:
+        if m.row == row:
+            vec[m.lane] += m.net
+            has[m.lane] = True
+    vec[~has] = np.nan
+    return vec
+
+
 def formula_variables(a: Analysis, meas: List[Measurement]) -> Dict[str, object]:
     """Names usable in formulas.
 
-    * Row name (e.g. ``Vinculin``) -> per-lane vector of net intensities.
-    * Band id (e.g. ``R2L3``) -> one band's net intensity.
-    * Custom group name -> sum of its bands' intensities (scalar). If the group
-      only contains bands from a single row it is still a scalar.
-    * ``G_<group>`` -> per-lane vector: sum of the group's bands in each lane
-      (useful to add e.g. both bands of the Erk doublet lane by lane).
+    * Protein group (row) name, e.g. ``Vinculin`` -> per-lane vector of net intensities.
+    * Band ID, e.g. ``Kras_IgG_12h`` -> one band's net intensity.
     """
-    n = a.n_lanes
-    by_id = {m.band_id: m for m in meas}
     v: Dict[str, object] = {}
     for ri, r in enumerate(a.rows):
-        vec = np.full(n, np.nan)
-        for m in meas:
-            if m.row == ri:
-                vec[m.lane] = m.net
-        v[_safe_name(r.name)] = vec
-        v[f"R{ri + 1}"] = vec
-    for b in a.bands:
-        bid = a.band_id(b)
-        if bid in by_id:
-            v[bid] = by_id[bid].net
-    for g in a.groups:
-        members = [b for b in a.bands if g in b.groups]
-        total = sum(by_id[a.band_id(b)].net for b in members if a.band_id(b) in by_id)
-        lanevec = np.zeros(n)
-        has = np.zeros(n, bool)
-        for b in members:
-            m = by_id.get(a.band_id(b))
-            if m is not None:
-                lanevec[b.lane] += m.net
-                has[b.lane] = True
-        lanevec[~has] = np.nan
-        v[_safe_name(g)] = float(total)
-        v["G_" + _safe_name(g)] = lanevec
+        v[_safe_name(r.name)] = row_vector(a, meas, ri)
+    for m in meas:
+        v.setdefault(m.band_id, m.net)
     return v
 
 
@@ -747,9 +866,8 @@ def project_variables(image_vars: Sequence[Dict[str, object]], aliases: Sequence
 
 def normalize_to_control(a: Analysis, meas: List[Measurement], target_row: int, control_row: int, reference_lane: Optional[int] = 0) -> np.ndarray:
     """target / control lane by lane, then scaled so the reference lane is 1."""
-    v = formula_variables(a, meas)
-    t = np.asarray(v[f"R{target_row + 1}"], float)
-    c = np.asarray(v[f"R{control_row + 1}"], float)
+    t = row_vector(a, meas, target_row)
+    c = row_vector(a, meas, control_row)
     with np.errstate(divide="ignore", invalid="ignore"):
         ratio = np.where(c > 0, t / c, np.nan)
     return scale_to_reference(ratio, reference_lane)
@@ -782,3 +900,43 @@ def condition_stats(values: np.ndarray, conditions: Sequence[str], labels: Seque
         sds.append(float(vals.std(ddof=1)) if vals.size > 1 else 0.0)
         ns.append(int(vals.size))
     return names, np.array(means), np.array(sds), ns
+
+
+# --------------------------------------------------------------------------
+# Several images: lanes aligned by lane group name
+# --------------------------------------------------------------------------
+
+def common_lane_keys(lane_keys: Sequence[Sequence[str]]) -> List[str]:
+    """Ordered union of the lane keys of several images."""
+    out: List[str] = []
+    for keys in lane_keys:
+        for k in keys:
+            if k not in out:
+                out.append(k)
+    return out
+
+
+def to_common(values, keys: Sequence[str], common: Sequence[str]) -> np.ndarray:
+    """Map a per-physical-lane vector onto ``common`` keys (replicate lanes are averaged)."""
+    values = np.asarray(values, float)
+    out = np.full(len(common), np.nan)
+    for ci, key in enumerate(common):
+        vals = [values[i] for i, k in enumerate(keys) if k == key and i < values.size and np.isfinite(values[i])]
+        if vals:
+            out[ci] = float(np.mean(vals))
+    return out
+
+
+def combine_members(members: Sequence[np.ndarray], ref: Optional[int] = None):
+    """Mean, SD and n over member vectors (one per image), optionally each scaled so
+    element ``ref`` is 1 first. Returns (mean, sd, n, scaled_members)."""
+    if not members:
+        return np.zeros(0), np.zeros(0), np.zeros(0, int), []
+    scaled = [scale_to_reference(m, ref) for m in members]
+    M = np.vstack(scaled)
+    n = np.isfinite(M).sum(axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = np.where(n > 0, np.nansum(M, axis=0) / np.maximum(n, 1), np.nan)
+        dev = np.where(np.isfinite(M), (M - mean) ** 2, 0.0).sum(axis=0)
+        sd = np.where(n > 1, np.sqrt(dev / np.maximum(n - 1, 1)), 0.0)
+    return mean, sd, n, scaled

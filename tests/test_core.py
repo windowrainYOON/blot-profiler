@@ -50,24 +50,72 @@ def test_normalization_recovers_ratios(method):
     np.testing.assert_allclose(norm, np.array(intens) / intens[0], atol=0.12)
 
 
-def test_formulas_and_groups():
+def test_formulas_and_band_ids():
     a = core.Analysis(rows=[core.Row("Vinculin", 10, 10, core.ROLE_CONTROL), core.Row("p Erk", 10, 10)])
-    a.bands = [core.Band(r, l, 0, 0) for r in range(2) for l in range(3)]
-    a.groups = ["ctrl"]
-    a.bands[3].groups.append("ctrl")
-    a.bands[4].groups.append("ctrl")
+    a.bands = [core.Band(r, l, 10 * l, 10 * r) for r in range(2) for l in range(3)]
+    a.lane_labels = ["DMSO (Off)", "IgG 12h", "IgG 24h"]
+    ids = [a.band_id(b) for b in a.bands]
+    assert ids[0] == "Vinculin_DMSO_Off" and ids[5] == "p_Erk_IgG_24h"
     meas = [core.Measurement(a.band_id(b), b.row, b.lane, 0, 0, float(10 * (b.row + 1) + b.lane), 0, 1) for b in a.bands]
     v = core.formula_variables(a, meas)
     np.testing.assert_allclose(core.evaluate("p_Erk / Vinculin", v), [2.0, 21 / 11, 22 / 12])
-    assert core.evaluate("ctrl", v) == 41.0
-    assert core.evaluate("R2L3 - R1L1 * 2", v) == 2.0
-    np.testing.assert_allclose(core.evaluate("G_ctrl", v)[:2], [20.0, 21.0])
-    assert np.isnan(core.evaluate("G_ctrl", v)[2])
-    assert np.isnan(core.evaluate("R1L1 / 0", v))
+    assert core.evaluate("p_Erk_IgG_24h - Vinculin_DMSO_Off * 2", v) == 2.0
+    assert np.isnan(core.evaluate("Vinculin_IgG_12h / 0", v))
     with pytest.raises(core.FormulaError):
         core.evaluate("__import__('os')", v)
     with pytest.raises(core.FormulaError):
         core.evaluate("nope + 1", v)
+
+
+def grid(rows=3, lanes=4):
+    a = core.Analysis(rows=[core.Row(f"R{r + 1}", 10, 6) for r in range(rows)])
+    a.bands = [core.Band(r, l, 20 + 30 * l, 20 + 20 * r) for r in range(rows) for l in range(lanes)]
+    a.ensure_lane_labels()
+    return a
+
+
+def test_make_row_group_names_and_merges():
+    a = grid()
+    sel = [b for b in a.bands if b.row == 0]
+    assert core.make_row_group(a, sel, "Vinculin") == "Vinculin"
+    assert [r.name for r in a.rows] == ["Vinculin", "R2", "R3"]
+    # doublet: rows 2 and 3 become one protein group; bands in one lane are summed
+    sel = [b for b in a.bands if b.row in (1, 2)]
+    assert core.make_row_group(a, sel, "Erk") == "Erk"
+    assert [r.name for r in a.rows] == ["Vinculin", "Erk"]
+    assert a.band_id(a.bands[4]).startswith("Erk_L1_")
+    meas = core.measure(np.ones((100, 200)), a, core.BackgroundSettings(method="none"))
+    np.testing.assert_allclose(core.row_vector(a, meas, 1), [120.0] * 4)
+    # duplicate name gets a suffix
+    sel = [b for b in a.bands if b.row == 1 and b.cy > 50]
+    assert core.make_row_group(a, sel, "Vinculin") == "Vinculin_2"
+
+
+def test_make_lane_group_single_and_replicates():
+    a = grid(rows=2, lanes=4)
+    col = [b for b in a.bands if b.lane == 1]
+    assert core.make_lane_group(a, col, "IgG 12h") == "IgG 12h"
+    assert a.lane_labels == ["L1", "IgG 12h", "L3", "L4"]
+    reps = [b for b in a.bands if b.lane in (2, 3)]
+    assert core.make_lane_group(a, reps, "DOX") == "DOX"
+    assert a.lane_labels == ["L1", "IgG 12h", "DOX", "DOX"]
+    assert core.make_lane_group(a, [b for b in a.bands if b.lane == 0], "DOX") == "DOX_2"
+    # lane group "DOX_2" owns R1_DOX_2, so the DOX replicates are numbered around it
+    assert sorted(a.band_id(b) for b in a.bands if b.row == 0) == ["R1_DOX_1", "R1_DOX_2", "R1_DOX_3", "R1_IgG_12h"]
+    # a column assembled from bands of two detected lanes becomes one lane
+    b = grid(rows=2, lanes=3)
+    mixed = [b.bands[0], b.bands[4]]  # row 0 lane 0, row 1 lane 1
+    core.make_lane_group(b, mixed, "X")
+    assert b.bands[0].lane == b.bands[4].lane and b.lane_labels[b.bands[0].lane] == "X"
+
+
+def test_common_lanes_and_combine():
+    common = core.common_lane_keys([["A", "B", "B"], ["B", "C"]])
+    assert common == ["A", "B", "C"]
+    np.testing.assert_allclose(core.to_common([1.0, 2.0, 4.0], ["A", "B", "B"], common), [1.0, 3.0, np.nan])
+    mean, sd, n, _ = core.combine_members([np.array([1.0, 3.0, np.nan]), np.array([np.nan, 2.0, 4.0])], ref=1)
+    np.testing.assert_allclose(mean, [1 / 3, 1.0, 2.0])
+    assert list(n) == [1, 2, 1]
 
 
 def test_condition_stats():
@@ -98,11 +146,11 @@ def test_add_band_and_roundtrip():
 
 
 def test_cross_image_formulas():
-    v1 = {"Vinculin": np.array([1.0, 2.0]), "G_IgG": np.array([4.0, 6.0])}
+    v1 = {"Vinculin": np.array([1.0, 2.0]), "Erk": np.array([4.0, 6.0])}
     v2 = {"Vinculin": np.array([2.0, 2.0]), "Kras": np.array([3.0, 5.0])}
     v = core.project_variables([v1, v2], ["", "blot B"], base=0)
     np.testing.assert_allclose(core.evaluate("I2.Kras / Vinculin", v), [3.0, 2.5])
-    np.testing.assert_allclose(core.evaluate("blot_B.Kras / I1.G_IgG", v), [0.75, 5 / 6])
+    np.testing.assert_allclose(core.evaluate("blot_B.Kras / I1.Erk", v), [0.75, 5 / 6])
     with pytest.raises(core.FormulaError):
         core.evaluate("I2 / Vinculin", v)
     with pytest.raises(core.FormulaError):
