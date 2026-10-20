@@ -1,0 +1,25 @@
+name: Build Windows app
+
+on:
+  push:
+    branches: [windows-build]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Test, build and smoke-test
+        shell: pwsh
+        env:
+          PYTHON: python
+        run: ./build_windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUILD_NAME }}
+          path: dist/${{ env.BUILD_NAME }}.zip
