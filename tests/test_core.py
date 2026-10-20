@@ -196,3 +196,26 @@ def test_measurement_uses_raw_intensities():
     m2 = core.measure(core.to_signal(raw, invert=False), a, core.BackgroundSettings(method="none"))
     x, y, w, h = a.bands[0].box(a.rows)
     assert m2[0].net == pytest.approx(float(raw[y:y + h, x:x + w].sum()))
+
+
+def test_figure_renders_chemi_blot():
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib.figure import Figure
+    from blot_profiler import figure
+    import synth
+    raw, _ = synth.chemi_blot()
+    sig = core.to_signal(raw.astype(float))
+    assert not core.needs_inversion(raw.astype(float))  # bright bands on black
+    a = core.detect_bands(core.corrected_signal(sig, core.BackgroundSettings()), core.DetectSettings())
+    assert len(a.rows) == 3 and a.n_lanes == 8
+    s = figure.sync_settings(figure.default_settings(), a, raw.shape)
+    s["groups"] = [{"text": "IgG", "first": 2, "last": 3}]
+    s["show_strip"], s["show_kda"] = True, True
+    s["kda"] = [{"kda": k, "y": y} for k, y in synth.LADDER_Y.items()]
+    fig = Figure()
+    figure.render(fig, sig, a, s, synth.marker_photo().astype(float))
+    w, h = fig.get_size_inches()
+    assert w > 3 and h > 1 and len(fig.axes) == 6  # 3 panels + 3 ladder strips

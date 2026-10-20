@@ -1835,7 +1835,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     if r.role == core.ROLE_TARGET:
                         res[f"{r.name}/{a.rows[c].name}"] = core.normalize_to_control(a, d.measurements, i, c, d.ref_lane)
             else:
-                msgs.append("Control 단백질이 없습니다: '2. 단백질 / 레인' 탭에서 loading control의 역할을 Control로 지정하세요.")
+                # no internal control: plain band intensities (raw Net per lane)
+                for i, r in enumerate(a.rows):
+                    if r.role != core.ROLE_IGNORE:
+                        res[f"{r.name} (Net)"] = core.row_vector(a, d.measurements, i)
         variables = core.formula_variables(a, d.measurements)
         for f in a.formulas:
             name = f.get("name") or f.get("expr")
@@ -1904,7 +1907,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # don't mix scalars and lane vectors in one chart
         if any(np.size(v) > 1 for v in series.values()):
             series = {k: v for k, v in series.items() if np.size(v) > 1}
-        ylabel = "상대 intensity" if self.doc.ref_lane is not None else "정량값"
+        if series and all(k.endswith(" (Net)") for k in series):
+            ylabel = "Net intensity (raw)"
+        else:
+            ylabel = "상대 intensity" if self.doc.ref_lane is not None else "정량값"
         labels = list(a.lane_labels)
         self.plot.plot(series, labels, labels, self.by_condition.isChecked(), ylabel, self.show_points.isChecked())
 
