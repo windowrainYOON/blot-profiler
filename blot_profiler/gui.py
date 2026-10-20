@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import sys
 import traceback
 from typing import Dict, List, Optional
@@ -503,6 +504,187 @@ class PlotCanvas(QtWidgets.QWidget):
 # Main window
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Formula builder: operators are typed, every operand is picked from a list
+# --------------------------------------------------------------------------
+
+_TOKEN_RE = re.compile(r"[^\W\d]\w*(?:\.\w+)?|\d+(?:\.\d*)?|\.\d+|\*\*|[-+*/()]")
+_OP_KEYS = {Qt.Key_Plus: "+", Qt.Key_Minus: "-", Qt.Key_Asterisk: "*", Qt.Key_Slash: "/",
+            Qt.Key_ParenLeft: "(", Qt.Key_ParenRight: ")"}
+
+
+def tokenize(expr: str) -> List[str]:
+    return _TOKEN_RE.findall(expr or "")
+
+
+class FormulaDialog(QtWidgets.QDialog):
+    """Edit a formula without typing names.
+
+    ``terms`` is ``[(category, [(label, token), ...]), ...]``; ``variables`` is
+    used for the live preview.
+    """
+
+    def __init__(self, parent, title: str, terms, variables, formula: Optional[dict] = None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(620)
+        self.terms = [(c, items) for c, items in terms if items]
+        self.variables = variables
+        formula = formula or {}
+        self.tokens: List[str] = tokenize(str(formula.get("expr", "")))
+
+        lay = QtWidgets.QVBoxLayout(self)
+        f = QtWidgets.QFormLayout()
+        self.name = QtWidgets.QLineEdit(str(formula.get("name", "")))
+        f.addRow("이름", self.name)
+        lay.addLayout(f)
+
+        self.display = QtWidgets.QLineEdit()
+        self.display.setReadOnly(True)
+        font = self.display.font()
+        font.setPointSizeF(font.pointSizeF() * 1.3)
+        self.display.setFont(font)
+        self.display.setPlaceholderText("아래에서 항목을 넣고, + - * / ( ) 는 키보드나 버튼으로 입력하세요")
+        self.display.installEventFilter(self)
+        lay.addWidget(self.display)
+
+        hb = QtWidgets.QHBoxLayout()
+        for label, tok in (("+", "+"), ("−", "-"), ("×", "*"), ("÷", "/"), ("(", "("), (")", ")")):
+            b = QtWidgets.QPushButton(label)
+            b.setFixedWidth(44)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.clicked.connect(lambda _=None, t=tok: self.push(t))
+            hb.addWidget(b)
+        hb.addSpacing(12)
+        b = QtWidgets.QPushButton("⌫ 지우기")
+        b.setFocusPolicy(Qt.NoFocus)
+        b.clicked.connect(self.pop)
+        hb.addWidget(b)
+        b = QtWidgets.QPushButton("모두 지우기")
+        b.setFocusPolicy(Qt.NoFocus)
+        b.clicked.connect(self.clear)
+        hb.addWidget(b)
+        hb.addStretch(1)
+        lay.addLayout(hb)
+
+        g = QtWidgets.QGroupBox("항목 넣기")
+        gl = QtWidgets.QHBoxLayout(g)
+        self.category = QtWidgets.QComboBox()
+        for c, _ in self.terms:
+            self.category.addItem(c)
+        self.category.currentIndexChanged.connect(self.fill_terms)
+        gl.addWidget(self.category)
+        self.term = QtWidgets.QComboBox()
+        self.term.setMinimumWidth(220)
+        gl.addWidget(self.term, 1)
+        b = QtWidgets.QPushButton("넣기")
+        b.setDefault(False)
+        b.setAutoDefault(False)
+        b.clicked.connect(self.insert_term)
+        gl.addWidget(b)
+        lay.addWidget(g)
+
+        self.normalize = QtWidgets.QCheckBox("기준 레인을 1로 정규화")
+        self.normalize.setChecked(formula.get("normalize", "1") == "1")
+        lay.addWidget(self.normalize)
+        self.preview = QtWidgets.QLabel()
+        self.preview.setWordWrap(True)
+        lay.addWidget(self.preview)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        for btn in bb.buttons():
+            btn.setAutoDefault(False)
+        self.ok = bb.button(QtWidgets.QDialogButtonBox.Ok)
+        lay.addWidget(bb)
+        self.fill_terms()
+        self.refresh()
+        self.display.setFocus()
+
+    def fill_terms(self, *_):
+        self.term.clear()
+        i = self.category.currentIndex()
+        if 0 <= i < len(self.terms):
+            for label, tok in self.terms[i][1]:
+                self.term.addItem(label if label == tok else f"{label}   ({tok})", tok)
+
+    def insert_term(self):
+        tok = self.term.currentData()
+        if tok:
+            self.push(tok)
+
+    def push(self, tok: str):
+        last = self.tokens[-1] if self.tokens else None
+        # a digit typed after a number extends it
+        if last is not None and re.fullmatch(r"[\d.]+", tok) and re.fullmatch(r"\d*\.?\d*", last) and last:
+            self.tokens[-1] = last + tok
+        else:
+            self.tokens.append(tok)
+        self.refresh()
+
+    def pop(self):
+        if self.tokens:
+            last = self.tokens.pop()
+            if re.fullmatch(r"\d*\.?\d*", last) and len(last) > 1:
+                self.tokens.append(last[:-1])
+        self.refresh()
+
+    def clear(self):
+        self.tokens = []
+        self.refresh()
+
+    def eventFilter(self, obj, e):
+        if obj is self.display and e.type() == QtCore.QEvent.KeyPress:
+            key, text = e.key(), e.text()
+            if key in _OP_KEYS or text in "+-*/()" and text:
+                self.push(_OP_KEYS.get(key, text))
+                return True
+            if text and (text.isdigit() or text == "."):
+                self.push(text)
+                return True
+            if key in (Qt.Key_Backspace, Qt.Key_Delete):
+                self.pop()
+                return True
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                if self.ok.isEnabled():
+                    self.accept()
+                return True
+            return True  # letters are not typed: pick names from the list
+        return super().eventFilter(obj, e)
+
+    def expr(self) -> str:
+        out = ""
+        for t in self.tokens:
+            if t in "+-*/" or t == "**":
+                out += f" {t} "
+            else:
+                out += t
+        return out.strip()
+
+    def refresh(self):
+        expr = self.expr()
+        self.display.setText(expr)
+        if not expr:
+            self.preview.setText("")
+            self.ok.setEnabled(False)
+            return
+        try:
+            val = core.evaluate(expr, self.variables)
+            vals = np.atleast_1d(np.asarray(val, float))
+            shown = ", ".join("—" if not np.isfinite(v) else f"{v:.4g}" for v in vals[:10]) + (" …" if vals.size > 10 else "")
+            self.preview.setText(f"미리보기: {shown}")
+            self.preview.setStyleSheet("color: #2e7d32;")
+            self.ok.setEnabled(True)
+        except Exception as e:
+            self.preview.setText(f"미완성/오류: {e}")
+            self.preview.setStyleSheet("color: #c0392b;")
+            self.ok.setEnabled(False)
+
+    def result(self) -> dict:
+        return {"name": self.name.text().strip() or self.expr(), "expr": self.expr(),
+                "normalize": "1" if self.normalize.isChecked() else "0"}
+
+
 def _spin(lo, hi, val, step=1, decimals=None, suffix=""):
     if decimals is None:
         w = QtWidgets.QSpinBox()
@@ -745,6 +927,9 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction("분석 저장 (.json)…", self.save_project).setShortcut(QtGui.QKeySequence.Save)
         m.addAction("분석 불러오기…", self.load_project)
         m.addSeparator()
+        m.addAction("밴드 ROI·그룹 저장…", self.save_roi)
+        m.addAction("밴드 ROI·그룹 불러오기 (현재 이미지에 적용)…", self.load_roi)
+        m.addSeparator()
         m.addAction("결과 CSV 내보내기…", self.export_csv)
         m.addAction("그래프 저장 (PNG/PDF/SVG)…", lambda: self.export_plot())
         m.addAction("박스 표시 이미지 저장…", self.export_overlay)
@@ -826,6 +1011,18 @@ class MainWindow(QtWidgets.QMainWindow):
         b3.clicked.connect(self.clear_all)
         f.addRow(b3)
         lay.addWidget(g_det)
+
+        g_roi = QtWidgets.QGroupBox("밴드 ROI · 그룹")
+        gl = QtWidgets.QHBoxLayout(g_roi)
+        b = QtWidgets.QPushButton("ROI·그룹 저장…")
+        b.setToolTip("현재 이미지의 박스 위치·크기, 단백질/레인 그룹 이름과 역할을 파일로 저장합니다")
+        b.clicked.connect(self.save_roi)
+        gl.addWidget(b)
+        b = QtWidgets.QPushButton("ROI·그룹 불러오기…")
+        b.setToolTip("저장한 ROI·그룹을 현재 이미지에 적용합니다 (다른 이미지에도 쓸 수 있습니다)")
+        b.clicked.connect(self.load_roi)
+        gl.addWidget(b)
+        lay.addWidget(g_roi)
         lay.addStretch(1)
         self.on_bg_changed(recompute=False)
         return w
@@ -943,7 +1140,8 @@ class MainWindow(QtWidgets.QMainWindow):
         g, self.formula_table, hb, self.formula_msg = self._formula_box(
             "사용자 수식 (단백질 그룹 / 밴드 간 더하기·빼기·곱하기·나누기)", FORMULA_HINT)
         self.formula_table.itemChanged.connect(self.on_formula_changed)
-        for text, fn in (("수식 추가", self.add_formula), ("수식 삭제", self.delete_formula), ("사용 가능한 이름 보기", self.show_variables)):
+        self.formula_table.cellDoubleClicked.connect(lambda r, c: self.edit_formula(r) if c == 1 else None)
+        for text, fn in (("수식 추가…", self.add_formula), ("수식 편집…", self.edit_formula), ("수식 삭제", self.delete_formula)):
             b = QtWidgets.QPushButton(text)
             b.clicked.connect(fn)
             hb.addWidget(b)
@@ -1032,8 +1230,9 @@ class MainWindow(QtWidgets.QMainWindow):
         g, self.multi_formula_table, hb, self.multi_msg = self._formula_box(
             "이미지 간 수식", MULTI_FORMULA_HINT)
         self.multi_formula_table.itemChanged.connect(self.on_multi_formula_changed)
-        for text, fn in (("수식 추가", self.add_multi_formula), ("수식 삭제", self.delete_multi_formula),
-                         ("사용 가능한 이름 보기", self.show_multi_variables)):
+        self.multi_formula_table.cellDoubleClicked.connect(lambda r, c: self.edit_multi_formula(r) if c == 1 else None)
+        for text, fn in (("수식 추가…", self.add_multi_formula), ("수식 편집…", self.edit_multi_formula),
+                         ("수식 삭제", self.delete_multi_formula)):
             b = QtWidgets.QPushButton(text)
             b.clicked.connect(fn)
             hb.addWidget(b)
@@ -1448,7 +1647,10 @@ class MainWindow(QtWidgets.QMainWindow):
         t.setRowCount(len(formulas))
         for i, f in enumerate(formulas):
             t.setItem(i, 0, QtWidgets.QTableWidgetItem(str(f.get("name", ""))))
-            t.setItem(i, 1, QtWidgets.QTableWidgetItem(str(f.get("expr", ""))))
+            it = QtWidgets.QTableWidgetItem(str(f.get("expr", "")))
+            it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+            it.setToolTip("더블클릭: 수식 편집")
+            t.setItem(i, 1, it)
             it = QtWidgets.QTableWidgetItem()
             it.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
             it.setCheckState(Qt.Checked if f.get("normalize", "1") == "1" else Qt.Unchecked)
@@ -1460,21 +1662,46 @@ class MainWindow(QtWidgets.QMainWindow):
         f = formulas[item.row()]
         if item.column() == 0:
             f["name"] = item.text()
-        elif item.column() == 1:
-            f["expr"] = item.text()
-        else:
+        elif item.column() == 2:
             f["normalize"] = "1" if item.checkState() == Qt.Checked else "0"
 
     def fill_formulas(self):
         self._fill_formula_table(self.formula_table, self.analysis.formulas)
 
+    def formula_terms(self):
+        a = self.analysis
+        ids = sorted({m.band_id for m in self.measurements})
+        return [
+            ("단백질 그룹 (레인별 값)", [(r.name, core._safe_name(r.name)) for r in a.rows]),
+            ("밴드 (값 하나)", [(i, i) for i in ids]),
+        ]
+
+    def _edit_formula_dialog(self, title, terms, variables, formula):
+        dlg = FormulaDialog(self, title, terms, variables, formula)
+        return dlg.result() if dlg.exec() == QtWidgets.QDialog.Accepted else None
+
     def add_formula(self):
         a = self.analysis
-        ctrl = next((core._safe_name(r.name) for r in a.rows if r.role == core.ROLE_CONTROL), "Control")
-        tgt = next((core._safe_name(r.name) for r in a.rows if r.role == core.ROLE_TARGET), "Target")
-        a.formulas.append({"name": f"수식{len(a.formulas) + 1}", "expr": f"{tgt} / {ctrl}", "normalize": "1"})
-        self.fill_formulas()
-        self.recompute_results()
+        f = self._edit_formula_dialog("수식 추가", self.formula_terms(), core.formula_variables(a, self.measurements),
+                                      {"name": f"수식{len(a.formulas) + 1}"})
+        if f:
+            a.formulas.append(f)
+            self.fill_formulas()
+            self.recompute_results()
+
+    def edit_formula(self, row=None):
+        a = self.analysis
+        if row is None or row is False:
+            rows = sorted({i.row() for i in self.formula_table.selectedIndexes()})
+            row = rows[0] if rows else None
+        if row is None or row >= len(a.formulas):
+            self.statusBar().showMessage("편집할 수식을 표에서 고르세요")
+            return
+        f = self._edit_formula_dialog("수식 편집", self.formula_terms(), core.formula_variables(a, self.measurements), a.formulas[row])
+        if f:
+            a.formulas[row] = f
+            self.fill_formulas()
+            self.recompute_results()
 
     def delete_formula(self):
         for r in sorted({i.row() for i in self.formula_table.selectedIndexes()}, reverse=True):
@@ -1485,21 +1712,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_formula_changed(self, item):
         self._formula_edit(self.analysis.formulas, item)
         self.recompute_results()
-
-    def show_variables(self):
-        a = self.analysis
-        ids = sorted(m.band_id for m in self.measurements)
-        lines = [
-            "단백질 그룹 (레인별 값):",
-            "  " + ", ".join(core._safe_name(r.name) for r in a.rows),
-            "\n밴드 (값 하나):",
-            "  " + ", ".join(ids[:40]) + (" …" if len(ids) > 40 else ""),
-            "\n연산: + - * / ** ( )   함수: sum, mean, max, min, log2, log10, sqrt",
-            "\n예시:\n  pErk / Erk                       (레인별 인산화 비율)\n  Kras / Vinculin\n"
-            "  Kras_DOX / Kras_DMSO           (밴드 두 개의 비)",
-            "\n다른 이미지와의 계산은 '5. 여러 이미지' 탭에서 합니다.",
-        ]
-        QtWidgets.QMessageBox.information(self, "수식에 쓸 수 있는 이름", "\n".join(lines))
 
     # ---------------------------------------------------------------- measurement / results (current image)
     def measure_doc(self, d: ImageDoc):
@@ -1770,12 +1982,41 @@ class MainWindow(QtWidgets.QMainWindow):
     def fill_multi_formulas(self):
         self._fill_formula_table(self.multi_formula_table, self.multi_formulas)
 
+    def multi_terms(self):
+        terms = []
+        for k, d in enumerate(self.docs):
+            if d.raw is None:
+                continue
+            key = self.doc_key(k)
+            terms.append((f"{key} 단백질 (레인별 값)", [(f"{key}: {r.name}", f"{key}.{core._safe_name(r.name)}") for r in d.analysis.rows]))
+            ids = sorted({m.band_id for m in d.measurements})
+            terms.append((f"{key} 밴드 (값 하나)", [(f"{key}: {i}", f"{key}.{i}") for i in ids]))
+        prot = [g["name"] for g in self.big_groups if g["kind"] == KIND_PROTEIN and g["name"] in self.multi_results]
+        terms.append(("단백질 큰 그룹 (이미지 평균)", [(n, core._safe_name(n)) for n in prot]))
+        return terms
+
     def add_multi_formula(self):
-        names = [core._safe_name(r.name) for r in self.analysis.rows]
-        expr = f"I2.{names[-1]} / I1.{names[-1]}" if names else "I2.Kras / I1.Kras"
-        self.multi_formulas.append({"name": f"이미지수식{len(self.multi_formulas) + 1}", "expr": expr, "normalize": "1"})
-        self.fill_multi_formulas()
-        self.recompute_multi()
+        _, _, variables, _ = self.compute_multi()
+        f = self._edit_formula_dialog("이미지 간 수식 추가", self.multi_terms(), variables,
+                                      {"name": f"이미지수식{len(self.multi_formulas) + 1}"})
+        if f:
+            self.multi_formulas.append(f)
+            self.fill_multi_formulas()
+            self.recompute_multi()
+
+    def edit_multi_formula(self, row=None):
+        if row is None or row is False:
+            rows = sorted({i.row() for i in self.multi_formula_table.selectedIndexes()})
+            row = rows[0] if rows else None
+        if row is None or row >= len(self.multi_formulas):
+            self.statusBar().showMessage("편집할 수식을 표에서 고르세요")
+            return
+        _, _, variables, _ = self.compute_multi()
+        f = self._edit_formula_dialog("이미지 간 수식 편집", self.multi_terms(), variables, self.multi_formulas[row])
+        if f:
+            self.multi_formulas[row] = f
+            self.fill_multi_formulas()
+            self.recompute_multi()
 
     def delete_multi_formula(self):
         for r in sorted({i.row() for i in self.multi_formula_table.selectedIndexes()}, reverse=True):
@@ -1899,21 +2140,6 @@ class MainWindow(QtWidgets.QMainWindow):
         ylabel = "상대 intensity" if self.multi_ref is not None else "정량값"
         self.multi_plot.plot_bars(self.multi_keys, series, ylabel, self.multi_points.isChecked())
 
-    def show_multi_variables(self):
-        lines = []
-        for k, d in enumerate(self.docs):
-            if d.raw is None:
-                continue
-            lines.append(f"■ {self.doc_key(k)}: {d.name}")
-            lines.append("  " + ", ".join(f"{self.doc_key(k)}.{core._safe_name(r.name)}" for r in d.analysis.rows))
-        prot = [core._safe_name(g["name"]) for g in self.big_groups if g["kind"] == KIND_PROTEIN]
-        if prot:
-            lines.append("\n단백질 큰 그룹 (이미지 평균): " + ", ".join(prot))
-        lines.append("\n밴드 하나: I2.Kras_DOX 처럼 이미지 번호 뒤에 밴드 ID")
-        lines.append("레인은 레인 그룹 이름(또는 레인 큰 그룹)으로 이미지 사이에 맞춰집니다.")
-        lines.append("\n예시:\n  I2.Kras / I1.Kras\n  (I2.pErk / I2.Vinculin) / (I1.Erk / I1.Vinculin)")
-        QtWidgets.QMessageBox.information(self, "이미지 간 수식에 쓸 수 있는 이름", "\n".join(lines))
-
     # ---------------------------------------------------------------- save / export
     def project_dict(self):
         return {
@@ -1935,6 +2161,67 @@ class MainWindow(QtWidgets.QMainWindow):
             "multi_formulas": self.multi_formulas,
             "multi_reference": self.multi_ref,
         }
+
+    ROI_APP = "Blot Profiler ROI"
+
+    def save_roi(self):
+        a = self.analysis
+        if not a.bands:
+            self.statusBar().showMessage("저장할 밴드 ROI가 없습니다")
+            return
+        base = os.path.splitext(self.image_path)[0] + "_roi.json" if self.image_path else "roi.json"
+        p, _ = QtWidgets.QFileDialog.getSaveFileName(self, "밴드 ROI·그룹 저장", base, "ROI (*.json)")
+        if not p:
+            return
+        d = a.to_dict()
+        d.pop("formulas", None)
+        d = {"app": self.ROI_APP, "version": __version__,
+             "image_size": list(self.raw.shape[::-1]) if self.raw is not None else None, **d}
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+        self.statusBar().showMessage(f"ROI·그룹 저장: {p} (단백질 {len(a.rows)}개, 레인 {a.n_lanes}개, 밴드 {len(a.bands)}개)")
+
+    def load_roi(self, p=None):
+        if self.raw is None:
+            self.statusBar().showMessage("먼저 ROI를 적용할 이미지를 여세요")
+            return
+        if not p:
+            p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "밴드 ROI·그룹 불러오기", "", "ROI / 분석 (*.json)")
+        if not p:
+            return
+        try:
+            with open(p, encoding="utf-8") as f:
+                d = json.load(f)
+            size = d.get("image_size")
+            if "images" in d:  # a full analysis file: take its first image
+                im = d["images"][0] if d["images"] else {}
+                d = im.get("analysis") or {}
+                size = None
+            elif "analysis" in d:  # analysis file format 1
+                d = d["analysis"]
+            if not d.get("bands") or not d.get("rows"):
+                raise ValueError("밴드 ROI가 들어 있지 않은 파일입니다")
+            a = core.Analysis.from_dict(d)
+            a.formulas = list(self.analysis.formulas)
+            H, W = self.raw.shape
+            if size and tuple(size) != (W, H):
+                r = QtWidgets.QMessageBox.question(
+                    self, "이미지 크기가 다릅니다",
+                    f"ROI를 저장한 이미지({size[0]}×{size[1]})와 현재 이미지({W}×{H})의 크기가 다릅니다.\n"
+                    "현재 이미지 크기에 맞춰 박스 위치와 크기를 비율대로 조정할까요?\n(아니요: 픽셀 좌표 그대로 적용)")
+                if r == QtWidgets.QMessageBox.Yes:
+                    sx, sy = W / size[0], H / size[1]
+                    for b in a.bands:
+                        b.cx *= sx
+                        b.cy *= sy
+                    for row in a.rows:
+                        row.width = max(2, int(round(row.width * sx)))
+                        row.height = max(2, int(round(row.height * sy)))
+            self.set_analysis(a)
+            self.statusBar().showMessage(f"ROI·그룹을 적용했습니다: {os.path.basename(p)} (밴드 {len(a.bands)}개)")
+        except Exception as e:
+            traceback.print_exc()
+            QtWidgets.QMessageBox.critical(self, "불러오기 실패", str(e))
 
     def save_project(self):
         base = os.path.splitext(self.image_path)[0] + "_analysis.json" if self.image_path else "analysis.json"
@@ -2125,8 +2412,8 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(self, "사용법", HELP_TEXT)
 
 
-FORMULA_HINT = "예: pErk / Erk  ·  Kras / Vinculin  ·  Kras_DOX / Kras_DMSO (밴드 ID)"
-MULTI_FORMULA_HINT = "예: I2.Kras / I1.Kras  ·  (I2.pErk / I2.Vinculin) / (I1.Erk / I1.Vinculin)  ·  큰 그룹 이름"
+FORMULA_HINT = "'수식 추가…'에서 단백질·밴드를 목록에서 고르고 + − × ÷ ( ) 로 잇습니다. 예: pErk / Erk · Kras_DOX / Kras_DMSO"
+MULTI_FORMULA_HINT = "'수식 추가…'에서 이미지별 단백질·밴드·큰 그룹을 목록에서 고릅니다. 예: I2.Kras / I1.Kras"
 
 HELP_TEXT = """Blot Profiler 사용 순서
 
@@ -2140,15 +2427,18 @@ HELP_TEXT = """Blot Profiler 사용 순서
    · 밴드 ID = '단백질_레인' (이름이 겹치면 _2, _3 자동)
    · 한 단백질 그룹의 박스는 같은 크기. 우클릭 → '박스 크기 조절 모드'에서 가장자리를 드래그 (Esc 종료).
 
+   · 밴드 ROI·그룹 저장/불러오기(검출 탭, 파일 메뉴): 박스와 그룹만 따로 저장해 다른 이미지에 적용합니다.
+
 3. 단백질 / 레인 탭: 단백질의 역할(측정 Target / Control / 제외)과 박스 크기를 정합니다.
 
 4. 정량 / 그래프 탭 (현재 이미지): Target ÷ Control 을 레인별로 계산하고 기준 레인을 1로 맞춥니다.
-   수식으로 단백질 그룹과 밴드를 더하고 빼고 곱하고 나눌 수 있습니다.
+   수식 추가…: 단백질 그룹·밴드는 목록에서 골라 넣고, + − × ÷ ( ) 와 숫자만 직접 입력합니다.
+   수식을 더블클릭하면 다시 편집합니다.
 
 5. 여러 이미지 탭: 이미지들의 그룹을 체크해 큰 그룹을 만듭니다.
    · 레인 큰 그룹: 이미지마다 다른 레인 이름을 하나로 맞춤
    · 단백질 큰 그룹: 여러 블롯의 값을 레인별 평균 ± SD
-   · 이미지 간 수식: I2.Kras / I1.Kras
+   · 이미지 간 수식: 수식 창에서 이미지별 항목을 골라 만듭니다 (예: I2.Kras / I1.Kras)
 
 정량값(Net) = 박스 안 픽셀 intensity 합 − 배경.
 16-bit TIF 원본을 쓰면 가장 정확합니다 (스크린샷/JPEG는 포화와 압축 때문에 부정확할 수 있습니다).
