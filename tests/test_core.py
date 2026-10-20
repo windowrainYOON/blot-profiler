@@ -95,3 +95,20 @@ def test_add_band_and_roundtrip():
     assert len(a.rows) == 2
     b = core.Analysis.from_dict(a.to_dict())
     assert len(b.bands) == len(a.bands) and b.rows[1].width == 20
+
+
+def test_cross_image_formulas():
+    v1 = {"Vinculin": np.array([1.0, 2.0]), "G_IgG": np.array([4.0, 6.0])}
+    v2 = {"Vinculin": np.array([2.0, 2.0]), "Kras": np.array([3.0, 5.0])}
+    v = core.project_variables([v1, v2], ["", "blot B"], base=0)
+    np.testing.assert_allclose(core.evaluate("I2.Kras / Vinculin", v), [3.0, 2.5])
+    np.testing.assert_allclose(core.evaluate("blot_B.Kras / I1.G_IgG", v), [0.75, 5 / 6])
+    with pytest.raises(core.FormulaError):
+        core.evaluate("I2 / Vinculin", v)
+    with pytest.raises(core.FormulaError):
+        core.evaluate("I3.Kras", v)
+    with pytest.raises(core.FormulaError):
+        core.evaluate("I1.Vinculin + np.array([1,2,3])", v)
+    v3 = core.project_variables([v1, {"X": np.array([1.0, 2.0, 3.0])}], base=0)
+    with pytest.raises(core.FormulaError):
+        core.evaluate("Vinculin + I2.X", v3)

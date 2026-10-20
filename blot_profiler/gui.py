@@ -51,10 +51,14 @@ def row_color(i: int) -> QtGui.QColor:
     return QtGui.QColor(ROW_COLORS[i % len(ROW_COLORS)])
 
 
-def to_qimage(img: np.ndarray, lo: float, hi: float) -> QtGui.QImage:
+def to_qimage(img: np.ndarray, lo: float, hi: float, invert: bool = False) -> QtGui.QImage:
+    """8-bit preview; with ``invert`` values >= hi are black and <= lo white."""
     if hi <= lo:
         hi = lo + 1
-    a = np.clip((img - lo) / (hi - lo) * 255.0, 0, 255).astype(np.uint8)
+    a = np.clip((img - lo) / (hi - lo) * 255.0, 0, 255)
+    if invert:
+        a = 255.0 - a
+    a = a.astype(np.uint8)
     a = np.ascontiguousarray(a)
     h, w = a.shape
     q = QtGui.QImage(a.data, w, h, w, QtGui.QImage.Format_Grayscale8)
@@ -123,6 +127,100 @@ class BandItem(QtWidgets.QGraphicsRectItem):
             self.view.band_moved()
         return super().itemChange(change, value)
 
+    # ---- resize mode: drag an edge/corner to change the size of the whole row
+    _CURSORS = {
+        "l": Qt.SizeHorCursor, "r": Qt.SizeHorCursor, "t": Qt.SizeVerCursor, "b": Qt.SizeVerCursor,
+        "lt": Qt.SizeFDiagCursor, "rb": Qt.SizeFDiagCursor, "rt": Qt.SizeBDiagCursor, "lb": Qt.SizeBDiagCursor,
+    }
+    _resize = None
+
+    def _edges_at(self, pos: QtCore.QPointF) -> str:
+        if not self.view.resize_mode:
+            return ""
+        r = self.rect()
+        scale = self.view.transform().m11() or 1.0
+        mx = min(7.0 / scale, r.width() / 3)
+        my = min(7.0 / scale, r.height() / 3)
+        e = ""
+        if pos.x() <= mx:
+            e += "l"
+        elif pos.x() >= r.width() - mx:
+            e += "r"
+        if pos.y() <= my:
+            e += "t"
+        elif pos.y() >= r.height() - my:
+            e += "b"
+        return e
+
+    def hoverMoveEvent(self, e):
+        edges = self._edges_at(e.pos())
+        if edges:
+            self.setCursor(self._CURSORS[edges])
+        else:
+            self.unsetCursor()
+        super().hoverMoveEvent(e)
+
+    def hoverLeaveEvent(self, e):
+        self.unsetCursor()
+        super().hoverLeaveEvent(e)
+
+    def mousePressEvent(self, e):
+        edges = self._edges_at(e.pos()) if e.button() == Qt.LeftButton else ""
+        if not edges:
+            super().mousePressEvent(e)
+            return
+        a = self.view.analysis
+        rows = self.view.linked_rows(self.band)
+        self._resize = {
+            "edges": edges,
+            "rows": {ri: (a.rows[ri].width, a.rows[ri].height) for ri in rows},
+            "centres": {id(b): (b.cx, b.cy) for b in a.bands if b.row in rows},
+            "box": self.band.box(a.rows),
+        }
+        e.accept()
+
+    def mouseMoveEvent(self, e):
+        if not self._resize:
+            super().mouseMoveEvent(e)
+            return
+        st = self._resize
+        a = self.view.analysis
+        x, y, w0, h0 = st["box"]
+        p = e.scenePos()
+        dw = dh = 0
+        if "r" in st["edges"]:
+            dw = round(p.x() - (x + w0))
+        elif "l" in st["edges"]:
+            dw = round(x - p.x())
+        if "b" in st["edges"]:
+            dh = round(p.y() - (y + h0))
+        elif "t" in st["edges"]:
+            dh = round(y - p.y())
+        # the opposite edge stays put: shift the centres by half the size change
+        sx = 1 if "r" in st["edges"] else -1
+        sy = 1 if "b" in st["edges"] else -1
+        for ri, (w, h) in st["rows"].items():
+            a.rows[ri].width = max(2, w + dw)
+            a.rows[ri].height = max(2, h + dh)
+        for b in a.bands:
+            c = st["centres"].get(id(b))
+            if c is None:
+                continue
+            w, h = st["rows"][b.row]
+            b.cx = c[0] + sx * (a.rows[b.row].width - w) / 2
+            b.cy = c[1] + sy * (a.rows[b.row].height - h) / 2
+        self.view.refresh_rows(set(st["rows"]))
+        self.view.band_moved()
+        e.accept()
+
+    def mouseReleaseEvent(self, e):
+        if self._resize:
+            self._resize = None
+            self.view.band_moved()
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
     def paint(self, painter, option, widget=None):
         # draw selection as thicker outline instead of Qt's dotted rect
         opt = QtWidgets.QStyleOptionGraphicsItem(option)
@@ -130,11 +228,22 @@ class BandItem(QtWidgets.QGraphicsRectItem):
         opt.state &= ~QtWidgets.QStyle.State_Selected
         super().paint(painter, opt, widget)
         if selected:
-            pen = QtGui.QPen(QtGui.QColor("#ffcc00"), 3)
+            pen = QtGui.QPen(QtGui.QColor("#1e88ff"), 3)
             pen.setCosmetic(True)
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
             painter.drawRect(self.rect())
+        if self.view.resize_mode:
+            # handles at the corners and edge midpoints (constant size on screen)
+            r = self.rect()
+            s = 3.0 / (painter.worldTransform().m11() or 1.0)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(self.pen().color())
+            for hx in (r.left(), r.center().x(), r.right()):
+                for hy in (r.top(), r.center().y(), r.bottom()):
+                    if hx == r.center().x() and hy == r.center().y():
+                        continue
+                    painter.drawRect(QtCore.QRectF(hx - s, hy - s, 2 * s, 2 * s))
 
 
 class BlotView(QtWidgets.QGraphicsView):
@@ -142,6 +251,7 @@ class BlotView(QtWidgets.QGraphicsView):
     selectionChangedBands = QtCore.Signal()
     contextRequested = QtCore.Signal(QtCore.QPoint, object)  # global pos, BandItem | None
     addRequested = QtCore.Signal(float, float)
+    resizeModeExited = QtCore.Signal()  # Esc pressed in resize mode
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -149,12 +259,13 @@ class BlotView(QtWidgets.QGraphicsView):
         self.setRenderHints(QtGui.QPainter.Antialiasing | QtGui.QPainter.SmoothPixmapTransform)
         self.setDragMode(QtWidgets.QGraphicsView.RubberBandDrag)
         self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
-        self.setBackgroundBrush(QtGui.QColor("#2b2b2b"))
+        self.setBackgroundBrush(QtGui.QColor("#d9d9d9"))
         self.pix_item: Optional[QtWidgets.QGraphicsPixmapItem] = None
         self.items_: List[BandItem] = []
         self.analysis = core.Analysis()
         self.highlight_group: Optional[str] = None
         self.show_labels = True
+        self.resize_mode = False
         self._move_timer = QtCore.QTimer(self)
         self._move_timer.setSingleShot(True)
         self._move_timer.setInterval(150)
@@ -199,6 +310,28 @@ class BlotView(QtWidgets.QGraphicsView):
         for it in self.items_:
             it.sync_from_band()
 
+    def refresh_rows(self, rows):
+        for it in self.items_:
+            if it.band.row in rows:
+                it.sync_from_band()
+
+    def set_resize_mode(self, on: bool):
+        self.resize_mode = bool(on)
+        for it in self.items_:
+            it.unsetCursor()
+            it.update()
+
+    def linked_rows(self, band: core.Band) -> set:
+        """Rows resized together with ``band``'s row: its own row, rows of bands that
+        share a user group with it, and rows of the other selected bands."""
+        rows = {band.row}
+        if band.groups:
+            rows |= {b.row for b in self.analysis.bands if set(b.groups) & set(band.groups)}
+        sel = self.selected_bands()
+        if any(b is band for b in sel):
+            rows |= {b.row for b in sel}
+        return rows
+
     def band_moved(self):
         self._move_timer.start()
 
@@ -239,6 +372,9 @@ class BlotView(QtWidgets.QGraphicsView):
         self.contextRequested.emit(e.globalPos(), item if isinstance(item, BandItem) else None)
 
     def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape and self.resize_mode:
+            self.resizeModeExited.emit()
+            return
         sel = [i for i in self.items_ if i.isSelected()]
         step = 5 if e.modifiers() & Qt.ShiftModifier else 1
         moves = {Qt.Key_Left: (-step, 0), Qt.Key_Right: (step, 0), Qt.Key_Up: (0, -step), Qt.Key_Down: (0, step)}
@@ -258,15 +394,31 @@ class BlotView(QtWidgets.QGraphicsView):
 # --------------------------------------------------------------------------
 
 class PlotCanvas(QtWidgets.QWidget):
-    def __init__(self, parent=None):
+    """Matplotlib canvas. With ``aspect`` (height / width) the canvas fills the
+    available width and its height follows from the width."""
+
+    def __init__(self, parent=None, aspect: Optional[float] = None):
         super().__init__(parent)
-        self.fig = Figure(figsize=(5, 3.5), tight_layout=True)
+        self.aspect = aspect
+        self.fig = Figure(figsize=(4, 3) if aspect else (5, 3.5), tight_layout=True)
         self.canvas = FigureCanvasQTAgg(self.fig)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.toolbar)
         lay.addWidget(self.canvas)
+        if aspect:
+            self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            self.canvas.setMinimumSize(1, 1)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self.aspect:
+            h = int(round(self.width() * self.aspect))
+            if self.canvas.height() != h:
+                self.canvas.setFixedHeight(h)
+                th = self.toolbar.sizeHint().height() if self.toolbar.isVisible() else 0
+                self.setFixedHeight(h + th)
 
     def plot(self, series: Dict[str, np.ndarray], labels: List[str], conditions: List[str], by_condition: bool,
              ylabel: str, show_points: bool = True, title: str = ""):
@@ -335,11 +487,10 @@ def _spin(lo, hi, val, step=1, decimals=None, suffix=""):
     return w
 
 
-class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Blot Profiler")
-        self.resize(1400, 860)
+class ImageDoc:
+    """One opened blot image with its own boxes, settings and measurements."""
+
+    def __init__(self, invert: int = 0, bg: Optional[core.BackgroundSettings] = None):
         self.image_path: Optional[str] = None
         self.raw: Optional[np.ndarray] = None
         self.signal: Optional[np.ndarray] = None
@@ -347,7 +498,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self._corr_key = None
         self.analysis = core.Analysis()
         self.measurements: List[core.Measurement] = []
+        self.invert = invert  # index of the "밴드 색" combo
+        self.bg = core.BackgroundSettings(**vars(bg)) if bg else core.BackgroundSettings()
+        self.ref_lane: Optional[int] = 0
+        self.alias = ""
+
+    @property
+    def name(self) -> str:
+        if self.alias:
+            return self.alias
+        return os.path.basename(self.image_path) if self.image_path else "(빈 이미지)"
+
+
+def _doc_attr(name):
+    return property(lambda self: getattr(self.doc, name), lambda self, v: setattr(self.doc, name, v))
+
+
+class MainWindow(QtWidgets.QMainWindow):
+    # attributes of the image shown in the view
+    image_path = _doc_attr("image_path")
+    raw = _doc_attr("raw")
+    signal = _doc_attr("signal")
+    corrected = _doc_attr("corrected")
+    _corr_key = _doc_attr("_corr_key")
+    analysis = _doc_attr("analysis")
+    measurements = _doc_attr("measurements")
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Blot Profiler")
+        self.resize(1400, 900)
+        self.docs: List[ImageDoc] = [ImageDoc()]
+        self.cur = 0
+        self.formulas: List[Dict[str, object]] = []  # {name, expr, normalize, image}
         self.results: Dict[str, np.ndarray] = {}
+        self.result_doc: Dict[str, ImageDoc] = {}
         self._updating = False
 
         self.view = BlotView()
@@ -355,6 +540,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.selectionChangedBands.connect(self.on_view_selection)
         self.view.contextRequested.connect(self.show_band_menu)
         self.view.addRequested.connect(self.add_band_at)
+        self.view.resizeModeExited.connect(lambda: self.resize_mode.setChecked(False))
 
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self._build_detect_tab(), "1. 검출")
@@ -366,6 +552,22 @@ class MainWindow(QtWidgets.QMainWindow):
         left = QtWidgets.QWidget()
         ll = QtWidgets.QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
+        # one tab per opened image
+        tb = QtWidgets.QHBoxLayout()
+        self.doc_tabs = QtWidgets.QTabBar()
+        self.doc_tabs.setTabsClosable(True)
+        self.doc_tabs.setExpanding(False)
+        self.doc_tabs.setDocumentMode(True)
+        self.doc_tabs.setToolTip("열린 이미지. 더블클릭: 별칭(수식에서 쓰는 이름) 변경")
+        self.doc_tabs.currentChanged.connect(self.switch_doc)
+        self.doc_tabs.tabCloseRequested.connect(self.close_doc)
+        self.doc_tabs.tabBarDoubleClicked.connect(self.rename_doc)
+        tb.addWidget(self.doc_tabs, 1)
+        add_btn = QtWidgets.QPushButton("+ 이미지 추가")
+        add_btn.setToolTip("TIF 이미지를 더 열어 함께 정량합니다 (여러 개 선택 가능)")
+        add_btn.clicked.connect(self.open_image)
+        tb.addWidget(add_btn)
+        ll.addLayout(tb)
         ll.addWidget(self.view, 1)
         self.contrast_lo = QtWidgets.QSlider(Qt.Horizontal)
         self.contrast_hi = QtWidgets.QSlider(Qt.Horizontal)
@@ -378,15 +580,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_labels = QtWidgets.QCheckBox("밴드 ID 표시")
         self.show_labels.setChecked(True)
         self.show_labels.toggled.connect(self.toggle_labels)
+        self.resize_mode = QtWidgets.QCheckBox("박스 크기 조절 모드")
+        self.resize_mode.setToolTip(
+            "켜면 박스 가장자리·모서리를 드래그해 크기를 바꿉니다. 같은 행(과 같은 그룹·선택된 밴드의 행)이 함께 바뀝니다.\n"
+            "우클릭 메뉴에서도 켜고 끌 수 있고, Esc로 끝냅니다."
+        )
+        self.resize_mode.toggled.connect(self.on_resize_mode)
         cl = QtWidgets.QHBoxLayout()
         cl.addWidget(QtWidgets.QLabel("표시 대비"))
         cl.addWidget(self.contrast_lo)
         cl.addWidget(self.contrast_hi)
         cl.addWidget(self.show_corrected)
         cl.addWidget(self.show_labels)
+        cl.addWidget(self.resize_mode)
         ll.addLayout(cl)
         hint = QtWidgets.QLabel(
-            "더블클릭: 밴드 추가 · 드래그: 이동/범위 선택 · 방향키: 미세 이동 · Delete: 삭제 · 우클릭: 그룹/역할 메뉴 · ⌘/Ctrl+휠: 확대"
+            "더블클릭: 밴드 추가 · 드래그: 이동/범위 선택 · 방향키: 미세 이동 · Delete: 삭제 · 우클릭: 그룹/역할/크기 조절 모드 · ⌘/Ctrl+휠: 확대"
         )
         hint.setStyleSheet("color: #888; font-size: 11px;")
         hint.setWordWrap(True)
@@ -406,6 +615,104 @@ class MainWindow(QtWidgets.QMainWindow):
         del_sc.activated.connect(self.delete_selected)
         bs_sc = QtGui.QShortcut(QtGui.QKeySequence(Qt.Key_Backspace), self.view)
         bs_sc.activated.connect(self.delete_selected)
+        self.refresh_doc_tabs()
+
+    # ---------------------------------------------------------------- images (documents)
+    @property
+    def doc(self) -> ImageDoc:
+        return self.docs[self.cur]
+
+    def doc_key(self, k: int) -> str:
+        return f"I{k + 1}"
+
+    def refresh_doc_tabs(self):
+        t = self.doc_tabs
+        t.blockSignals(True)
+        while t.count():
+            t.removeTab(0)
+        for k, d in enumerate(self.docs):
+            t.addTab(f"{self.doc_key(k)}: {d.name}")
+            t.setTabToolTip(k, d.image_path or "")
+        t.setCurrentIndex(self.cur)
+        t.blockSignals(False)
+
+    def switch_doc(self, k: int):
+        if k < 0 or k >= len(self.docs):
+            return
+        self.cur = k
+        d = self.doc
+        for w in (self.invert_combo, self.bg_combo, self.bg_radius, self.bg_border):
+            w.blockSignals(True)
+        self.invert_combo.setCurrentIndex(d.invert)
+        self.bg_combo.setCurrentIndex(max(0, self.bg_combo.findData(d.bg.method)))
+        self.bg_radius.setValue(d.bg.radius)
+        self.bg_border.setValue(d.bg.border)
+        for w in (self.invert_combo, self.bg_combo, self.bg_radius, self.bg_border):
+            w.blockSignals(False)
+        self.on_bg_changed(recompute=False)
+        if d.raw is not None:
+            self.file_label.setText(f"{os.path.basename(d.image_path)}  ({d.raw.shape[1]}×{d.raw.shape[0]}, max {d.raw.max():.0f})")
+            self.setWindowTitle(f"Blot Profiler – {os.path.basename(d.image_path)}")
+            self.update_display(reset_zoom=True)
+        else:
+            self.file_label.setText("-")
+            self.setWindowTitle("Blot Profiler")
+            if self.view.pix_item is not None:
+                self.view.set_image(QtGui.QImage(), reset_zoom=False)
+        self.view.highlight_group = None
+        self.set_analysis(d.analysis)
+        if self.doc_tabs.currentIndex() != k:
+            self.doc_tabs.blockSignals(True)
+            self.doc_tabs.setCurrentIndex(k)
+            self.doc_tabs.blockSignals(False)
+
+    def new_doc(self) -> ImageDoc:
+        """Reuse the current tab if it is empty, otherwise add a new one."""
+        if self.doc.raw is None:
+            return self.doc
+        d = ImageDoc(invert=self.doc.invert, bg=self.doc.bg)
+        self.docs.append(d)
+        self.cur = len(self.docs) - 1
+        self.refresh_doc_tabs()
+        return d
+
+    def close_doc(self, k: int):
+        d = self.docs[k]
+        if d.raw is not None and d.analysis.bands:
+            r = QtWidgets.QMessageBox.question(self, "이미지 닫기", f"'{d.name}' 이미지를 닫을까요? (저장하지 않은 박스는 사라집니다)")
+            if r != QtWidgets.QMessageBox.Yes:
+                return
+        del self.docs[k]
+        for f in self.formulas:
+            img = int(f.get("image", 0))
+            f["image"] = 0 if img == k else (img - 1 if img > k else img)
+        if not self.docs:
+            self.docs.append(ImageDoc())
+        self.cur = min(self.cur if self.cur < k else max(0, self.cur - 1), len(self.docs) - 1)
+        self.refresh_doc_tabs()
+        self.switch_doc(self.cur)
+        self.fill_formulas()
+
+    def rename_doc(self, k: int):
+        if k < 0:
+            return
+        d = self.docs[k]
+        name, ok = QtWidgets.QInputDialog.getText(
+            self, "이미지 별칭", f"{self.doc_key(k)}의 별칭 (수식에서 '별칭.Vinculin'처럼 사용, 비우면 파일 이름 표시):", text=d.alias
+        )
+        if ok:
+            d.alias = name.strip()
+            self.refresh_doc_tabs()
+            self.fill_formulas()
+            self.recompute_results()
+
+    def on_resize_mode(self, on):
+        self.view.set_resize_mode(on)
+        self.view.setDragMode(QtWidgets.QGraphicsView.RubberBandDrag)
+        self.statusBar().showMessage(
+            "박스 크기 조절 모드: 박스 가장자리/모서리를 드래그하세요 (같은 행·그룹이 함께 바뀜). Esc 또는 우클릭 메뉴로 종료"
+            if on else "박스 크기 조절 모드를 끝냈습니다"
+        )
 
     # ---------------------------------------------------------------- menus
     def _build_menu(self):
@@ -596,7 +903,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------------------------------------------------------------- tab 4
     def _build_results_tab(self):
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         w = QtWidgets.QWidget()
+        scroll.setWidget(w)
         lay = QtWidgets.QVBoxLayout(w)
 
         g = QtWidgets.QGroupBox("Internal control 정규화")
@@ -606,17 +918,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_norm.toggled.connect(self.recompute_results)
         f.addRow(self.auto_norm)
         self.ref_lane = QtWidgets.QComboBox()
-        self.ref_lane.currentIndexChanged.connect(self.recompute_results)
-        f.addRow("기준 레인 (=1.0)", self.ref_lane)
+        self.ref_lane.setToolTip("이미지마다 따로 지정합니다 (위쪽 이미지 탭에서 선택한 이미지)")
+        self.ref_lane.currentIndexChanged.connect(self.on_ref_lane)
+        self.ref_lane_label = QtWidgets.QLabel("기준 레인 (=1.0)")
+        f.addRow(self.ref_lane_label, self.ref_lane)
         lay.addWidget(g)
 
-        g = QtWidgets.QGroupBox("사용자 수식 (그룹 / 행 / 밴드 간 더하기·빼기·곱하기·나누기)")
+        g = QtWidgets.QGroupBox("사용자 수식 (그룹 / 행 / 밴드 / 이미지 간 더하기·빼기·곱하기·나누기)")
         gl = QtWidgets.QVBoxLayout(g)
-        self.formula_table = QtWidgets.QTableWidget(0, 3)
-        self.formula_table.setHorizontalHeaderLabels(["이름", "수식", "기준 레인 정규화"])
+        self.formula_table = QtWidgets.QTableWidget(0, 4)
+        self.formula_table.setHorizontalHeaderLabels(["이름", "수식", "기본 이미지", "기준 레인 정규화"])
         self.formula_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
         self.formula_table.verticalHeader().setVisible(False)
-        self.formula_table.setMaximumHeight(140)
+        self.formula_table.setMinimumHeight(110)
+        self.formula_table.setMaximumHeight(160)
         self.formula_table.itemChanged.connect(self.on_formula_changed)
         gl.addWidget(self.formula_table)
         hb = QtWidgets.QHBoxLayout()
@@ -631,7 +946,7 @@ class MainWindow(QtWidgets.QMainWindow):
         hb.addWidget(b)
         hb.addStretch(1)
         gl.addLayout(hb)
-        self.formula_msg = QtWidgets.QLabel("예: (pErk_upper + pErk_lower) / Vinculin  ·  G_IgG / Vinculin  ·  R2L3 - R2L1")
+        self.formula_msg = QtWidgets.QLabel(FORMULA_HINT)
         self.formula_msg.setStyleSheet("color: #888;")
         self.formula_msg.setWordWrap(True)
         gl.addWidget(self.formula_msg)
@@ -654,11 +969,12 @@ class MainWindow(QtWidgets.QMainWindow):
         hb.addWidget(self.series_list, 1)
         lay.addLayout(hb)
 
-        self.plot = PlotCanvas()
-        lay.addWidget(self.plot, 3)
+        self.plot = PlotCanvas(aspect=0.75)  # 4:3, height follows the width
+        lay.addWidget(self.plot)
         self.results_table = QtWidgets.QTableWidget(0, 0)
         self.results_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        lay.addWidget(self.results_table, 2)
+        self.results_table.setMinimumHeight(220)
+        lay.addWidget(self.results_table, 1)
         hb = QtWidgets.QHBoxLayout()
         b = QtWidgets.QPushButton("CSV 내보내기…")
         b.clicked.connect(self.export_csv)
@@ -668,7 +984,7 @@ class MainWindow(QtWidgets.QMainWindow):
         hb.addWidget(b)
         hb.addStretch(1)
         lay.addLayout(hb)
-        return w
+        return scroll
 
     # ---------------------------------------------------------------- image
     def dragEnterEvent(self, e):
@@ -676,13 +992,9 @@ class MainWindow(QtWidgets.QMainWindow):
             e.acceptProposedAction()
 
     def dropEvent(self, e):
-        urls = e.mimeData().urls()
-        if urls:
-            p = urls[0].toLocalFile()
-            if p.lower().endswith(".json"):
-                self.load_project(p)
-            else:
-                self.load_image(p)
+        paths = [u.toLocalFile() for u in e.mimeData().urls() if u.toLocalFile()]
+        for p in paths:
+            self.open_path(p)
 
     def open_path(self, p: str):
         if p.lower().endswith(".json"):
@@ -691,51 +1003,58 @@ class MainWindow(QtWidgets.QMainWindow):
             self.load_image(p)
 
     def open_image(self):
-        p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "TIF 파일 열기", "", "Images (*.tif *.tiff *.png *.jpg *.jpeg);;All files (*)")
-        if p:
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "TIF 파일 열기 (여러 개 선택 가능)", "", "Images (*.tif *.tiff *.png *.jpg *.jpeg);;All files (*)")
+        for p in paths:
             self.load_image(p)
 
-    def load_image(self, path: str, detect=True):
+    def load_image(self, path: str, detect=True, doc: Optional[ImageDoc] = None):
+        """Open ``path`` in ``doc`` (default: a new tab, or the current one if it is empty)."""
         try:
-            self.raw = core.load_image(path)
+            raw = core.load_image(path)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "열기 실패", f"이미지를 열 수 없습니다:\n{e}")
             return
-        self.image_path = path
-        self.file_label.setText(f"{os.path.basename(path)}  ({self.raw.shape[1]}×{self.raw.shape[0]}, max {self.raw.max():.0f})")
-        self.setWindowTitle(f"Blot Profiler – {os.path.basename(path)}")
-        self._make_signal()
-        self.update_display(reset_zoom=True)
+        d = doc or self.new_doc()
+        d.raw = raw
+        d.image_path = path
+        d.analysis = core.Analysis()
+        d.measurements = []
+        self._make_signal(d)
+        self.refresh_doc_tabs()
+        self.switch_doc(self.docs.index(d))
         if detect:
             self.detect()
 
-    def _invert_choice(self):
-        return {0: None, 1: True, 2: False}[self.invert_combo.currentIndex()]
+    def _invert_choice(self, doc: Optional[ImageDoc] = None):
+        return {0: None, 1: True, 2: False}[(doc or self.doc).invert]
 
-    def _make_signal(self):
-        if self.raw is None:
+    def _make_signal(self, doc: Optional[ImageDoc] = None):
+        d = doc or self.doc
+        if d.raw is None:
             return
-        self.signal = core.to_signal(self.raw, self._invert_choice())
-        self._corr_key = None
+        d.signal = core.to_signal(d.raw, self._invert_choice(d))
+        d._corr_key = None
 
-    def bg_settings(self) -> core.BackgroundSettings:
-        return core.BackgroundSettings(method=self.bg_combo.currentData(), radius=self.bg_radius.value(), border=self.bg_border.value())
+    def bg_settings(self, doc: Optional[ImageDoc] = None) -> core.BackgroundSettings:
+        return (doc or self.doc).bg
 
-    def get_corrected(self) -> Optional[np.ndarray]:
-        if self.signal is None:
+    def get_corrected(self, doc: Optional[ImageDoc] = None) -> Optional[np.ndarray]:
+        d = doc or self.doc
+        if d.signal is None:
             return None
-        bg = self.bg_settings()
+        bg = d.bg
         key = (bg.method == "rolling_ball", bg.radius if bg.method == "rolling_ball" else None)
-        if key != self._corr_key:
+        if key != d._corr_key:
             QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
-                self.corrected = core.corrected_signal(self.signal, bg)
+                d.corrected = core.corrected_signal(d.signal, bg)
             finally:
                 QtWidgets.QApplication.restoreOverrideCursor()
-            self._corr_key = key
-        return self.corrected
+            d._corr_key = key
+        return d.corrected
 
     def on_image_settings(self):
+        self.doc.invert = self.invert_combo.currentIndex()
         self._make_signal()
         self.update_display(reset_zoom=False)
         self.remeasure()
@@ -744,26 +1063,24 @@ class MainWindow(QtWidgets.QMainWindow):
         m = self.bg_combo.currentData()
         self.bg_radius.setEnabled(m == "rolling_ball")
         self.bg_border.setEnabled(m == "local_border")
-        if recompute and self.signal is not None:
+        if not recompute:
+            return
+        self.doc.bg = core.BackgroundSettings(method=m, radius=self.bg_radius.value(), border=self.bg_border.value())
+        if self.signal is not None:
             if self.show_corrected.isChecked():
                 self.update_display(reset_zoom=False)
             self.remeasure()
 
     def update_display(self, reset_zoom=False):
-        if self.raw is None:
+        """Preview with a white background and black bands, whatever the input polarity."""
+        if self.signal is None:
             return
-        if self.show_corrected.isChecked():
-            img = self.get_corrected()
-            # show like the original (dark bands) if the original was inverted
-            if self._invert_choice() is not False and (self._invert_choice() or core.needs_inversion(self.raw)):
-                img = img.max() - img
-        else:
-            img = self.raw
+        img = self.get_corrected() if self.show_corrected.isChecked() else self.signal
         lo_p, hi_p = np.percentile(img, [0.05, 99.95])
         span = hi_p - lo_p
         lo = lo_p + span * self.contrast_lo.value() / 1000.0 * 0.9
         hi = lo_p + span * (0.1 + 0.9 * self.contrast_hi.value() / 1000.0)
-        self.view.set_image(to_qimage(img, lo, hi), reset_zoom=reset_zoom)
+        self.view.set_image(to_qimage(img, lo, hi, invert=True), reset_zoom=reset_zoom)
 
     def toggle_labels(self, on):
         self.view.show_labels = on
@@ -791,7 +1108,6 @@ class MainWindow(QtWidgets.QMainWindow):
             a.lane_labels = list(old.lane_labels)
             a.lane_conditions = list(old.lane_conditions)
         a.groups = list(old.groups)
-        a.formulas = list(old.formulas)
         if a.rows and not any(r.role == core.ROLE_CONTROL for r in a.rows):
             a.rows[0].role = core.ROLE_CONTROL  # loading control is usually the top row; user can change
         self.set_analysis(a)
@@ -811,6 +1127,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.remeasure()
 
     def on_boxes_changed(self):
+        # box sizes may have been changed by dragging in resize mode
+        for i, r in enumerate(self.analysis.rows):
+            for col, attr in ((3, "width"), (4, "height")):
+                sp = self.rows_table.cellWidget(i, col)
+                if sp is not None and sp.value() != getattr(r, attr):
+                    sp.blockSignals(True)
+                    sp.setValue(getattr(r, attr))
+                    sp.blockSignals(False)
         self.remeasure()
 
     def add_band_at(self, x, y):
@@ -850,7 +1174,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"{n}개 박스 위치를 보정했습니다")
 
     def clear_all(self):
-        a = core.Analysis(groups=list(self.analysis.groups), formulas=list(self.analysis.formulas))
+        a = core.Analysis(groups=list(self.analysis.groups))
         self.set_analysis(a)
 
     def show_band_menu(self, gpos, item):
@@ -877,6 +1201,11 @@ class MainWindow(QtWidgets.QMainWindow):
             menu.addAction("삭제", self.delete_selected)
         else:
             menu.addAction("여기에 밴드 추가", lambda: self.add_band_at(*self._scene_pos(gpos)))
+        menu.addSeparator()
+        act = menu.addAction("박스 크기 조절 모드 (가장자리 드래그)")
+        act.setCheckable(True)
+        act.setChecked(self.resize_mode.isChecked())
+        act.toggled.connect(self.resize_mode.setChecked)
         menu.exec(gpos)
 
     def _scene_pos(self, gpos):
@@ -1004,14 +1333,19 @@ class MainWindow(QtWidgets.QMainWindow):
             t.setItem(i, 1, QtWidgets.QTableWidgetItem(a.lane_labels[i]))
             t.setItem(i, 2, QtWidgets.QTableWidgetItem(a.lane_conditions[i]))
         t.blockSignals(False)
-        cur = self.ref_lane.currentIndex()
         self.ref_lane.blockSignals(True)
         self.ref_lane.clear()
         self.ref_lane.addItem("정규화 안 함 (비율 그대로)", None)
         for i in range(a.n_lanes):
             self.ref_lane.addItem(f"{i + 1}: {a.lane_labels[i]}", i)
-        self.ref_lane.setCurrentIndex(cur if 0 <= cur < self.ref_lane.count() else min(1, self.ref_lane.count() - 1))
+        idx = 0 if self.doc.ref_lane is None else self.ref_lane.findData(self.doc.ref_lane)
+        self.ref_lane.setCurrentIndex(idx if idx >= 0 else min(1, self.ref_lane.count() - 1))
         self.ref_lane.blockSignals(False)
+        self.ref_lane_label.setText(f"기준 레인 (=1.0) · {self.doc_key(self.cur)}")
+
+    def on_ref_lane(self, *_):
+        self.doc.ref_lane = self.ref_lane.currentData()
+        self.recompute_results()
 
     def on_lane_item_changed(self, item):
         a = self.analysis
@@ -1157,63 +1491,85 @@ class MainWindow(QtWidgets.QMainWindow):
     def fill_formulas(self):
         t = self.formula_table
         t.blockSignals(True)
-        t.setRowCount(len(self.analysis.formulas))
-        for i, f in enumerate(self.analysis.formulas):
-            t.setItem(i, 0, QtWidgets.QTableWidgetItem(f.get("name", "")))
-            t.setItem(i, 1, QtWidgets.QTableWidgetItem(f.get("expr", "")))
+        t.setRowCount(len(self.formulas))
+        for i, f in enumerate(self.formulas):
+            t.setItem(i, 0, QtWidgets.QTableWidgetItem(str(f.get("name", ""))))
+            t.setItem(i, 1, QtWidgets.QTableWidgetItem(str(f.get("expr", ""))))
+            cb = QtWidgets.QComboBox()
+            cb.setToolTip("수식에서 접두어 없이 쓴 이름(예: Vinculin)이 가리키는 이미지. 다른 이미지는 I2.Vinculin 처럼 씁니다.")
+            for k, d in enumerate(self.docs):
+                cb.addItem(f"{self.doc_key(k)}: {d.name}", k)
+            cb.setCurrentIndex(min(int(f.get("image", 0)), len(self.docs) - 1))
+            cb.currentIndexChanged.connect(lambda _=None, i=i, cb=cb: self.set_formula_image(i, cb.currentData()))
+            t.setCellWidget(i, 2, cb)
             it = QtWidgets.QTableWidgetItem()
             it.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
             it.setCheckState(Qt.Checked if f.get("normalize", "1") == "1" else Qt.Unchecked)
-            t.setItem(i, 2, it)
+            t.setItem(i, 3, it)
         t.blockSignals(False)
+        t.resizeColumnToContents(2)
+
+    def set_formula_image(self, i, k):
+        if i < len(self.formulas):
+            self.formulas[i]["image"] = int(k)
+            self.recompute_results()
 
     def add_formula(self):
         a = self.analysis
         ctrl = next((core._safe_name(r.name) for r in a.rows if r.role == core.ROLE_CONTROL), "Control")
         tgt = next((core._safe_name(r.name) for r in a.rows if r.role == core.ROLE_TARGET), "Target")
-        a.formulas.append({"name": f"수식{len(a.formulas) + 1}", "expr": f"{tgt} / {ctrl}", "normalize": "1"})
+        self.formulas.append({"name": f"수식{len(self.formulas) + 1}", "expr": f"{tgt} / {ctrl}", "normalize": "1", "image": self.cur})
         self.fill_formulas()
         self.recompute_results()
 
     def delete_formula(self):
         rows = sorted({i.row() for i in self.formula_table.selectedIndexes()}, reverse=True)
         for r in rows:
-            del self.analysis.formulas[r]
+            del self.formulas[r]
         self.fill_formulas()
         self.recompute_results()
 
     def on_formula_changed(self, item):
-        f = self.analysis.formulas[item.row()]
+        f = self.formulas[item.row()]
         if item.column() == 0:
             f["name"] = item.text()
         elif item.column() == 1:
             f["expr"] = item.text()
-        else:
+        elif item.column() == 3:
             f["normalize"] = "1" if item.checkState() == Qt.Checked else "0"
         self.recompute_results()
 
     def show_variables(self):
-        v = core.formula_variables(self.analysis, self.measurements)
-        lines = ["행 (레인별 벡터):"]
-        for i, r in enumerate(self.analysis.rows):
-            lines.append(f"  {core._safe_name(r.name)}  또는  R{i + 1}")
-        if self.analysis.groups:
-            lines.append("\n사용자 그룹:")
-            for g in self.analysis.groups:
+        lines = []
+        for k, d in enumerate(self.docs):
+            if d.raw is None:
+                continue
+            a = d.analysis
+            v = core.formula_variables(a, d.measurements)
+            alias = f" / {core._safe_name(d.alias)}" if d.alias else ""
+            lines.append(f"■ {self.doc_key(k)}{alias}: {d.name}")
+            lines.append("  행 (레인별 벡터): " + ", ".join(f"{core._safe_name(r.name)} (R{i + 1})" for i, r in enumerate(a.rows)))
+            for g in a.groups:
                 s = core._safe_name(g)
-                lines.append(f"  {s}  (그룹 전체 합 = {v.get(s, 0):.4g})   G_{s}  (레인별 합)")
-        lines.append("\n개별 밴드: R<행>L<레인>  예) R2L3")
+                lines.append(f"  그룹 {s} (전체 합 = {v.get(s, 0):.4g}),  G_{s} (레인별 합)")
+            lines.append("")
+        lines.append("개별 밴드: R<행>L<레인>  예) R2L3")
+        lines.append("다른 이미지의 변수: I2.Vinculin, I2.G_IgG, I2.R2L3 (또는 별칭.Vinculin)")
+        lines.append("접두어 없는 이름은 수식의 '기본 이미지' 것을 씁니다.")
         lines.append("\n연산: + - * / ** ( )   함수: sum, mean, max, min, log2, log10, sqrt")
-        lines.append("\n예시:\n  pErk / Erk                    (레인별 인산화 비율)\n  (pErk_upper + pErk_lower) / Vinculin\n  G_IgG / Vinculin\n  mean(G_treated) / mean(G_ctrl)")
+        lines.append("\n예시:\n  pErk / Erk                    (레인별 인산화 비율)\n  (pErk_upper + pErk_lower) / Vinculin\n  G_IgG / Vinculin\n"
+                     "  (I2.pErk / I2.Vinculin) / (I1.Erk / I1.Vinculin)   (두 블롯 간)\n  I2.G_IgG / I1.G_IgG")
         QtWidgets.QMessageBox.information(self, "수식에 쓸 수 있는 변수", "\n".join(lines))
 
     # ---------------------------------------------------------------- measurement / results
-    def remeasure(self):
-        if self.signal is None or not self.analysis.rows:
-            self.measurements = []
+    def measure_doc(self, d: ImageDoc):
+        if d.signal is None or not d.analysis.rows:
+            d.measurements = []
         else:
-            corr = self.get_corrected()
-            self.measurements = core.measure(self.signal, self.analysis, self.bg_settings(), corr)
+            d.measurements = core.measure(d.signal, d.analysis, d.bg, self.get_corrected(d))
+
+    def remeasure(self):
+        self.measure_doc(self.doc)
         self.fill_bands_table()
         self.fill_groups()
         self.recompute_results()
@@ -1270,36 +1626,51 @@ class MainWindow(QtWidgets.QMainWindow):
             ax.tick_params(labelsize=7)
         self.profile.canvas.draw_idle()
 
+    def loaded_docs(self) -> List[ImageDoc]:
+        return [d for d in self.docs if d.raw is not None]
+
     def recompute_results(self, *_):
-        a = self.analysis
         self.results = {}
+        self.result_doc = {}
         msgs = []
-        ref = self.ref_lane.currentData() if self.ref_lane.count() else None
-        if self.measurements:
+        multi = len(self.loaded_docs()) > 1
+
+        def put(name, vals, doc):
+            self.results[name] = np.atleast_1d(np.asarray(vals, float))
+            self.result_doc[name] = doc
+
+        for k, d in enumerate(self.docs):
+            a = d.analysis
+            if not d.measurements or not self.auto_norm.isChecked():
+                continue
+            prefix = f"[{self.doc_key(k)}] " if multi else ""
             controls = [i for i, r in enumerate(a.rows) if r.role == core.ROLE_CONTROL]
-            if self.auto_norm.isChecked() and controls:
-                c = controls[0]
-                for i, r in enumerate(a.rows):
-                    if r.role == core.ROLE_TARGET:
-                        self.results[f"{r.name}/{a.rows[c].name}"] = core.normalize_to_control(a, self.measurements, i, c, ref)
-            elif self.auto_norm.isChecked() and not controls:
-                msgs.append("Control 행이 없습니다: '2. 행 / 레인' 탭에서 loading control 행의 역할을 Control로 지정하세요.")
-            variables = core.formula_variables(a, self.measurements)
-            for f in a.formulas:
-                name = f.get("name") or f.get("expr")
-                expr = f.get("expr", "").strip()
-                if not expr:
-                    continue
-                try:
-                    val = core.evaluate(expr, variables)
-                    if f.get("normalize", "1") == "1" and np.ndim(val) == 1:
-                        val = core.scale_to_reference(val, ref)
-                    self.results[name] = np.atleast_1d(np.asarray(val, float))
-                except core.FormulaError as e:
-                    msgs.append(f"{name}: {e}")
-                except Exception as e:  # pragma: no cover - defensive
-                    msgs.append(f"{name}: {e}")
-        self.formula_msg.setText("\n".join(msgs) if msgs else "예: (pErk_upper + pErk_lower) / Vinculin  ·  G_IgG / Vinculin  ·  R2L3 - R2L1")
+            if not controls:
+                msgs.append(f"{prefix}Control 행이 없습니다: '2. 행 / 레인' 탭에서 loading control 행의 역할을 Control로 지정하세요.")
+                continue
+            c = controls[0]
+            for i, r in enumerate(a.rows):
+                if r.role == core.ROLE_TARGET:
+                    put(f"{prefix}{r.name}/{a.rows[c].name}", core.normalize_to_control(a, d.measurements, i, c, d.ref_lane), d)
+        image_vars = [core.formula_variables(d.analysis, d.measurements) for d in self.docs]
+        aliases = [d.alias for d in self.docs]
+        for f in self.formulas:
+            name = f.get("name") or f.get("expr")
+            expr = str(f.get("expr", "")).strip()
+            if not expr:
+                continue
+            base = min(int(f.get("image", 0)), len(self.docs) - 1)
+            d = self.docs[base]
+            try:
+                val = core.evaluate(expr, core.project_variables(image_vars, aliases, base))
+                if f.get("normalize", "1") == "1" and np.ndim(val) == 1:
+                    val = core.scale_to_reference(val, d.ref_lane)
+                put(name, val, d)
+            except core.FormulaError as e:
+                msgs.append(f"{name}: {e}")
+            except Exception as e:  # pragma: no cover - defensive
+                msgs.append(f"{name}: {e}")
+        self.formula_msg.setText("\n".join(msgs) if msgs else FORMULA_HINT)
         self.formula_msg.setStyleSheet("color: #c0392b;" if msgs else "color: #888;")
         # series checklist (keep previous check states)
         prev = {self.series_list.item(i).text(): self.series_list.item(i).checkState() for i in range(self.series_list.count())}
@@ -1314,57 +1685,82 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fill_results_table()
         self.replot()
 
+    def _result_docs(self) -> List[ImageDoc]:
+        out = []
+        for name in self.results:
+            d = self.result_doc[name]
+            if d not in out:
+                out.append(d)
+        return out or [self.doc]
+
     def fill_results_table(self):
-        a = self.analysis
         names = list(self.results)
+        docs = self._result_docs()
         t = self.results_table
-        n = a.n_lanes
+        n = max(d.analysis.n_lanes for d in docs)
+        if len(docs) == 1:
+            label_cols = ["레인", "조건"]
+        else:
+            label_cols = ["#"] + [f"{self.doc_key(self.docs.index(d))} 레인" for d in docs]
         t.clear()
-        t.setColumnCount(len(names) + 2)
-        t.setHorizontalHeaderLabels(["레인", "조건"] + names)
-        t.setRowCount(n)
+        t.setColumnCount(len(names) + len(label_cols))
+        t.setHorizontalHeaderLabels(label_cols + names)
+        t.setRowCount(max(n, 1 if names else 0))
         for i in range(n):
-            t.setItem(i, 0, QtWidgets.QTableWidgetItem(a.lane_labels[i] if i < len(a.lane_labels) else str(i + 1)))
-            t.setItem(i, 1, QtWidgets.QTableWidgetItem(a.lane_conditions[i] if i < len(a.lane_conditions) else ""))
+            if len(docs) == 1:
+                a = docs[0].analysis
+                cells = [a.lane_labels[i] if i < len(a.lane_labels) else str(i + 1),
+                         a.lane_conditions[i] if i < len(a.lane_conditions) else ""]
+            else:
+                cells = [str(i + 1)] + [d.analysis.lane_labels[i] if i < len(d.analysis.lane_labels) else "" for d in docs]
+            for c, v in enumerate(cells):
+                t.setItem(i, c, QtWidgets.QTableWidgetItem(v))
+        off = len(label_cols)
         for c, name in enumerate(names):
             vals = self.results[name]
             if vals.size == 1:
-                it = QtWidgets.QTableWidgetItem(f"{vals[0]:.4g}")
-                if n == 0:
-                    t.setRowCount(1)
-                t.setItem(0, c + 2, it)
+                t.setItem(0, c + off, QtWidgets.QTableWidgetItem(f"{vals[0]:.4g}"))
                 continue
             for i in range(min(n, vals.size)):
                 it = QtWidgets.QTableWidgetItem("" if not np.isfinite(vals[i]) else f"{vals[i]:.4g}")
                 it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                t.setItem(i, c + 2, it)
+                t.setItem(i, c + off, it)
         t.resizeColumnsToContents()
 
     def replot(self, *_):
-        a = self.analysis
-        chosen = {self.series_list.item(i).text() for i in range(self.series_list.count()) if self.series_list.item(i).checkState() == Qt.Checked}
-        series = {k: v for k, v in self.results.items() if k in chosen}
+        chosen = [self.series_list.item(i).text() for i in range(self.series_list.count()) if self.series_list.item(i).checkState() == Qt.Checked]
+        series = {k: self.results[k] for k in chosen if k in self.results}
         # don't mix scalars and lane vectors in one chart
         if any(np.size(v) > 1 for v in series.values()):
             series = {k: v for k, v in series.items() if np.size(v) > 1}
-        ref = self.ref_lane.currentData() if self.ref_lane.count() else None
-        ylabel = "상대 intensity" if ref is not None else "정량값"
-        self.plot.plot(series, a.lane_labels, a.lane_conditions, self.by_condition.isChecked(), ylabel, self.show_points.isChecked())
+        # lane names / conditions of the image the first series comes from
+        d = self.result_doc[next(iter(series))] if series else self.doc
+        a = d.analysis
+        n = max([np.size(v) for v in series.values()] + [a.n_lanes])
+        labels = list(a.lane_labels) + [f"Lane {i + 1}" for i in range(len(a.lane_labels), n)]
+        conds = list(a.lane_conditions) + [""] * (n - len(a.lane_conditions))
+        any_ref = any(self.result_doc[k].ref_lane is not None for k in series)
+        ylabel = "상대 intensity" if any_ref else "정량값"
+        self.plot.plot(series, labels, conds, self.by_condition.isChecked(), ylabel, self.show_points.isChecked())
 
     # ---------------------------------------------------------------- save / export
     def project_dict(self):
         return {
             "app": "Blot Profiler",
             "version": __version__,
-            "image_path": self.image_path,
-            "invert": self.invert_combo.currentIndex(),
-            "background": vars(self.bg_settings()),
+            "format": 2,
             "detect": {
                 "sensitivity": self.sens.value(), "smooth": self.smooth.value(), "min_area": self.min_area.value(),
                 "pad": self.pad.value(), "edge": self.edge.value(),
             },
-            "reference_lane": self.ref_lane.currentData(),
-            "analysis": self.analysis.to_dict(),
+            "images": [
+                {
+                    "image_path": d.image_path, "alias": d.alias, "invert": d.invert, "background": vars(d.bg),
+                    "reference_lane": d.ref_lane, "analysis": d.analysis.to_dict(),
+                }
+                for d in self.docs if d.raw is not None
+            ],
+            "formulas": self.formulas,
         }
 
     def save_project(self):
@@ -1376,6 +1772,16 @@ class MainWindow(QtWidgets.QMainWindow):
             json.dump(self.project_dict(), f, ensure_ascii=False, indent=2)
         self.statusBar().showMessage(f"저장했습니다: {p}")
 
+    def _find_image(self, img, project_path):
+        if img and os.path.exists(img):
+            return img
+        cand = os.path.join(os.path.dirname(project_path), os.path.basename(img or ""))
+        if img and os.path.exists(cand):
+            return cand
+        QtWidgets.QMessageBox.information(self, "이미지 찾기", f"원본 이미지를 찾을 수 없습니다:\n{img}\n이미지 파일을 선택하세요.")
+        img, _ = QtWidgets.QFileDialog.getOpenFileName(self, "TIF 파일 열기", "", "Images (*.tif *.tiff *.png *.jpg)")
+        return img or None
+
     def load_project(self, p=None):
         if not p:
             p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "분석 불러오기", "", "JSON (*.json)")
@@ -1384,94 +1790,109 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             with open(p, encoding="utf-8") as f:
                 d = json.load(f)
-            img = d.get("image_path")
-            if not img or not os.path.exists(img):
-                cand = os.path.join(os.path.dirname(p), os.path.basename(img or ""))
-                if img and os.path.exists(cand):
-                    img = cand
-                else:
-                    QtWidgets.QMessageBox.information(self, "이미지 찾기", "원본 이미지를 찾을 수 없습니다. 이미지 파일을 선택하세요.")
-                    img, _ = QtWidgets.QFileDialog.getOpenFileName(self, "TIF 파일 열기", "", "Images (*.tif *.tiff *.png *.jpg)")
-                    if not img:
-                        return
-            self.invert_combo.blockSignals(True)
-            self.invert_combo.setCurrentIndex(int(d.get("invert", 0)))
-            self.invert_combo.blockSignals(False)
-            bg = d.get("background", {})
-            self.bg_combo.blockSignals(True)
-            idx = self.bg_combo.findData(bg.get("method", "rolling_ball"))
-            self.bg_combo.setCurrentIndex(max(0, idx))
-            self.bg_combo.blockSignals(False)
-            self.bg_radius.setValue(int(bg.get("radius", 50)))
-            self.bg_border.setValue(int(bg.get("border", 3)))
+            if "images" in d:
+                images = d["images"]
+                formulas = d.get("formulas", [])
+            else:  # format 1: a single image, formulas stored in the analysis
+                images = [{k: d.get(k) for k in ("image_path", "invert", "background", "reference_lane", "analysis")}]
+                formulas = [dict(f, image=0) for f in d.get("analysis", {}).get("formulas", [])]
             det = d.get("detect", {})
             self.sens.setValue(det.get("sensitivity", 1.0))
             self.smooth.setValue(det.get("smooth", 1.5))
             self.min_area.setValue(det.get("min_area", 30))
             self.pad.setValue(det.get("pad", 3))
             self.edge.setValue(det.get("edge", 0))
-            self.on_bg_changed(recompute=False)
-            self.load_image(img, detect=False)
-            self.set_analysis(core.Analysis.from_dict(d.get("analysis", {})))
-            ref = d.get("reference_lane")
-            i = self.ref_lane.findData(ref)
-            if i >= 0:
-                self.ref_lane.setCurrentIndex(i)
+            docs = []
+            for im in images:
+                path = self._find_image(im.get("image_path"), p)
+                if not path:
+                    continue
+                doc = ImageDoc(invert=int(im.get("invert") or 0), bg=core.BackgroundSettings(**(im.get("background") or {})))
+                doc.raw = core.load_image(path)
+                doc.image_path = path
+                doc.alias = im.get("alias") or ""
+                doc.ref_lane = im.get("reference_lane", 0)
+                doc.analysis = core.Analysis.from_dict(im.get("analysis") or {})
+                doc.analysis.formulas = []
+                doc.analysis.ensure_lane_labels()
+                self._make_signal(doc)
+                self.measure_doc(doc)
+                docs.append(doc)
+            if not docs:
+                return
+            self.docs = docs
+            self.formulas = [dict(f) for f in formulas]
+            self.cur = 0
+            self.refresh_doc_tabs()
+            self.switch_doc(0)
             self.statusBar().showMessage(f"불러왔습니다: {p}")
         except Exception as e:
             traceback.print_exc()
             QtWidgets.QMessageBox.critical(self, "불러오기 실패", str(e))
 
     def export_csv(self):
-        if not self.measurements:
+        docs = self.loaded_docs()
+        if not any(d.measurements for d in docs):
             self.statusBar().showMessage("내보낼 결과가 없습니다")
             return
         base = os.path.splitext(self.image_path)[0] + "_quant.csv" if self.image_path else "quant.csv"
         p, _ = QtWidgets.QFileDialog.getSaveFileName(self, "CSV 내보내기", base, "CSV (*.csv)")
         if not p:
             return
-        a = self.analysis
-        bg = self.bg_settings()
         with open(p, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow(["# Blot Profiler", __version__, "image", self.image_path or ""])
-            w.writerow(["# background", BG_LABELS[bg.method], "radius", bg.radius, "border", bg.border])
+            w.writerow(["# Blot Profiler", __version__])
+            for d in docs:
+                k = self.doc_key(self.docs.index(d))
+                w.writerow([f"# image {k}", d.alias, d.image_path or "", "background", BG_LABELS[d.bg.method],
+                            "radius", d.bg.radius, "border", d.bg.border])
             w.writerow([])
             w.writerow(["[Bands]"])
-            w.writerow(["band_id", "row", "protein", "role", "lane", "lane_label", "condition", "x", "y", "width", "height",
+            w.writerow(["image", "band_id", "row", "protein", "role", "lane", "lane_label", "condition", "x", "y", "width", "height",
                         "raw_intensity", "background", "net_intensity", "mean_per_px", "groups"])
-            by_id = {a.band_id(b): b for b in a.bands}
-            for m in self.measurements:
-                b = by_id[m.band_id]
-                x, y, wd, ht = b.box(a.rows)
-                r = a.rows[m.row]
-                w.writerow([m.band_id, m.row + 1, r.name, r.role, m.lane + 1, a.lane_labels[m.lane], a.lane_conditions[m.lane],
-                            x, y, wd, ht, f"{m.raw:.3f}", f"{m.background:.3f}", f"{m.net:.3f}", f"{m.mean:.4f}", ";".join(b.groups)])
+            for d in docs:
+                a = d.analysis
+                k = self.doc_key(self.docs.index(d))
+                by_id = {a.band_id(b): b for b in a.bands}
+                for m in d.measurements:
+                    b = by_id[m.band_id]
+                    x, y, wd, ht = b.box(a.rows)
+                    r = a.rows[m.row]
+                    w.writerow([k, m.band_id, m.row + 1, r.name, r.role, m.lane + 1, a.lane_labels[m.lane], a.lane_conditions[m.lane],
+                                x, y, wd, ht, f"{m.raw:.3f}", f"{m.background:.3f}", f"{m.net:.3f}", f"{m.mean:.4f}", ";".join(b.groups)])
             w.writerow([])
-            w.writerow(["[Results]", "reference lane", self.ref_lane.currentText()])
+            w.writerow(["[Results]"])
             names = list(self.results)
-            w.writerow(["lane", "lane_label", "condition"] + names)
-            for i in range(a.n_lanes):
-                row = [i + 1, a.lane_labels[i], a.lane_conditions[i]]
-                for n in names:
-                    v = self.results[n]
-                    row.append("" if v.size == 1 and i > 0 else (f"{v[0 if v.size == 1 else i]:.6g}" if (v.size == 1 or i < v.size) else ""))
-                w.writerow(row)
-            if any(c.strip() for c in a.lane_conditions):
+            w.writerow(["series", "image", "reference_lane", "lane", "lane_label", "condition", "value"])
+            for n in names:
+                d = self.result_doc[n]
+                a = d.analysis
+                k = self.doc_key(self.docs.index(d))
+                ref = "" if d.ref_lane is None else d.ref_lane + 1
+                v = self.results[n]
+                if v.size == 1:
+                    w.writerow([n, k, ref, "", "", "", f"{v[0]:.6g}"])
+                    continue
+                for i in range(v.size):
+                    w.writerow([n, k, ref, i + 1, a.lane_labels[i] if i < len(a.lane_labels) else "",
+                                a.lane_conditions[i] if i < len(a.lane_conditions) else "", f"{v[i]:.6g}" if np.isfinite(v[i]) else ""])
+            cond_rows = []
+            for n in names:
+                v = self.results[n]
+                a = self.result_doc[n].analysis
+                if v.size < 2 or not any(c.strip() for c in a.lane_conditions):
+                    continue
+                cn, means, sds, ns = core.condition_stats(v, a.lane_conditions, a.lane_labels)
+                cond_rows += [[c_, n, f"{m_:.6g}", f"{s_:.6g}", k_] for c_, m_, s_, k_ in zip(cn, means, sds, ns)]
+            if cond_rows:
                 w.writerow([])
                 w.writerow(["[By condition]"])
                 w.writerow(["condition", "series", "mean", "sd", "n"])
-                for n in names:
-                    v = self.results[n]
-                    if v.size < 2:
-                        continue
-                    cn, means, sds, ns = core.condition_stats(v, a.lane_conditions, a.lane_labels)
-                    for c_, m_, s_, k_ in zip(cn, means, sds, ns):
-                        w.writerow([c_, n, f"{m_:.6g}", f"{s_:.6g}", k_])
+                w.writerows(cond_rows)
             w.writerow([])
             w.writerow(["[Formulas]"])
-            for fml in a.formulas:
-                w.writerow([fml.get("name"), fml.get("expr")])
+            for fml in self.formulas:
+                w.writerow([fml.get("name"), fml.get("expr"), "base image", self.doc_key(int(fml.get("image", 0)))])
         self.statusBar().showMessage(f"CSV 저장: {p}")
 
     def export_plot(self):
@@ -1503,6 +1924,8 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(self, "사용법", HELP_TEXT)
 
 
+FORMULA_HINT = "예: (pErk_upper + pErk_lower) / Vinculin  ·  G_IgG / Vinculin  ·  R2L3 - R2L1  ·  I2.Kras / I1.Kras (이미지 간)"
+
 HELP_TEXT = """Blot Profiler 사용 순서
 
 1. 검출 탭: TIF 파일을 열면 밴드를 자동으로 찾습니다.
@@ -1510,7 +1933,12 @@ HELP_TEXT = """Blot Profiler 사용 순서
    · 밴드가 없는 레인에도 같은 위치에 박스를 만들어 0에 가까운 값으로 정량합니다.
 
 2. 박스 수정: 이미지에서 박스를 드래그해 옮기고, 더블클릭으로 추가, Delete로 삭제합니다.
-   같은 가로줄(행)의 박스는 항상 같은 크기이며, 행/레인 탭에서 폭과 높이를 바꿉니다.
+   같은 가로줄(행)의 박스는 항상 같은 크기입니다. 크기는 행/레인 탭에서 바꾸거나,
+   우클릭 → '박스 크기 조절 모드'를 켜고 박스 가장자리·모서리를 드래그합니다.
+   이때 같은 행, 같은 사용자 그룹에 속한 밴드의 행, 함께 선택된 밴드의 행이 같이 바뀝니다. (Esc: 모드 종료)
+
+   여러 이미지: '+ 이미지 추가'로 TIF를 여러 개 열면 위쪽 탭으로 전환합니다.
+   탭을 더블클릭하면 별칭(수식에서 쓰는 이름)을 붙일 수 있습니다.
 
 3. 행 / 레인 탭: 각 행에 단백질 이름을 붙이고 역할을 정합니다.
    · 측정 (Target): 정량할 단백질 (예: pErk, Kras)
@@ -1523,6 +1951,8 @@ HELP_TEXT = """Blot Profiler 사용 순서
 5. 정량 / 그래프 탭:
    · Target ÷ Control 을 레인별로 계산하고 기준 레인을 1로 정규화합니다.
    · 수식으로 행·그룹·밴드를 더하고 빼고 곱하고 나눌 수 있습니다.
+   · 이미지 간 계산: I2.Kras / I1.Kras, I2.G_IgG / I1.G_IgG 처럼 'I<번호>.' 또는 '별칭.'을 붙입니다.
+     접두어 없는 이름은 그 수식의 '기본 이미지'에서 가져옵니다.
    · CSV와 그래프(PNG/PDF/SVG)로 내보낼 수 있습니다.
 
 정량값(Net) = 박스 안 픽셀 intensity 합 − 배경.

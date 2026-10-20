@@ -6,3 +6,4 @@ dist/
 *.dmg
 *.egg-info/
 .DS_Store
+.venv-build/

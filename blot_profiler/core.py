@@ -648,6 +648,11 @@ def evaluate(expr: str, variables: Dict[str, object]):
     except SyntaxError as e:
         raise FormulaError(f"수식 문법 오류: {e.msg}") from e
 
+    def value(v, name):
+        if isinstance(v, dict):
+            raise FormulaError(f"'{name}'은 이미지 이름입니다. {name}.변수 형태로 쓰세요 (예: {name}.Vinculin)")
+        return np.asarray(v, float) if not np.isscalar(v) else float(v)
+
     def ev(node):
         if isinstance(node, ast.Expression):
             return ev(node.body)
@@ -655,12 +660,21 @@ def evaluate(expr: str, variables: Dict[str, object]):
             return float(node.value)
         if isinstance(node, ast.Name):
             if node.id in variables:
-                v = variables[node.id]
-                return np.asarray(v, float) if not np.isscalar(v) else float(v)
+                return value(variables[node.id], node.id)
             raise FormulaError(f"알 수 없는 이름: {node.id}")
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            # <image>.<name>: a variable of another image, e.g. I2.Vinculin
+            ns = variables.get(node.value.id)
+            if not isinstance(ns, dict):
+                raise FormulaError(f"알 수 없는 이미지: {node.value.id} (I1, I2 … 또는 이미지 별칭)")
+            if node.attr not in ns:
+                raise FormulaError(f"알 수 없는 이름: {node.value.id}.{node.attr}")
+            return value(ns[node.attr], f"{node.value.id}.{node.attr}")
         if isinstance(node, ast.BinOp) and type(node.op) in _BINOPS:
             with np.errstate(divide="ignore", invalid="ignore"):
                 left, right = ev(node.left), ev(node.right)
+                if np.ndim(left) and np.ndim(right) and np.size(left) != np.size(right):
+                    raise FormulaError(f"레인 수가 다른 값끼리 계산할 수 없습니다 ({np.size(left)}개 vs {np.size(right)}개 레인)")
                 if isinstance(node.op, ast.Div):
                     res = np.divide(left, right)
                     return np.where(np.asarray(right) == 0, np.nan, res) if np.ndim(res) else (float("nan") if right == 0 else float(res))
@@ -711,6 +725,23 @@ def formula_variables(a: Analysis, meas: List[Measurement]) -> Dict[str, object]
         lanevec[~has] = np.nan
         v[_safe_name(g)] = float(total)
         v["G_" + _safe_name(g)] = lanevec
+    return v
+
+
+def project_variables(image_vars: Sequence[Dict[str, object]], aliases: Sequence[str] = (), base: int = 0) -> Dict[str, object]:
+    """Variables for a formula spanning several images.
+
+    Names of the *base* image are available directly (``Vinculin``); every image
+    is also reachable as a namespace: ``I1.Vinculin``, ``I2.G_IgG`` or, when the
+    image has an alias, ``<alias>.Vinculin``.
+    """
+    v: Dict[str, object] = dict(image_vars[base]) if 0 <= base < len(image_vars) else {}
+    for k, iv in enumerate(image_vars):
+        v[f"I{k + 1}"] = iv
+    for k, iv in enumerate(image_vars):
+        alias = aliases[k].strip() if k < len(aliases) and aliases[k] else ""
+        if alias:
+            v.setdefault(_safe_name(alias), iv)
     return v
 
 
