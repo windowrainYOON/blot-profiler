@@ -1,3 +1,3 @@
 """Blot Profiler: western blot band detection and quantification."""
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"

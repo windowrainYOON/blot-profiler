@@ -1,4 +1,4 @@
-"""'Figure 만들기' window: edit and export a publication-style blot figure."""
+"""'Figure 만들기' editor (a main-window tab): edit and export a publication-style blot figure."""
 
 from __future__ import annotations
 
@@ -76,17 +76,14 @@ class ReferenceView(QtWidgets.QGraphicsView):
             self.fitInView(r, Qt.KeepAspectRatio)
 
 
-class FigureWindow(QtWidgets.QMainWindow):
-    def __init__(self, main, doc):
+class FigureEditor(QtWidgets.QWidget):
+    """Figure editor for the image shown in the main window (see :meth:`set_doc`)."""
+
+    def __init__(self, main):
         super().__init__(main)
         self.main = main
-        self.doc = doc
-        self.setWindowTitle(f"Figure 만들기 – {doc.name}")
-        self.resize(1400, 900)
-        if doc.figure is None:
-            doc.figure = figure.default_settings()
-        self.s = doc.figure
-        figure.sync_settings(self.s, doc.analysis, doc.raw.shape)
+        self.doc = None
+        self.s = figure.default_settings()
         self.fig = Figure()
         self._png: Optional[QtGui.QPixmap] = None
         self._loading = False
@@ -144,11 +141,40 @@ class FigureWindow(QtWidgets.QMainWindow):
         split.addWidget(scroll)
         split.addWidget(self.right)
         split.setStretchFactor(1, 1)
-        self.setCentralWidget(split)
-        self.statusBar().showMessage("그림의 대비는 보기용입니다. 정량값은 원본 raw intensity로 계산됩니다.")
+        split.setSizes([480, 900])
+        note = QtWidgets.QLabel("그림의 대비는 보기용입니다. 정량값은 원본 raw intensity로 계산됩니다.")
+        note.setStyleSheet("color: #1565c0; font-size: 11px;")
+        editor = QtWidgets.QWidget()
+        el = QtWidgets.QVBoxLayout(editor)
+        el.setContentsMargins(0, 0, 0, 0)
+        el.addWidget(note)
+        el.addWidget(split, 1)
+        self.placeholder = QtWidgets.QLabel(
+            "TIF를 열고 '밴드 자동 검출'을 누르면 단백질/레인 그룹이 자동으로 제안되고, 여기서 바로 그림을 만들 수 있습니다.")
+        self.placeholder.setAlignment(Qt.AlignCenter)
+        self.placeholder.setWordWrap(True)
+        self.stack = QtWidgets.QStackedLayout(self)
+        self.stack.addWidget(self.placeholder)
+        self.stack.addWidget(editor)
+        self.dirty = True
 
+    def status(self, msg):
+        self.main.statusBar().showMessage(msg)
+
+    def set_doc(self, doc):
+        """Show the figure of ``doc`` (the image of the main window)."""
+        self.doc = doc
+        self.dirty = False
+        if doc is None or doc.raw is None or not doc.analysis.bands:
+            self.stack.setCurrentIndex(0)
+            return
+        if doc.figure is None:
+            doc.figure = figure.default_settings()
+        self.s = doc.figure
+        figure.sync_settings(self.s, doc.analysis, doc.raw.shape)
         if self.s.get("marker_path") and os.path.exists(self.s["marker_path"]) and doc.marker is None:
             self._load_marker(self.s["marker_path"], quiet=True)
+        self.stack.setCurrentIndex(1)
         self.load_from_settings()
 
     # ------------------------------------------------------------ building blocks
@@ -366,8 +392,7 @@ class FigureWindow(QtWidgets.QMainWindow):
 
     def analysis_changed(self):
         """Proteins/lanes/boxes changed in the main window."""
-        figure.sync_settings(self.s, self.doc.analysis, self.doc.raw.shape)
-        self.load_from_settings()
+        self.set_doc(self.doc)
 
     # panels
     def fill_panels(self):
@@ -508,7 +533,7 @@ class FigureWindow(QtWidgets.QMainWindow):
 
     def auto_strip(self):
         if self.doc.marker is None:
-            self.statusBar().showMessage("먼저 마커 이미지를 불러오세요")
+            self.status("먼저 마커 이미지를 불러오세요")
             return
         x0, x1 = figure.guess_ladder_x(self.doc.marker, self.doc.analysis)
         self.w_sx0.setValue(x0)
@@ -572,6 +597,8 @@ class FigureWindow(QtWidgets.QMainWindow):
 
     # ------------------------------------------------------------ reference view
     def refresh_reference(self):
+        if not self.ready():
+            return
         sc = self.ref.scene()
         sc.clear()
         self.ref.cursor_line = None
@@ -628,7 +655,13 @@ class FigureWindow(QtWidgets.QMainWindow):
         return d.signal
 
     # ------------------------------------------------------------ preview / export
+    def ready(self) -> bool:
+        d = self.doc
+        return d is not None and d.raw is not None and bool(d.analysis.bands)
+
     def render(self):
+        if not self.ready():
+            return
         try:
             figure.render(self.fig, self._display_source(), self.doc.analysis, self.s, self.doc.marker)
             buf = io.BytesIO()
@@ -651,11 +684,18 @@ class FigureWindow(QtWidgets.QMainWindow):
             pm = pm.scaledToWidth(avail, Qt.SmoothTransformation)
         self.preview.setPixmap(pm)
 
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self.dirty or self.doc is not self.main.doc:
+            self.set_doc(self.main.doc)
+
     def resizeEvent(self, e):
         super().resizeEvent(e)
         QtCore.QTimer.singleShot(0, self._show_preview)
 
     def export(self):
+        if not self.ready():
+            return
         base = os.path.splitext(self.doc.image_path or "figure")[0] + "_figure.png"
         p, flt = QtWidgets.QFileDialog.getSaveFileName(self, "그림 저장", base,
                                                        "PNG (*.png);;TIFF (*.tif *.tiff);;PDF (*.pdf);;SVG (*.svg)")
@@ -668,4 +708,4 @@ class FigureWindow(QtWidgets.QMainWindow):
         if p.lower().endswith((".tif", ".tiff")):
             kw["pil_kwargs"] = {"compression": "tiff_lzw"}
         self.fig.savefig(p, dpi=self.w_dpi.value(), facecolor="white", **kw)
-        self.statusBar().showMessage(f"저장했습니다: {p}")
+        self.status(f"저장했습니다: {p}")

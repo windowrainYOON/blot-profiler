@@ -765,7 +765,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.multi_ref: Optional[str] = None  # lane key scaled to 1
         self.multi_keys: List[str] = []
         self.multi_results: Dict[str, Dict[str, object]] = {}  # name -> {mean, sd, points}
-        self._fig_windows: Dict[int, object] = {}  # id(doc) -> FigureWindow
         self._updating = False
 
         self.view = BlotView()
@@ -781,6 +780,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self._build_bands_tab(), "3. 밴드")
         self.tabs.addTab(self._build_results_tab(), "4. 정량 / 그래프")
         self.tabs.addTab(self._build_multi_tab(), "5. 여러 이미지")
+        from .figure_window import FigureEditor
+
+        self.figure_editor = FigureEditor(self)
+        self.FIG_TAB = self.tabs.addTab(self.figure_editor, "6. Figure 만들기")
+        self.tabs.tabBar().setTabTextColor(self.FIG_TAB, QtGui.QColor("#1565c0"))
+        self.tabs.currentChanged.connect(self.on_tab_changed)
+        self._split_sizes = None
         self.tabs.setMinimumWidth(520)
 
         left = QtWidgets.QWidget()
@@ -836,6 +842,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ll.addWidget(hint)
 
         split = QtWidgets.QSplitter()
+        self.split = split
         split.addWidget(left)
         split.addWidget(self.tabs)
         split.setStretchFactor(0, 3)
@@ -915,9 +922,6 @@ class MainWindow(QtWidgets.QMainWindow):
             r = QtWidgets.QMessageBox.question(self, "이미지 닫기", f"'{d.name}' 이미지를 닫을까요? (저장하지 않은 박스는 사라집니다)")
             if r != QtWidgets.QMessageBox.Yes:
                 return
-        w = self._fig_windows.pop(id(d), None)
-        if w is not None:
-            w.close()
         del self.docs[k]
         for g in self.big_groups:
             g["members"] = [[i - 1 if i > k else i, n] for i, n in g["members"] if i != k]
@@ -951,7 +955,7 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction("그래프 저장 (PNG/PDF/SVG)…", lambda: self.export_plot())
         m.addAction("박스 표시 이미지 저장…", self.export_overlay)
         fm = self.menuBar().addMenu("Figure")
-        fm.addAction("Figure 만들기 (논문용 그림)…", self.open_figure_window).setShortcut("Ctrl+Shift+F")
+        fm.addAction("Figure 만들기 탭으로 (논문용 그림)", self.open_figure_window).setShortcut("Ctrl+Shift+F")
         v = self.menuBar().addMenu("보기")
         v.addAction("창에 맞추기", self.view.fit).setShortcut("Ctrl+0")
         v.addAction("확대", lambda: self.view.scale(1.25, 1.25)).setShortcut(QtGui.QKeySequence.ZoomIn)
@@ -1056,7 +1060,8 @@ class MainWindow(QtWidgets.QMainWindow):
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
         info = QtWidgets.QLabel(
-            "그룹 만들기: 이미지에서 밴드를 드래그로 선택한 뒤 우클릭 →\n"
+            "검출하면 단백질 그룹(P1, P2 …)과 레인 그룹(L1, L2 …)이 위치에 따라 자동으로 제안됩니다.\n"
+            "정량 없이 바로 '6. Figure 만들기'로 가도 되고, 고치려면 밴드를 드래그로 선택한 뒤 우클릭 →\n"
             "  · '새 단백질(행) 그룹 만들기' — 이름이 곧 단백질 이름입니다 (예: Vinculin, pErk).\n"
             "  · '새 레인(열) 그룹 만들기' — 이름이 곧 레인 이름입니다 (예: DMSO, IgG 12h).\n"
             "    같은 단백질의 밴드를 여러 열에서 고르면 그 열들이 한 레인 그룹(반복)이 됩니다.\n"
@@ -1211,36 +1216,34 @@ class MainWindow(QtWidgets.QMainWindow):
         b = QtWidgets.QPushButton("그래프 저장…")
         b.clicked.connect(lambda: self.export_plot(self.plot))
         hb.addWidget(b)
-        b = QtWidgets.QPushButton("Figure 만들기 (논문용 블롯 그림)…")
-        b.setStyleSheet("font-weight: bold;")
-        b.clicked.connect(self.open_figure_window)
-        hb.addWidget(b)
         hb.addStretch(1)
         lay.addLayout(hb)
         return self._scroll(w)
 
     # ---------------------------------------------------------------- figure window
     def open_figure_window(self):
-        d = self.doc
-        if d.raw is None or not d.analysis.bands:
-            QtWidgets.QMessageBox.information(self, "Figure 만들기", "먼저 이미지를 열고 밴드 박스와 단백질/레인 그룹을 정하세요.")
-            return
-        from .figure_window import FigureWindow
+        self.tabs.setCurrentIndex(self.FIG_TAB)
 
-        w = self._fig_windows.get(id(d))
-        if w is None:
-            w = FigureWindow(self, d)
-            self._fig_windows[id(d)] = w
+    def on_tab_changed(self, i):
+        """The figure tab gets most of the window width; the blot view shrinks."""
+        if i == self.FIG_TAB:
+            if self._split_sizes is None:
+                self._split_sizes = self.split.sizes()
+            total = sum(self.split.sizes())
+            self.split.setSizes([int(total * 0.28), total - int(total * 0.28)])
+        elif self._split_sizes is not None:
+            self.split.setSizes(self._split_sizes)
+            self._split_sizes = None
         else:
-            w.analysis_changed()
-        w.show()
-        w.raise_()
-        w.activateWindow()
+            return
+        QtCore.QTimer.singleShot(0, self.view.fit)
 
     def _figure_changed(self, d):
-        w = self._fig_windows.get(id(d))
-        if w is not None and w.isVisible():
-            w.analysis_changed()
+        ed = self.figure_editor
+        if self.tabs.currentIndex() == self.FIG_TAB and ed.isVisible():
+            ed.set_doc(self.doc)
+        else:
+            ed.dirty = True
 
     # ---------------------------------------------------------------- tab 5
     def _build_multi_tab(self):
@@ -1454,8 +1457,8 @@ class MainWindow(QtWidgets.QMainWindow):
             a.rows[0].role = core.ROLE_CONTROL  # loading control is usually the top row; user can change
         self.set_analysis(a)
         self.statusBar().showMessage(
-            f"{len(a.rows)}개 단백질(행), {a.n_lanes}개 레인, {len(a.bands)}개 박스를 찾았습니다. "
-            "밴드를 드래그로 선택하고 우클릭해 단백질/레인 그룹 이름을 붙이세요."
+            f"자동 그룹 제안: 단백질 {len(a.rows)}개({', '.join(r.name for r in a.rows)}), 레인 {a.n_lanes}개, 박스 {len(a.bands)}개. "
+            "바로 '6. Figure 만들기'로 가거나, 밴드를 드래그로 선택 → 우클릭으로 그룹 이름·구성을 고치세요."
         )
 
     def set_analysis(self, a: core.Analysis):
@@ -1463,6 +1466,7 @@ class MainWindow(QtWidgets.QMainWindow):
         a.ensure_lane_labels()
         self.view.set_analysis(a)
         self.refresh_all()
+        self._figure_changed(self.doc)
 
     def refresh_all(self):
         self.fill_rows_table()
@@ -2365,9 +2369,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 k = index.get(int(fml.get("image", 0)))
                 if k is not None:
                     docs[k].analysis.formulas.append({x: fml[x] for x in ("name", "expr", "normalize") if x in fml})
-            for w in self._fig_windows.values():
-                w.close()
-            self._fig_windows = {}
             self.docs = docs
             self.big_groups = [
                 dict(g, members=[[index[int(k)], n] for k, n in g.get("members", []) if int(k) in index])

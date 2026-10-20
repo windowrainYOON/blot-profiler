@@ -482,7 +482,7 @@ def _build_analysis(regs, settings: DetectSettings, row_names, signal: np.ndarra
         if len(lane_x) > 1:
             pitch = float(np.median(np.diff(lane_x)))
             w = int(min(max(w, 0.7 * pitch), 0.95 * pitch))
-        name = row_names[ri] if row_names and ri < len(row_names) else f"R{ri + 1}"
+        name = row_names[ri] if row_names and ri < len(row_names) else f"P{ri + 1}"
         a.rows.append(Row(name=name, width=max(w, 4), height=max(h, 4)))
         seen = {}
         for i in c:
@@ -538,7 +538,7 @@ def fill_missing_lanes(a: Analysis) -> int:
 def add_band(a: Analysis, x: float, y: float) -> Band:
     """Add a band at (x, y): it joins the nearest row (by y) and nearest lane (by x)."""
     if not a.rows:
-        a.rows.append(Row(name="R1", width=40, height=16))
+        a.rows.append(Row(name="P1", width=40, height=16))
         row = 0
     else:
         dists = []
@@ -549,7 +549,7 @@ def add_band(a: Analysis, x: float, y: float) -> Band:
         d, row = min(dists)
         if d > a.rows[row].height * 1.5:
             ref = a.rows[row]
-            a.rows.append(Row(name=unique_name(f"R{len(a.rows) + 1}", [r.name for r in a.rows]), width=ref.width, height=ref.height))
+            a.rows.append(Row(name=unique_name(f"P{len(a.rows) + 1}", [r.name for r in a.rows]), width=ref.width, height=ref.height))
             row = len(a.rows) - 1
     lane_x = lane_centers(a)
     if lane_x:
