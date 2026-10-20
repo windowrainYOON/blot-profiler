@@ -162,6 +162,7 @@ class Analysis:
     rows: List[Row] = field(default_factory=list)  # protein groups
     bands: List[Band] = field(default_factory=list)
     lane_labels: List[str] = field(default_factory=list)  # lane group name of each physical lane
+    named_lanes: List[str] = field(default_factory=list)  # lane group names the user gave (kept by auto lanes)
     formulas: List[Dict[str, str]] = field(default_factory=list)  # {name, expr, normalize}
 
     @property
@@ -228,6 +229,7 @@ class Analysis:
         a.rows = [Row(**r) for r in d.get("rows", [])]
         a.bands = [Band(**{k: b[k] for k in ("row", "lane", "cx", "cy")}) for b in d.get("bands", [])]
         a.lane_labels = list(d.get("lane_labels", []))
+        a.named_lanes = list(d.get("named_lanes", []))
         a.formulas = [dict(f) for f in d.get("formulas", [])]
         return a
 
@@ -267,6 +269,19 @@ class DetectSettings:
     fill_missing_lanes: bool = True  # add boxes in rows where a lane has no detected band
     snap_to_lanes: bool = True  # centre every box horizontally on its lane
     refine_vertical: bool = False  # slide each box up/down onto its band
+    # Detection works on a contrast-adjusted copy (percentile stretch + gamma) so
+    # faint bands are found and boxed; measurement never uses this copy.
+    lut_gamma: float = 0.6  # 1.0 = linear (no LUT)
+    lut_low: float = 0.5  # percentile mapped to 0
+    lut_high: float = 99.8  # percentile mapped to 1
+
+
+def detection_image(signal: np.ndarray, settings: "DetectSettings") -> np.ndarray:
+    """Contrast-stretched working copy used only to find bands (gamma < 1 lifts faint bands)."""
+    lo, hi = np.percentile(signal, [settings.lut_low, settings.lut_high])
+    x = np.clip((signal - lo) / max(hi - lo, 1e-12), 0.0, 1.0)
+    g = float(settings.lut_gamma)
+    return x if abs(g - 1.0) < 1e-9 else x ** g
 
 
 def _threshold(img: np.ndarray, sensitivity: float) -> float:
@@ -304,7 +319,8 @@ def detect_bands(signal: np.ndarray, settings: DetectSettings, row_names: Option
     from skimage.measure import label, regionprops
     from skimage.morphology import opening
 
-    img = ndi.gaussian_filter(signal, settings.smooth_sigma) if settings.smooth_sigma > 0 else signal
+    work = detection_image(signal, settings)
+    img = ndi.gaussian_filter(work, settings.smooth_sigma) if settings.smooth_sigma > 0 else work
     t = _threshold(img, settings.sensitivity)
     mask = _remove_lines(img > t)
     # Remove thin specks and scratches.
@@ -412,6 +428,14 @@ def _build_analysis(regs, settings: DetectSettings, row_names, signal: np.ndarra
     heights = np.array([r["y1"] - r["y0"] for r in regs], float)
     row_gap = max(2.0, 0.6 * float(np.median(heights)))
     row_clusters = _cluster_1d([r["cy"] for r in regs], row_gap)
+    # a "row" made of a single speck while other rows span several lanes is noise
+    if max(len(c) for c in row_clusters) >= 4:
+        keep = [c for c in row_clusters if len(c) >= 2]
+        if keep and len(keep) < len(row_clusters):
+            idx = sorted(i for c in keep for i in c)
+            remap = {old: new for new, old in enumerate(idx)}
+            regs = [regs[i] for i in idx]
+            row_clusters = [[remap[i] for i in c] for c in keep]
     row_clusters.sort(key=lambda c: np.mean([regs[i]["cy"] for i in c]))
 
     # ---- lanes: cluster by horizontal centre across all rows
@@ -645,8 +669,50 @@ def make_lane_group(a: Analysis, bands: Sequence[Band], name: str) -> str:
     final = unique_name(name or "Lane", others)
     for l in lanes:
         a.lane_labels[l] = final
+    if final not in a.named_lanes:
+        a.named_lanes.append(final)
     remove_empty(a)
+    a.named_lanes = [n for n in a.named_lanes if n in a.lane_labels]
     return final
+
+
+def auto_assign_lanes(a: Analysis) -> bool:
+    """Re-derive lanes from box positions: bands are clustered left to right by
+    their centre x (a new lane starts where the gap exceeds half a box width).
+
+    A lane keeps a lane group name the user gave (most common one among its
+    bands); other lanes are numbered L1, L2 … by position. Returns True if the
+    lanes or their names changed.
+    """
+    if not a.bands:
+        return False
+    a.ensure_lane_labels()
+    named = set(a.named_lanes)
+    gap = 0.5 * float(np.median([a.rows[b.row].width for b in a.bands]))
+    order = sorted(a.bands, key=lambda b: b.cx)
+    clusters: List[List[Band]] = [[order[0]]]
+    for b in order[1:]:
+        if b.cx - clusters[-1][-1].cx > gap:
+            clusters.append([b])
+        else:
+            clusters[-1].append(b)
+    labels = []
+    for k, c in enumerate(clusters):
+        names = [a.lane_labels[b.lane] for b in c if a.lane_labels[b.lane] in named]
+        labels.append(max(set(names), key=names.count) if names else None)
+    used = {l for l in labels if l}
+    for k, l in enumerate(labels):
+        if l is None:
+            labels[k] = unique_name(f"L{k + 1}", used)
+            used.add(labels[k])
+    new_lane = {id(b): k for k, c in enumerate(clusters) for b in c}
+    changed = labels != a.lane_labels or any(b.lane != new_lane[id(b)] for b in a.bands)
+    if changed:
+        for b in a.bands:
+            b.lane = new_lane[id(b)]
+        a.lane_labels = labels
+        a.bands.sort(key=lambda b: (b.row, b.lane))
+    return changed
 
 
 def lane_centers(a: Analysis) -> List[float]:

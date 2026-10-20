@@ -685,6 +685,17 @@ class FormulaDialog(QtWidgets.QDialog):
                 "normalize": "1" if self.normalize.isChecked() else "0"}
 
 
+RAW_NOTE = ("※ 정량은 항상 원본 TIF의 raw intensity로 합니다. 표시 대비와 검출용 LUT는 정량에 쓰지 않고, "
+            "어두운 밴드 이미지는 선형 반전(최댓값 − 값)만, 그리고 선택한 배경 제거만 적용합니다.")
+
+
+def raw_note() -> QtWidgets.QLabel:
+    lab = QtWidgets.QLabel(RAW_NOTE)
+    lab.setWordWrap(True)
+    lab.setStyleSheet("color: #1565c0; font-size: 11px;")
+    return lab
+
+
 def _spin(lo, hi, val, step=1, decimals=None, suffix=""):
     if decimals is None:
         w = QtWidgets.QSpinBox()
@@ -988,6 +999,10 @@ class MainWindow(QtWidgets.QMainWindow):
         f.addRow("최소 밴드 면적", self.min_area)
         self.pad = _spin(0, 100, 3, suffix=" px")
         f.addRow("박스 여백", self.pad)
+        self.lut_gamma = _spin(0.2, 1.0, 0.6, 0.05, decimals=2)
+        self.lut_gamma.setToolTip("밴드를 찾을 때만 쓰는 대비 조정(LUT) 감마. 1보다 작을수록 흐린 밴드를 더 잘 잡습니다. 1 = 조정 안 함.\n"
+                                  "정량에는 쓰이지 않습니다.")
+        f.addRow("검출용 대비(LUT) 감마", self.lut_gamma)
         self.edge = _spin(0, 2000, 0, suffix=" px")
         self.edge.setToolTip("좌우 가장자리에서 이 거리 안의 물체는 무시합니다 (마커/래더 제외용).")
         f.addRow("좌우 가장자리 제외", self.edge)
@@ -1001,6 +1016,7 @@ class MainWindow(QtWidgets.QMainWindow):
         b.setStyleSheet("font-weight: bold; padding: 6px;")
         b.clicked.connect(self.detect)
         f.addRow(b)
+        f.addRow(raw_note())
         b4 = QtWidgets.QPushButton("박스 세로 위치 자동 보정 (밴드에 맞추기)")
         b4.clicked.connect(self.refine_positions)
         f.addRow(b4)
@@ -1058,6 +1074,12 @@ class MainWindow(QtWidgets.QMainWindow):
         hb.addStretch(1)
         lay.addLayout(hb)
 
+        self.auto_lanes = QtWidgets.QCheckBox("박스를 옮기거나 크기를 바꾸면 위치(왼쪽→오른쪽) 순서로 레인 자동 지정")
+        self.auto_lanes.setChecked(True)
+        self.auto_lanes.setToolTip("이름을 붙인 레인 그룹은 유지되고, 나머지 레인은 L1, L2 … 순서로 다시 붙습니다.\n"
+                                   "레인은 언제든 '새 레인(열) 그룹 만들기'로 바꿀 수 있습니다.")
+        self.auto_lanes.toggled.connect(lambda on: on and self.apply_auto_lanes())
+        lay.addWidget(self.auto_lanes)
         self.lanes_table = QtWidgets.QTableWidget(0, 2)
         self.lanes_table.setHorizontalHeaderLabels(["레인 (왼쪽부터)", "레인 그룹"])
         self.lanes_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
@@ -1085,6 +1107,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bands_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.bands_table.itemSelectionChanged.connect(self.on_table_selection)
         lay.addWidget(self.bands_table, 1)
+        lay.addWidget(raw_note())
         self.profile = PlotCanvas()
         self.profile.toolbar.hide()
         self.profile.setMaximumHeight(170)
@@ -1125,6 +1148,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.results_title = QtWidgets.QLabel()
         self.results_title.setStyleSheet("font-weight: bold;")
         lay.addWidget(self.results_title)
+        lay.addWidget(raw_note())
 
         g = QtWidgets.QGroupBox("Internal control 정규화")
         f = QtWidgets.QFormLayout(g)
@@ -1379,6 +1403,7 @@ class MainWindow(QtWidgets.QMainWindow):
             invert=self._invert_choice(), smooth_sigma=self.smooth.value(), sensitivity=self.sens.value(),
             min_area=self.min_area.value(), pad=self.pad.value(), exclude_edge=self.edge.value(),
             fill_missing_lanes=self.fill_lanes.isChecked(), snap_to_lanes=self.snap_lanes.isChecked(),
+            lut_gamma=self.lut_gamma.value(),
         )
         old = self.analysis
         names = [r.name for r in old.rows]
@@ -1417,7 +1442,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fill_lanes_table()
         self.remeasure()
 
+    def apply_auto_lanes(self) -> bool:
+        if not self.auto_lanes.isChecked() or not core.auto_assign_lanes(self.analysis):
+            return False
+        self.view.refresh_items()
+        self.fill_lanes_table()
+        return True
+
     def on_boxes_changed(self):
+        if QtWidgets.QApplication.mouseButtons() != Qt.NoButton:
+            self.view.band_moved()  # still dragging: wait until the button is released
+            return
+        if self.apply_auto_lanes():
+            self.statusBar().showMessage("박스 위치에 맞춰 레인을 다시 지정했습니다 (이름 붙인 레인 그룹은 유지)")
         # box sizes may have been changed by dragging in resize mode
         for i, r in enumerate(self.analysis.rows):
             for col, attr in ((2, "width"), (3, "height")):
@@ -1430,6 +1467,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def add_band_at(self, x, y):
         core.add_band(self.analysis, x, y)
+        if self.auto_lanes.isChecked():
+            core.auto_assign_lanes(self.analysis)
         self.structure_changed()
 
     def delete_selected(self):
@@ -2148,7 +2187,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "format": 3,
             "detect": {
                 "sensitivity": self.sens.value(), "smooth": self.smooth.value(), "min_area": self.min_area.value(),
-                "pad": self.pad.value(), "edge": self.edge.value(),
+                "pad": self.pad.value(), "edge": self.edge.value(), "lut_gamma": self.lut_gamma.value(),
             },
             "images": [
                 {
@@ -2260,6 +2299,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.min_area.setValue(det.get("min_area", 30))
             self.pad.setValue(det.get("pad", 3))
             self.edge.setValue(det.get("edge", 0))
+            self.lut_gamma.setValue(det.get("lut_gamma", 0.6))
             docs, index = [], {}
             for i, im in enumerate(images):
                 path = self._find_image(im.get("image_path"), p)

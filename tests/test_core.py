@@ -160,3 +160,39 @@ def test_cross_image_formulas():
     v3 = core.project_variables([v1, {"X": np.array([1.0, 2.0, 3.0])}], base=0)
     with pytest.raises(core.FormulaError):
         core.evaluate("Vinculin + I2.X", v3)
+
+
+def test_auto_assign_lanes_keeps_user_names():
+    a = grid(rows=2, lanes=4)
+    core.make_lane_group(a, [b for b in a.bands if b.lane == 1], "DOX")
+    # drag the row-1 box of lane 3 next to lane 2 and the row-0 box of lane 0 far right
+    b03 = next(b for b in a.bands if b.row == 1 and b.lane == 3)
+    b03.cx = 81  # lane 2 sits at x=80
+    b00 = next(b for b in a.bands if b.row == 0 and b.lane == 0)
+    b00.cx = 160
+    assert core.auto_assign_lanes(a)
+    assert a.lane_labels == ["L1", "DOX", "L3", "L4", "L5"]
+    assert b03.lane == 2 and b00.lane == 4
+    assert not core.auto_assign_lanes(a)  # stable
+
+
+def test_measurement_uses_raw_intensities():
+    """Net intensity = sum of (linear) inverted raw pixels in the box; neither the
+    detection LUT nor any display contrast enters the measurement."""
+    rng = np.random.default_rng(1)
+    raw = rng.integers(20000, 60000, size=(60, 80)).astype(np.float64)  # 16-bit, dark-band polarity
+    sig = core.to_signal(raw, invert=True)
+    np.testing.assert_array_equal(sig, 65535.0 - raw)
+    a = core.Analysis(rows=[core.Row("P", 10, 6)], bands=[core.Band(0, 0, 20, 30), core.Band(0, 1, 50, 30)])
+    m = core.measure(sig, a, core.BackgroundSettings(method="none"))
+    for meas, b in zip(m, a.bands):
+        x, y, w, h = b.box(a.rows)
+        assert meas.net == pytest.approx(float((65535.0 - raw[y:y + h, x:x + w]).sum()))
+    # detection LUT is a separate copy and leaves the signal untouched
+    before = sig.copy()
+    core.detect_bands(sig, core.DetectSettings(lut_gamma=0.5))
+    np.testing.assert_array_equal(sig, before)
+    # non-inverted (fluorescence) images are measured as is
+    m2 = core.measure(core.to_signal(raw, invert=False), a, core.BackgroundSettings(method="none"))
+    x, y, w, h = a.bands[0].box(a.rows)
+    assert m2[0].net == pytest.approx(float(raw[y:y + h, x:x + w].sum()))
