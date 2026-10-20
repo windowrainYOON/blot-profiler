@@ -76,6 +76,139 @@ class ReferenceView(QtWidgets.QGraphicsView):
             self.fitInView(r, Qt.KeepAspectRatio)
 
 
+class PreviewLabel(QtWidgets.QLabel):
+    """Rendered figure; in resize mode the panel crop edges can be dragged."""
+
+    edited = QtCore.Signal(str, str, float)  # edge (top/bottom/left/right), protein, delta in inches
+    modeToggled = QtCore.Signal(bool)
+
+    CURSORS = {"top": Qt.SizeVerCursor, "bottom": Qt.SizeVerCursor, "left": Qt.SizeHorCursor, "right": Qt.SizeHorCursor}
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAlignment(Qt.AlignCenter)
+        self.setMouseTracking(True)
+        self.layout_ = {"panels": [], "size": (1.0, 1.0)}
+        self.edit_mode = False
+        self.drag = None  # (edge, panel, start inches)
+        self.cur = None
+
+    def set_layout(self, layout):
+        self.layout_ = layout
+        self.update()
+
+    def _k(self):
+        pm = self.pixmap()
+        if pm is None or pm.isNull():
+            return 0.0, 0.0, 0.0
+        k = pm.width() / max(self.layout_["size"][0], 1e-6)  # screen px per inch
+        return k, (self.width() - pm.width()) / 2.0, (self.height() - pm.height()) / 2.0
+
+    def to_in(self, pos):
+        k, ox, oy = self._k()
+        if not k:
+            return None
+        return (pos.x() - ox) / k, (pos.y() - oy) / k
+
+    def hit(self, pos):
+        p_in = self.to_in(pos)
+        k, _, _ = self._k()
+        if p_in is None:
+            return None
+        x, y = p_in
+        tol = 6.0 / k
+        for p in self.layout_["panels"]:
+            xr = p["x_blot"] + self.layout_.get("panel_w", 0)
+            if p["x"] - tol <= x <= xr + tol:
+                if abs(y - p["y"]) < tol:
+                    return "top", p
+                if abs(y - (p["y"] + p["h"])) < tol:
+                    return "bottom", p
+            if p["y"] - tol <= y <= p["y"] + p["h"] + tol:
+                if abs(x - p["x_blot"]) < tol:
+                    return "left", p
+                if abs(x - xr) < tol:
+                    return "right", p
+        return None
+
+    def mouseMoveEvent(self, e):
+        pos = e.position().toPoint()
+        if self.drag:
+            self.cur = pos
+            self.update()
+        elif self.edit_mode:
+            h = self.hit(pos)
+            if h:
+                self.setCursor(self.CURSORS[h[0]])
+            else:
+                self.unsetCursor()
+        super().mouseMoveEvent(e)
+
+    def mousePressEvent(self, e):
+        if self.edit_mode and e.button() == Qt.LeftButton:
+            pos = e.position().toPoint()
+            h = self.hit(pos)
+            if h:
+                self.drag = (h[0], h[1], self.to_in(pos))
+                self.cur = pos
+                return
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self.drag:
+            edge, p, start = self.drag
+            end = self.to_in(e.position().toPoint())
+            self.drag = None
+            self.cur = None
+            self.update()
+            if end is not None:
+                d = (end[1] - start[1]) if edge in ("top", "bottom") else (end[0] - start[0])
+                if abs(d) > 1e-4:
+                    self.edited.emit(edge, p["row"], d)
+            return
+        super().mouseReleaseEvent(e)
+
+    def contextMenuEvent(self, e):
+        menu = QtWidgets.QMenu(self)
+        act = menu.addAction("패널 크기 조절 모드 (가장자리 드래그)")
+        act.setCheckable(True)
+        act.setChecked(self.edit_mode)
+        act.toggled.connect(self.modeToggled.emit)
+        menu.exec(e.globalPos())
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape and self.edit_mode:
+            self.modeToggled.emit(False)
+            return
+        super().keyPressEvent(e)
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if not self.edit_mode:
+            return
+        k, ox, oy = self._k()
+        if not k:
+            return
+        qp = QtGui.QPainter(self)
+        pen = QtGui.QPen(QtGui.QColor("#1e88ff"), 1.5, Qt.DashLine)
+        qp.setPen(pen)
+        pw = self.layout_.get("panel_w", 0)
+        for p in self.layout_["panels"]:
+            r = QtCore.QRectF(ox + p["x_blot"] * k, oy + p["y"] * k, pw * k, p["h"] * k)
+            qp.drawRect(r)
+            qp.setBrush(QtGui.QColor("#1e88ff"))
+            for hx, hy in ((r.center().x(), r.top()), (r.center().x(), r.bottom()), (r.left(), r.center().y()), (r.right(), r.center().y())):
+                qp.drawRect(QtCore.QRectF(hx - 3, hy - 3, 6, 6))
+            qp.setBrush(Qt.NoBrush)
+        if self.drag and self.cur is not None:
+            qp.setPen(QtGui.QPen(QtGui.QColor("#e65100"), 2))
+            if self.drag[0] in ("top", "bottom"):
+                qp.drawLine(0, self.cur.y(), self.width(), self.cur.y())
+            else:
+                qp.drawLine(self.cur.x(), 0, self.cur.x(), self.height())
+        qp.end()
+
+
 class FigureEditor(QtWidgets.QWidget):
     """Figure editor for the image shown in the main window (see :meth:`set_doc`)."""
 
@@ -100,6 +233,7 @@ class FigureEditor(QtWidgets.QWidget):
         cl.addWidget(self._build_style())
         cl.addWidget(self._build_contrast())
         cl.addWidget(self._build_ladder())
+        cl.addWidget(self._build_numbers())
         cl.addWidget(self._build_export())
         cl.addStretch(1)
         scroll = QtWidgets.QScrollArea()
@@ -107,9 +241,10 @@ class FigureEditor(QtWidgets.QWidget):
         scroll.setWidget(controls)
         scroll.setMinimumWidth(470)
 
-        self.preview = QtWidgets.QLabel()
-        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview = PreviewLabel()
         self.preview.setStyleSheet("background: white;")
+        self.preview.edited.connect(self.on_crop_dragged)
+        self.preview.modeToggled.connect(lambda on: self.w_editmode.setChecked(on))
         pv = QtWidgets.QScrollArea()
         pv.setWidgetResizable(True)
         pv.setWidget(self.preview)
@@ -118,6 +253,11 @@ class FigureEditor(QtWidgets.QWidget):
         pw = QtWidgets.QWidget()
         pl = QtWidgets.QVBoxLayout(pw)
         pl.setContentsMargins(0, 0, 0, 0)
+        self.w_editmode = QtWidgets.QCheckBox("패널 크기 조절 모드 (미리보기에서 패널 가장자리 드래그 · 우클릭으로도 켜고 끔 · Esc 종료)")
+        self.w_editmode.setToolTip("위/아래 가장자리: 그 단백질 패널의 높이, 왼쪽/오른쪽 가장자리: 모든 패널의 너비 (레인 정렬 유지).\n"
+                                   "마커 띠와 kDa 눈금도 같은 범위로 따라갑니다.")
+        self.w_editmode.toggled.connect(self.on_edit_mode)
+        pl.addWidget(self.w_editmode)
         pl.addWidget(pv, 1)
         pl.addWidget(self.size_label)
 
@@ -252,13 +392,20 @@ class FigureEditor(QtWidgets.QWidget):
         f.addRow(self.w_bold)
         self.w_gap = _spin(0.0, 1.0, 0.06, 0.01, 2, " in")
         f.addRow("패널 간격", self.w_gap)
-        self.w_margin = _spin(0, 500, 8, 1, None, " px")
-        self.w_margin.setToolTip("바깥쪽 레인 박스 좌우로 더 보여줄 블롯 픽셀")
-        f.addRow("좌우 여백", self.w_margin)
+        hb = QtWidgets.QHBoxLayout()
+        self.w_ml = _spin(-500, 2000, 8, 1, None, " px")
+        self.w_mr = _spin(-500, 2000, 8, 1, None, " px")
+        for w_ in (self.w_ml, self.w_mr):
+            w_.setToolTip("바깥쪽 레인 박스 밖으로 더 보여줄 블롯 픽셀 (음수 = 안쪽으로 자름). 모든 패널에 같이 적용")
+        hb.addWidget(QtWidgets.QLabel("왼쪽"))
+        hb.addWidget(self.w_ml)
+        hb.addWidget(QtWidgets.QLabel("오른쪽"))
+        hb.addWidget(self.w_mr)
+        f.addRow("좌우 여백", hb)
         self.w_frame = _spin(0.0, 3.0, 0.8, 0.1, 1, " pt")
         f.addRow("테두리 두께", self.w_frame)
         for w, key in ((self.w_width, "width_in"), (self.w_fs, "font_size"), (self.w_gap, "panel_gap_in"),
-                       (self.w_margin, "margin_px"), (self.w_frame, "frame_lw")):
+                       (self.w_ml, "margin_left_px"), (self.w_mr, "margin_right_px"), (self.w_frame, "frame_lw")):
             w.valueChanged.connect(lambda v, key=key: self.set(key, v))
         self.w_font.currentTextChanged.connect(lambda t: self.set("font", t))
         self.w_bold.toggled.connect(lambda on: self.set("label_bold", on))
@@ -360,10 +507,12 @@ class FigureEditor(QtWidgets.QWidget):
         self._loading = True
         try:
             pairs = ((self.w_width, "width_in"), (self.w_fs, "font_size"), (self.w_gap, "panel_gap_in"),
-                     (self.w_margin, "margin_px"), (self.w_frame, "frame_lw"), (self.w_lo, "lo_pct"),
+                     (self.w_frame, "frame_lw"), (self.w_lo, "lo_pct"),
                      (self.w_hi, "hi_pct"), (self.w_gamma, "gamma"), (self.w_sx0, "strip_x0"), (self.w_sx1, "strip_x1"))
             for w, key in pairs:
                 w.setValue(s[key])
+            for w_, key in ((self.w_ml, "margin_left_px"), (self.w_mr, "margin_right_px")):
+                w_.setValue(int(s["margin_px"] if s.get(key) is None else s[key]))
             self.w_font.setCurrentText(s["font"])
             for w, key in ((self.w_bold, "label_bold"), (self.w_perpanel, "per_panel"), (self.w_corr, "use_corrected"),
                            (self.w_strip, "show_strip"), (self.w_minv, "marker_invert"), (self.w_kda, "show_kda")):
@@ -373,6 +522,7 @@ class FigureEditor(QtWidgets.QWidget):
             self.fill_lanes()
             self.fill_groups()
             self.fill_kda()
+            self.fill_numbers()
             self._update_marker_label()
         finally:
             self._loading = False
@@ -406,7 +556,7 @@ class FigureEditor(QtWidgets.QWidget):
             t.setItem(i, 0, it)
             t.setItem(i, 1, QtWidgets.QTableWidgetItem(p["label"]))
             for col, key in ((2, "pad_top"), (3, "pad_bottom")):
-                sp = _spin(0, 2000, int(p.get(key, 0)), 1, None, " px")
+                sp = _spin(-500, 2000, int(p.get(key, 0)), 1, None, " px")
                 sp.valueChanged.connect(lambda v, p=p, key=key: self._panel_pad(p, key, v))
                 t.setCellWidget(i, col, sp)
         t.blockSignals(False)
@@ -595,6 +745,173 @@ class FigureEditor(QtWidgets.QWidget):
         self.refresh_reference()
         self.schedule()
 
+    # ------------------------------------------------------------ crop editing in the preview
+    def on_edit_mode(self, on):
+        self.preview.edit_mode = bool(on)
+        if not on:
+            self.preview.unsetCursor()
+        else:
+            self.right.setCurrentIndex(0)
+            self.preview.setFocus()
+        self.preview.update()
+        self.status("패널 크기 조절 모드: 미리보기에서 패널의 위/아래(높이)·왼쪽/오른쪽(너비) 가장자리를 드래그하세요"
+                    if on else "패널 크기 조절 모드를 끝냈습니다")
+
+    def on_crop_dragged(self, edge, row, d_in):
+        """A panel edge was dragged by ``d_in`` inches in the preview."""
+        scale = self.preview.layout_.get("scale") or 0
+        if not scale:
+            return
+        d = int(round(d_in / scale))  # blot pixels
+        if edge in ("top", "bottom"):
+            p = next((p for p in self.s["panels"] if p["row"] == row), None)
+            if p is None:
+                return
+            if edge == "top":
+                p["pad_top"] = int(p.get("pad_top", 0)) - d
+            else:
+                p["pad_bottom"] = int(p.get("pad_bottom", 0)) + d
+        else:
+            key = "margin_left_px" if edge == "left" else "margin_right_px"
+            cur = self.s.get(key)
+            cur = int(self.s["margin_px"] if cur is None else cur)
+            self.s[key] = cur - d if edge == "left" else cur + d
+        self.load_from_settings()
+        self.render()
+
+    # ------------------------------------------------------------ numbers under the lanes
+    def _build_numbers(self):
+        g = self._group("정량 숫자 넣기 (레인 아래 숫자 줄)")
+        l = QtWidgets.QVBoxLayout(g)
+        info = QtWidgets.QLabel("정량한 값을 골라 원하는 위치에 레인별 숫자로 넣습니다. '기준 레인=1'을 고르면 그 레인을 1.00으로 맞춥니다.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #555;")
+        l.addWidget(info)
+        self.num_table = QtWidgets.QTableWidget(0, 5)
+        self.num_table.setHorizontalHeaderLabels(["값", "위치", "왼쪽 라벨", "소수점", "기준 레인=1"])
+        self.num_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
+        self.num_table.verticalHeader().setVisible(False)
+        self.num_table.setMaximumHeight(170)
+        self.num_table.itemChanged.connect(self.on_number_item)
+        l.addWidget(self.num_table)
+        hb = QtWidgets.QHBoxLayout()
+        b = QtWidgets.QPushButton("숫자 줄 추가")
+        b.clicked.connect(self.add_number)
+        hb.addWidget(b)
+        b = QtWidgets.QPushButton("선택 줄 삭제")
+        b.clicked.connect(self.delete_number)
+        hb.addWidget(b)
+        hb.addStretch(1)
+        l.addLayout(hb)
+        return g
+
+    def number_sources(self):
+        """[(key, label, values per lane)] of the current image's quantification."""
+        d = self.doc
+        out = []
+        if d is None or not d.measurements:
+            return out
+        a = d.analysis
+        res, _ = self.main.image_results(d)
+        for name, v in res.items():
+            if np.size(v) > 1:
+                out.append((f"res:{name}", name, np.asarray(v, float)))
+        for ri, r in enumerate(a.rows):
+            out.append((f"net:{r.name}", f"{r.name} (Net, raw)", core.row_vector(a, d.measurements, ri)))
+        return out
+
+    def positions(self):
+        out = [("bottom", "맨 아래"), ("top", "맨 위 (레인 이름 아래)")]
+        for p in self.s["panels"]:
+            out += [(f"above:{p['row']}", f"'{p['row']}' 위"), (f"below:{p['row']}", f"'{p['row']}' 아래")]
+        return out
+
+    def fill_numbers(self):
+        t = self.num_table
+        t.blockSignals(True)
+        nums = self.s.setdefault("numbers", [])
+        t.setRowCount(len(nums))
+        sources = self.number_sources()
+        for i, n in enumerate(nums):
+            cb = QtWidgets.QComboBox()
+            for key, label, _ in sources:
+                cb.addItem(label, key)
+            if cb.findData(n.get("source")) < 0:
+                cb.addItem(f"(없음) {n.get('source', '')}", n.get("source"))
+            cb.setCurrentIndex(cb.findData(n.get("source")))
+            cb.currentIndexChanged.connect(lambda _=None, n=n, cb=cb: self._number_source(n, cb))
+            t.setCellWidget(i, 0, cb)
+            pc = QtWidgets.QComboBox()
+            for key, label in self.positions():
+                pc.addItem(label, key)
+            pc.setCurrentIndex(max(0, pc.findData(n.get("pos", "bottom"))))
+            pc.currentIndexChanged.connect(lambda _=None, n=n, pc=pc: self._number_set(n, "pos", pc.currentData()))
+            t.setCellWidget(i, 1, pc)
+            t.setItem(i, 2, QtWidgets.QTableWidgetItem(n.get("label", "")))
+            sp = _spin(0, 6, int(n.get("decimals", 2)))
+            sp.valueChanged.connect(lambda v, n=n: self._number_set(n, "decimals", int(v)))
+            t.setCellWidget(i, 3, sp)
+            rc = QtWidgets.QComboBox()
+            rc.addItem("그대로", None)
+            for li, lane in enumerate(self.s["lanes"]):
+                rc.addItem(f"{li + 1}: {lane.get('text', '').replace('|', ' ')}", li)
+            rc.setCurrentIndex(0 if n.get("rel_lane") is None else max(0, rc.findData(n.get("rel_lane"))))
+            rc.currentIndexChanged.connect(lambda _=None, n=n, rc=rc: self._number_set(n, "rel_lane", rc.currentData()))
+            t.setCellWidget(i, 4, rc)
+        t.blockSignals(False)
+        t.resizeColumnToContents(0)
+
+    def _number_set(self, n, key, value):
+        n[key] = value
+        self.schedule()
+
+    def _number_source(self, n, cb):
+        old_default = n.get("_default_label")
+        n["source"] = cb.currentData()
+        label = cb.currentText().replace(" (Net, raw)", "")
+        if not n.get("label") or n.get("label") == old_default:
+            n["label"] = label
+            n["_default_label"] = label
+            self.fill_numbers()
+        self.schedule()
+
+    def on_number_item(self, item):
+        if item.column() == 2:
+            self.s["numbers"][item.row()]["label"] = item.text()
+            self.schedule()
+
+    def add_number(self):
+        sources = self.number_sources()
+        if not sources:
+            QtWidgets.QMessageBox.information(self, "정량 숫자", "먼저 정량값이 있어야 합니다 (밴드 박스와 단백질 그룹).")
+            return
+        key, label, _ = sources[0]
+        label = label.replace(" (Net, raw)", "")
+        self.s["numbers"].append({"source": key, "label": label, "_default_label": label, "pos": "bottom",
+                                  "decimals": 2, "rel_lane": None})
+        self.fill_numbers()
+        self.schedule()
+
+    def delete_number(self):
+        for r in sorted({i.row() for i in self.num_table.selectedIndexes()}, reverse=True):
+            del self.s["numbers"][r]
+        self.fill_numbers()
+        self.schedule()
+
+    def resolve_numbers(self):
+        """Number rows with their texts for the renderer."""
+        values = {key: v for key, _, v in self.number_sources()}
+        out = []
+        n_lanes = len(self.s["lanes"])
+        for n in self.s.get("numbers", []):
+            v = values.get(n.get("source"))
+            if v is None:
+                continue
+            v = np.concatenate([v, np.full(max(0, n_lanes - v.size), np.nan)])[:n_lanes]
+            texts, suffix = figure.format_numbers(v, int(n.get("decimals", 2)), n.get("rel_lane"))
+            out.append({"label": n.get("label", "") + suffix, "pos": n.get("pos", "bottom"), "texts": texts})
+        return out
+
     # ------------------------------------------------------------ reference view
     def refresh_reference(self):
         if not self.ready():
@@ -663,7 +980,9 @@ class FigureEditor(QtWidgets.QWidget):
         if not self.ready():
             return
         try:
-            figure.render(self.fig, self._display_source(), self.doc.analysis, self.s, self.doc.marker)
+            layout = figure.render(self.fig, self._display_source(), self.doc.analysis, self.s, self.doc.marker,
+                                   self.resolve_numbers())
+            self.preview.set_layout(layout)
             buf = io.BytesIO()
             self.fig.savefig(buf, format="png", dpi=PREVIEW_DPI, facecolor="white")
             pm = QtGui.QPixmap()

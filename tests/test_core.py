@@ -219,3 +219,36 @@ def test_figure_renders_chemi_blot():
     figure.render(fig, sig, a, s, synth.marker_photo().astype(float))
     w, h = fig.get_size_inches()
     assert w > 3 and h > 1 and len(fig.axes) == 6  # 3 panels + 3 ladder strips
+
+
+def test_figure_numbers_and_layout():
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib.figure import Figure
+    from blot_profiler import figure
+    import synth
+    assert figure.format_numbers([2.0, 4.0, np.nan], 2, rel_lane=0) == (["1.00", "2.00", "–"], "")
+    assert figure.format_numbers([6.6e6, 1.25e7], 2) == (["0.66", "1.25"], " (×10⁷)")
+    assert figure.format_numbers([123.4], 0) == (["123"], "")
+    raw, _ = synth.chemi_blot()
+    sig = core.to_signal(raw.astype(float))
+    a = core.detect_bands(core.corrected_signal(sig, core.BackgroundSettings()), core.DetectSettings())
+    s = figure.sync_settings(figure.default_settings(), a, raw.shape)
+    nums = [{"label": "Kras/Vin", "pos": "bottom", "texts": ["1.00"] * 8},
+            {"label": "x", "pos": f"below:{a.rows[0].name}", "texts": ["1"] * 8}]
+    fig = Figure()
+    lay0 = figure.render(fig, sig, a, s)
+    h0 = fig.get_size_inches()[1]
+    lay = figure.render(fig, sig, a, s, numbers=nums)
+    assert fig.get_size_inches()[1] > h0 + 0.2  # two number rows add height
+    assert [p["row"] for p in lay["panels"]] == [r.name for r in a.rows]
+    # widening the crop on the left keeps the panel width (inches) but lowers the scale
+    s["margin_left_px"] = 200
+    lay2 = figure.render(fig, sig, a, s)
+    assert lay2["x0px"] < lay0["x0px"] and lay2["scale"] < lay0["scale"]
+    # a taller crop of one panel
+    s["panels"][0]["pad_bottom"] += 40
+    lay3 = figure.render(fig, sig, a, s)
+    assert lay3["panels"][0]["y1"] == lay2["panels"][0]["y1"] + 40

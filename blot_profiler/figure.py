@@ -29,7 +29,9 @@ FIGURE_DEFAULTS = {
     "font_size": 8.0,
     "label_bold": True,
     "panel_gap_in": 0.06,
-    "margin_px": 8,  # extra blot pixels left/right of the outer lanes
+    "margin_px": 8,  # extra blot pixels left/right of the outer lanes (old files)
+    "margin_left_px": None,  # crop margins (None = margin_px); shared by all panels
+    "margin_right_px": None,
     "lo_pct": 0.5,  # display contrast: percentile shown as white
     "hi_pct": 99.8,  # percentile shown as black
     "gamma": 1.0,
@@ -47,6 +49,7 @@ FIGURE_DEFAULTS = {
     "strip_x1": 0,
     "show_kda": False,
     "kda": [],  # {kda, y}  y in blot pixel rows
+    "numbers": [],  # {source, label, pos, decimals, rel_lane}: quantified values under the lanes
 }
 
 
@@ -122,8 +125,13 @@ def lane_centres(a: core.Analysis) -> List[float]:
 def crop_x(a: core.Analysis, s: dict, width: int):
     lefts = [b.box(a.rows)[0] for b in a.bands]
     rights = [b.box(a.rows)[0] + b.box(a.rows)[2] for b in a.bands]
-    m = int(s.get("margin_px", 0))
-    return max(0, min(lefts) - m), min(width, max(rights) + m)
+    ml = s.get("margin_left_px")
+    mr = s.get("margin_right_px")
+    ml = int(s.get("margin_px", 0) if ml is None else ml)
+    mr = int(s.get("margin_px", 0) if mr is None else mr)
+    x0 = max(0, min(lefts) - ml)
+    x1 = min(width, max(rights) + mr)
+    return x0, max(x1, x0 + 4)
 
 
 def panel_rows(a: core.Analysis, s: dict, height: int):
@@ -144,14 +152,44 @@ def panel_rows(a: core.Analysis, s: dict, height: int):
     return out
 
 
-def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[np.ndarray] = None):
-    """Draw the figure into the matplotlib ``fig`` (it is cleared and resized)."""
+_SUP = str.maketrans("-0123456789", "⁻⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+
+def format_numbers(values, decimals: int = 2, rel_lane: Optional[int] = None):
+    """Texts for a row of numbers and a label suffix.
+
+    ``rel_lane`` scales the row so that lane is 1. Large values (>= 10 000)
+    share one power of ten, given in the suffix, e.g. ``(×10⁶)``, so the
+    numbers stay narrow enough to sit under their lanes.
+    """
+    v = np.asarray(values, float)
+    if rel_lane is not None and 0 <= rel_lane < v.size and np.isfinite(v[rel_lane]) and v[rel_lane] != 0:
+        v = v / v[rel_lane]
+    suffix = ""
+    finite = np.abs(v[np.isfinite(v)])
+    if finite.size and finite.max() >= 1e4:
+        e = int(np.floor(np.log10(finite.max())))
+        v = v / 10.0 ** e
+        suffix = f" (×10{str(e).translate(_SUP)})"
+    texts = ["–" if not np.isfinite(x) else f"{x:.{int(decimals)}f}" for x in v]
+    return texts, suffix
+
+
+def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[np.ndarray] = None,
+           numbers: Optional[List[dict]] = None) -> dict:
+    """Draw the figure into the matplotlib ``fig`` (it is cleared and resized).
+
+    ``numbers`` are resolved number rows: ``{label, texts (one per lane), pos}``
+    with ``pos`` "top", "bottom", "above:<protein>" or "below:<protein>".
+    Returns the layout (inches from the top-left) for interactive editing.
+    """
     fig.clear()
     H, W = signal.shape
+    layout = {"panels": [], "size": (3.0, 1.0)}
     if not a.bands:
         fig.set_size_inches(3, 1)
         fig.text(0.5, 0.5, "밴드 박스가 없습니다", ha="center", va="center")
-        return
+        return layout
     fs = float(s["font_size"])
     family = [s.get("font") or "Arial", "AppleGothic", "DejaVu Sans"]
     weight = "bold" if s.get("label_bold", True) else "normal"
@@ -161,9 +199,10 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
     if not panels:
         fig.set_size_inches(3, 1)
         fig.text(0.5, 0.5, "표시할 단백질 패널이 없습니다", ha="center", va="center")
-        return
+        return layout
     scale = float(s["width_in"]) / max(x1px - x0px, 1)  # inches per pixel
     panel_w = (x1px - x0px) * scale
+    numbers = [n for n in (numbers or []) if n.get("texts")]
 
     show_strip = bool(s.get("show_strip")) and marker is not None and s["strip_x1"] > s["strip_x0"]
     strip_w = (s["strip_x1"] - s["strip_x0"]) * scale if show_strip else 0.0
@@ -171,7 +210,7 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
     show_kda = bool(s.get("show_kda")) and bool(kda)
     tick = 0.05
     kda_w = (max(_text_w(_fmt_kda(k["kda"]), fs) for k in kda) + tick + 0.04) if show_kda else 0.0
-    label_w = max(_text_w(p["label"], fs) for p, *_ in panels) + 0.1
+    label_w = max([_text_w(p["label"], fs) for p, *_ in panels] + [_text_w(n["label"], fs * 0.9) for n in numbers]) + 0.1
 
     # ---- header (lane texts and group bars)
     lanes = s["lanes"]
@@ -191,9 +230,28 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
 
     left = 0.04 + label_w + kda_w + strip_w  # x of the blot panels
     total_w = left + panel_w + 0.08
-    heights = [(y1 - y0) * scale for _, _, y0, y1 in panels]
     gap = float(s["panel_gap_in"])
-    total_h = 0.04 + header_h + sum(heights) + gap * (len(panels) - 1) + 0.04
+    num_h = line_h * 1.05
+
+    # vertical sequence: number rows and panels
+    seq = [("num", n) for n in numbers if n.get("pos") == "top"]
+    for item in panels:
+        name = item[0]["row"]
+        seq += [("num", n) for n in numbers if n.get("pos") == f"above:{name}"]
+        seq.append(("panel", item))
+        seq += [("num", n) for n in numbers if n.get("pos") == f"below:{name}"]
+    shown = {p["row"] for p, *_ in panels}
+    seq += [("num", n) for n in numbers
+            if n.get("pos") == "bottom" or (n.get("pos", "").split(":", 1)[-1] not in shown and n.get("pos") != "top")]
+    body = 0.0
+    prev = None
+    for kind, it in seq:
+        if kind == "panel":
+            body += (gap if prev == "panel" else 0.02 if prev == "num" else 0.0) + (it[3] - it[2]) * scale
+        else:
+            body += num_h + (0.02 if prev == "panel" else 0.0)
+        prev = kind
+    total_h = 0.04 + header_h + body + 0.04
     fig.set_size_inches(total_w, total_h)
     tr = fig.dpi_scale_trans
 
@@ -228,11 +286,25 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             text((xa + xb) / 2, bar_y - bar_gap * 0.6, str(g["text"]).replace("|", "\n"),
                  ha="center", va="bottom", linespacing=1.1)
 
-    # ---- panels
+    # ---- panels and number rows
     src = signal
     ref_all = src[:, x0px:x1px]
     y = 0.04 + header_h
-    for (p, ri, y0, y1), h in zip(panels, heights):
+    prev = None
+    for kind, it in seq:
+        if kind == "num":
+            y += 0.02 if prev == "panel" else 0.0
+            cy = y + num_h / 2
+            text(0.04 + label_w - 0.08, cy, it["label"], ha="right", va="center", fontsize=fs * 0.9)
+            for x, t in zip(xs, it["texts"]):
+                if np.isfinite(x):
+                    text(x, cy, t, ha="center", va="center", fontsize=fs * 0.9)
+            y += num_h
+            prev = kind
+            continue
+        p, ri, y0, y1 = it
+        y += gap if prev == "panel" else 0.02 if prev == "num" else 0.0
+        h = (y1 - y0) * scale
         crop = src[y0:y1, x0px:x1px]
         disp = _stretch(crop, s["lo_pct"], s["hi_pct"], s["gamma"], None if s.get("per_panel", True) else ref_all)
         ax = fig.add_axes([left / total_w, (total_h - y - h) / total_h, panel_w / total_w, h / total_h])
@@ -253,7 +325,12 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
                     ky = y + (k["y"] - y0) * scale
                     hline(xr - tick, xr, ky, 0.6)
                     text(xr - tick - 0.02, ky, _fmt_kda(k["kda"]), ha="right", va="center", fontsize=fs * 0.85)
-        y += h + gap
+        layout["panels"].append({"row": p["row"], "x": left - strip_w, "x_blot": left, "y": y, "w": panel_w + strip_w,
+                                 "h": h, "y0": y0, "y1": y1})
+        y += h
+        prev = kind
+    layout.update(size=(total_w, total_h), scale=scale, left=left, panel_w=panel_w, x0px=x0px, x1px=x1px)
+    return layout
 
 
 def _fmt_kda(v) -> str:

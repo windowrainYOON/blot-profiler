@@ -1903,6 +1903,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fill_series_list(self.series_list, self.results)
         self.fill_results_table()
         self.replot()
+        if hasattr(self, "figure_editor") and self.tabs.currentIndex() != self.FIG_TAB:
+            self.figure_editor.dirty = True  # numbers in the figure may have changed
 
     @staticmethod
     def _fill_series_list(lst, names):
