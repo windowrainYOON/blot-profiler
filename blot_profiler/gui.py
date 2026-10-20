@@ -266,8 +266,8 @@ class BlotView(QtWidgets.QGraphicsView):
         self._move_timer = QtCore.QTimer(self)
         self._move_timer.setSingleShot(True)
         self._move_timer.setInterval(150)
-        self._move_timer.timeout.connect(self.changed.emit)
-        self.scene().selectionChanged.connect(self.selectionChangedBands.emit)
+        self._move_timer.timeout.connect(self.changed)
+        self.scene().selectionChanged.connect(self.selectionChangedBands)
 
     def set_image(self, qimg: QtGui.QImage, reset_zoom=True):
         pm = QtGui.QPixmap.fromImage(qimg)
@@ -1074,7 +1074,7 @@ class MainWindow(QtWidgets.QMainWindow):
         hb.addStretch(1)
         lay.addLayout(hb)
 
-        self.auto_lanes = QtWidgets.QCheckBox("박스를 옮기거나 크기를 바꾸면 위치(왼쪽→오른쪽) 순서로 레인 자동 지정")
+        self.auto_lanes = QtWidgets.QCheckBox("박스 위치·크기를 바꿀 때마다 위치(왼쪽→오른쪽) 순서로 레인 자동 갱신")
         self.auto_lanes.setChecked(True)
         self.auto_lanes.setToolTip("이름을 붙인 레인 그룹은 유지되고, 나머지 레인은 L1, L2 … 순서로 다시 붙습니다.\n"
                                    "레인은 언제든 '새 레인(열) 그룹 만들기'로 바꿀 수 있습니다.")
@@ -1450,9 +1450,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def on_boxes_changed(self):
-        if QtWidgets.QApplication.mouseButtons() != Qt.NoButton:
-            self.view.band_moved()  # still dragging: wait until the button is released
-            return
+        # every position change (also while dragging) re-derives the lanes
         if self.apply_auto_lanes():
             self.statusBar().showMessage("박스 위치에 맞춰 레인을 다시 지정했습니다 (이름 붙인 레인 그룹은 유지)")
         # box sizes may have been changed by dragging in resize mode
@@ -1600,6 +1598,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def set_row_size(self, i, attr, v):
         setattr(self.analysis.rows[i], attr, int(v))
         self.view.refresh_items()
+        self.apply_auto_lanes()
         self.remeasure()
 
     def on_row_selected(self):
