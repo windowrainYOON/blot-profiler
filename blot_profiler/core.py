@@ -420,7 +420,29 @@ def _cluster_1d(values: Sequence[float], gap: float) -> List[List[int]]:
     return clusters
 
 
-def _build_analysis(regs, settings: DetectSettings, row_names, signal: np.ndarray) -> Analysis:
+def _linear_extent(signal: np.ndarray, m, frac: float = 0.1) -> int:
+    """Vertical extent of one band on the linear signal: first to last row whose
+    lane-mean rises above ``frac`` of the band's peak (over the local baseline)."""
+    H, W = signal.shape
+    x0, x1 = int(max(0, m["x0"])), int(min(W, m["x1"]))
+    hh = m["y1"] - m["y0"]
+    y0, y1 = int(max(0, m["y0"] - hh // 2)), int(min(H, m["y1"] + hh // 2))
+    if x1 - x0 < 2 or y1 - y0 < 3:
+        return 0
+    # middle half of the band's width avoids the rounded band ends
+    q = (x1 - x0) // 4
+    prof = signal[y0:y1, x0 + q:x1 - q if x1 - q > x0 + q else x1].mean(axis=1)
+    base = float(np.percentile(prof, 10))
+    peak_i = int(np.argmax(prof))
+    peak = float(prof[peak_i]) - base
+    if peak <= 0:
+        return 0
+    # first to last row above the level: keeps both bands of a doublet together
+    idx = np.nonzero(prof - base > frac * peak)[0]
+    return int(idx.max() - idx.min() + 1)
+
+
+def _build_analysis(regs, settings: DetectSettings, row_names, signal: np.ndarray, _refiltered: bool = False) -> Analysis:
     a = Analysis()
     if not regs:
         return a
@@ -428,14 +450,6 @@ def _build_analysis(regs, settings: DetectSettings, row_names, signal: np.ndarra
     heights = np.array([r["y1"] - r["y0"] for r in regs], float)
     row_gap = max(2.0, 0.6 * float(np.median(heights)))
     row_clusters = _cluster_1d([r["cy"] for r in regs], row_gap)
-    # a "row" made of a single speck while other rows span several lanes is noise
-    if max(len(c) for c in row_clusters) >= 4:
-        keep = [c for c in row_clusters if len(c) >= 2]
-        if keep and len(keep) < len(row_clusters):
-            idx = sorted(i for c in keep for i in c)
-            remap = {old: new for new, old in enumerate(idx)}
-            regs = [regs[i] for i in idx]
-            row_clusters = [[remap[i] for i in c] for c in keep]
     row_clusters.sort(key=lambda c: np.mean([regs[i]["cy"] for i in c]))
 
     # ---- lanes: cluster by horizontal centre across all rows
@@ -449,11 +463,21 @@ def _build_analysis(regs, settings: DetectSettings, row_names, signal: np.ndarra
         lane_x.append(float(np.median([regs[i]["cx"] for i in c])))
         for i in c:
             lane_of[i] = li
+    # rows present in only a few lanes (specks, smears) while others span many lanes
+    # are noise: drop them and cluster the lanes again without them
+    nl = [len({lane_of[i] for i in c}) for c in row_clusters]
+    if not _refiltered and max(nl) >= 4:
+        keep = [c for c, n in zip(row_clusters, nl) if n >= max(2, 0.3 * max(nl))]
+        if len(keep) < len(row_clusters):
+            return _build_analysis([regs[i] for c in keep for i in c], settings, row_names, signal, _refiltered=True)
 
     for ri, c in enumerate(row_clusters):
         members = [regs[i] for i in c]
         w = int(np.ceil(np.median([m["x1"] - m["x0"] for m in members]))) + 2 * settings.pad
-        h = int(np.ceil(np.max([m["y1"] - m["y0"] for m in members]))) + 2 * settings.pad
+        # height from the *linear* signal (the detection LUT exaggerates the faint tails)
+        hs = [_linear_extent(signal, m) for m in members]
+        hs = [x for x in hs if x] or [m["y1"] - m["y0"] for m in members]
+        h = int(np.ceil(np.median(hs))) + 2 * settings.pad
         # Boxes cover most of a lane but never overlap the neighbouring lane.
         if len(lane_x) > 1:
             pitch = float(np.median(np.diff(lane_x)))

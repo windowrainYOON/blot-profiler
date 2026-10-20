@@ -724,6 +724,8 @@ class ImageDoc:
         self.invert = invert  # index of the "밴드 색" combo
         self.bg = core.BackgroundSettings(**vars(bg)) if bg else core.BackgroundSettings()
         self.ref_lane: Optional[int] = 0
+        self.figure: Optional[dict] = None  # Figure 만들기 settings (saved with the analysis)
+        self.marker: Optional[np.ndarray] = None  # ladder/marker image (not saved, path is)
 
     @property
     def name(self) -> str:
@@ -763,6 +765,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.multi_ref: Optional[str] = None  # lane key scaled to 1
         self.multi_keys: List[str] = []
         self.multi_results: Dict[str, Dict[str, object]] = {}  # name -> {mean, sd, points}
+        self._fig_windows: Dict[int, object] = {}  # id(doc) -> FigureWindow
         self._updating = False
 
         self.view = BlotView()
@@ -912,6 +915,9 @@ class MainWindow(QtWidgets.QMainWindow):
             r = QtWidgets.QMessageBox.question(self, "이미지 닫기", f"'{d.name}' 이미지를 닫을까요? (저장하지 않은 박스는 사라집니다)")
             if r != QtWidgets.QMessageBox.Yes:
                 return
+        w = self._fig_windows.pop(id(d), None)
+        if w is not None:
+            w.close()
         del self.docs[k]
         for g in self.big_groups:
             g["members"] = [[i - 1 if i > k else i, n] for i, n in g["members"] if i != k]
@@ -944,6 +950,8 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction("결과 CSV 내보내기…", self.export_csv)
         m.addAction("그래프 저장 (PNG/PDF/SVG)…", lambda: self.export_plot())
         m.addAction("박스 표시 이미지 저장…", self.export_overlay)
+        fm = self.menuBar().addMenu("Figure")
+        fm.addAction("Figure 만들기 (논문용 그림)…", self.open_figure_window).setShortcut("Ctrl+Shift+F")
         v = self.menuBar().addMenu("보기")
         v.addAction("창에 맞추기", self.view.fit).setShortcut("Ctrl+0")
         v.addAction("확대", lambda: self.view.scale(1.25, 1.25)).setShortcut(QtGui.QKeySequence.ZoomIn)
@@ -1203,9 +1211,36 @@ class MainWindow(QtWidgets.QMainWindow):
         b = QtWidgets.QPushButton("그래프 저장…")
         b.clicked.connect(lambda: self.export_plot(self.plot))
         hb.addWidget(b)
+        b = QtWidgets.QPushButton("Figure 만들기 (논문용 블롯 그림)…")
+        b.setStyleSheet("font-weight: bold;")
+        b.clicked.connect(self.open_figure_window)
+        hb.addWidget(b)
         hb.addStretch(1)
         lay.addLayout(hb)
         return self._scroll(w)
+
+    # ---------------------------------------------------------------- figure window
+    def open_figure_window(self):
+        d = self.doc
+        if d.raw is None or not d.analysis.bands:
+            QtWidgets.QMessageBox.information(self, "Figure 만들기", "먼저 이미지를 열고 밴드 박스와 단백질/레인 그룹을 정하세요.")
+            return
+        from .figure_window import FigureWindow
+
+        w = self._fig_windows.get(id(d))
+        if w is None:
+            w = FigureWindow(self, d)
+            self._fig_windows[id(d)] = w
+        else:
+            w.analysis_changed()
+        w.show()
+        w.raise_()
+        w.activateWindow()
+
+    def _figure_changed(self, d):
+        w = self._fig_windows.get(id(d))
+        if w is not None and w.isVisible():
+            w.analysis_changed()
 
     # ---------------------------------------------------------------- tab 5
     def _build_multi_tab(self):
@@ -1441,6 +1476,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fill_rows_table()
         self.fill_lanes_table()
         self.remeasure()
+        self._figure_changed(self.doc)
 
     def apply_auto_lanes(self) -> bool:
         if not self.auto_lanes.isChecked() or not core.auto_assign_lanes(self.analysis):
@@ -1462,6 +1498,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     sp.setValue(getattr(r, attr))
                     sp.blockSignals(False)
         self.remeasure()
+        self._figure_changed(self.doc)
 
     def add_band_at(self, x, y):
         core.add_band(self.analysis, x, y)
@@ -2197,7 +2234,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "images": [
                 {
                     "image_path": d.image_path, "invert": d.invert, "background": vars(d.bg),
-                    "reference_lane": d.ref_lane, "analysis": d.analysis.to_dict(),
+                    "reference_lane": d.ref_lane, "analysis": d.analysis.to_dict(), "figure": d.figure,
                 }
                 for d in self.docs if d.raw is not None
             ],
@@ -2316,6 +2353,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 doc.ref_lane = im.get("reference_lane", 0)
                 doc.analysis = core.Analysis.from_dict(im.get("analysis") or {})
                 doc.analysis.ensure_lane_labels()
+                doc.figure = im.get("figure")
                 self._make_signal(doc)
                 self.measure_doc(doc)
                 index[i] = len(docs)
@@ -2327,6 +2365,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 k = index.get(int(fml.get("image", 0)))
                 if k is not None:
                     docs[k].analysis.formulas.append({x: fml[x] for x in ("name", "expr", "normalize") if x in fml})
+            for w in self._fig_windows.values():
+                w.close()
+            self._fig_windows = {}
             self.docs = docs
             self.big_groups = [
                 dict(g, members=[[index[int(k)], n] for k, n in g.get("members", []) if int(k) in index])

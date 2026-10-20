@@ -9,7 +9,7 @@ from blot_profiler import __version__  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 
-hidden = []
+hidden = ["blot_profiler.figure", "blot_profiler.figure_window"]
 for pkg in ("skimage.restoration", "skimage.filters", "skimage.measure", "skimage.morphology"):
     hidden += collect_submodules(pkg)
 datas = collect_data_files("skimage", includes=["**/*.pyi"])

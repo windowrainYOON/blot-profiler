@@ -42,6 +42,7 @@ FIGURE_DEFAULTS = {
     "groups": [],  # {text, first, last}  lanes are 0-based indices
     "marker_path": None,
     "show_strip": False,
+    "marker_invert": True,  # show the ladder dark on white (white-light photos show it bright on dark)
     "strip_x0": 0,
     "strip_x1": 0,
     "show_kda": False,
@@ -240,7 +241,8 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
         if show_strip:
             mcrop = marker[y0:y1, s["strip_x0"]:s["strip_x1"]]
             sx = fig.add_axes([(left - strip_w) / total_w, (total_h - y - h) / total_h, strip_w / total_w, h / total_h])
-            sx.imshow(_stretch(mcrop, 1, 99.5, 1.0, marker), cmap="gray", vmin=0, vmax=1, aspect="auto",
+            md = _stretch(mcrop, 1, 99.5, 1.0, marker[:, s["strip_x0"]:s["strip_x1"]])
+            sx.imshow(1.0 - md if s.get("marker_invert", True) else md, cmap="gray", vmin=0, vmax=1, aspect="auto",
                       interpolation="antialiased")
             _frame(sx, s["frame_lw"])
         text(0.04 + label_w - 0.08, y + h / 2, p["label"], ha="right", va="center", weight=weight)
@@ -282,3 +284,26 @@ def match_marker(marker: np.ndarray, shape) -> np.ndarray:
 
     out = ndi.zoom(marker, (H / mh, W / mw), order=1)
     return out[:H, :W]
+
+
+def guess_ladder_x(marker: np.ndarray, a: core.Analysis):
+    """Guess the ladder's x-range on the marker image: the most structured
+    columns left of the first lane box (ladder lanes are full of sharp bands)."""
+    H, W = marker.shape
+    if not a.bands:
+        return 0, max(4, int(0.06 * W))
+    first = min(b.box(a.rows)[0] for b in a.bands)
+    widths = [a.rows[b.row].width for b in a.bands]
+    win = max(6, int(0.6 * float(np.median(widths))))
+    if first < win + 2:
+        return 0, max(4, int(0.06 * W))
+    from scipy import ndimage as ndi
+
+    ys = [b.cy for b in a.bands]
+    y0, y1 = int(max(0, min(ys) - 0.1 * H)), int(min(H, max(ys) + 0.1 * H))
+    region = marker[y0:y1, :first].astype(float)
+    # vertical detail per column: ladder bands make strong row-to-row changes
+    detail = np.abs(np.diff(ndi.gaussian_filter(region, 1.5), axis=0)).mean(axis=0)
+    score = np.convolve(detail, np.ones(win) / win, mode="same")
+    c = int(np.argmax(score))
+    return max(0, c - win // 2), min(first, c + win // 2 + 1)
