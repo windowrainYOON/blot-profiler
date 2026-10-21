@@ -21,6 +21,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolb
 from matplotlib.figure import Figure  # noqa: E402
 
 from . import core  # noqa: E402
+from . import figure  # noqa: E402
 from . import __version__  # noqa: E402
 
 
@@ -261,6 +262,8 @@ class BlotView(QtWidgets.QGraphicsView):
         self.setAcceptDrops(True)
         self.viewport().setAcceptDrops(True)
         self.pix_item: Optional[QtWidgets.QGraphicsPixmapItem] = None
+        self.marker_item: Optional[QtWidgets.QGraphicsPixmapItem] = None
+        self.marker_caption = None
         self.items_: List[BandItem] = []
         self.analysis = core.Analysis()
         self.ids: Dict[int, str] = {}  # id(band) -> band ID
@@ -279,13 +282,45 @@ class BlotView(QtWidgets.QGraphicsView):
             self.pix_item.setZValue(-1)
         else:
             self.pix_item.setPixmap(pm)
-        self.scene().setSceneRect(QtCore.QRectF(pm.rect()).adjusted(-20, -20, 20, 20))
+        self._update_rect()
         if reset_zoom:
             self.fit()
 
+    def set_marker(self, qimg: Optional[QtGui.QImage]):
+        """Show the marker (ladder) image left of the blot, same height, for reference."""
+        sc = self.scene()
+        for it in (self.marker_item, self.marker_caption):
+            if it is not None:
+                sc.removeItem(it)
+        self.marker_item = self.marker_caption = None
+        if qimg is not None and not qimg.isNull():
+            pm = QtGui.QPixmap.fromImage(qimg)
+            gap = max(12, int(0.03 * pm.width()))
+            self.marker_item = sc.addPixmap(pm)
+            self.marker_item.setZValue(-1)
+            self.marker_item.setPos(-(pm.width() + gap), 0)
+            self.marker_caption = sc.addSimpleText("마커 (참고용)")
+            self.marker_caption.setBrush(QtGui.QColor("#1565c0"))
+            self.marker_caption.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations)
+            self.marker_caption.setPos(-(pm.width() + gap), -22)
+        self._update_rect()
+
+    def content_rect(self) -> QtCore.QRectF:
+        r = QtCore.QRectF()
+        for it in (self.pix_item, self.marker_item):
+            if it is not None and not it.pixmap().isNull():
+                r = r.united(it.sceneBoundingRect())
+        return r
+
+    def _update_rect(self):
+        r = self.content_rect()
+        if not r.isEmpty():
+            self.scene().setSceneRect(r.adjusted(-20, -30, 20, 20))
+
     def fit(self):
-        if self.pix_item is not None:
-            self.fitInView(self.pix_item, Qt.KeepAspectRatio)
+        r = self.content_rect()
+        if not r.isEmpty():
+            self.fitInView(r, Qt.KeepAspectRatio)
 
     def set_analysis(self, a: core.Analysis):
         self.analysis = a
@@ -387,7 +422,8 @@ class BlotView(QtWidgets.QGraphicsView):
         if isinstance(item, QtWidgets.QGraphicsSimpleTextItem):
             item = item.parentItem()
         if not isinstance(item, BandItem) and self.pix_item is not None:
-            self.addRequested.emit(p.x(), p.y())
+            if self.pix_item.sceneBoundingRect().contains(p):  # not on the marker beside the blot
+                self.addRequested.emit(p.x(), p.y())
             return
         super().mouseDoubleClickEvent(e)
 
@@ -803,7 +839,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.selectionChangedBands.connect(self.on_view_selection)
         self.view.contextRequested.connect(self.show_band_menu)
         self.view.addRequested.connect(self.add_band_at)
-        self.view.filesDropped.connect(lambda ps: [self.open_path(p) for p in ps])
+        self.view.filesDropped.connect(self.open_paths)
         self.view.resizeModeExited.connect(lambda: self.resize_mode.setChecked(False))
 
         self.tabs = QtWidgets.QTabWidget()
@@ -851,6 +887,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_labels = QtWidgets.QCheckBox("밴드 ID 표시")
         self.show_labels.setChecked(True)
         self.show_labels.toggled.connect(self.toggle_labels)
+        self.show_marker = QtWidgets.QCheckBox("마커 같이 보기")
+        self.show_marker.setChecked(True)
+        self.show_marker.toggled.connect(lambda _=None: (self.refresh_marker_view(), self.view.fit()))
         self.resize_mode = QtWidgets.QCheckBox("박스 크기 조절 모드")
         self.resize_mode.setToolTip(
             "켜면 박스 가장자리·모서리를 드래그해 크기를 바꿉니다. 같은 단백질 그룹(행)과 함께 선택한 밴드의 행이 함께 바뀝니다.\n"
@@ -863,6 +902,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cl.addWidget(self.contrast_hi)
         cl.addWidget(self.show_corrected)
         cl.addWidget(self.show_labels)
+        cl.addWidget(self.show_marker)
         cl.addWidget(self.resize_mode)
         ll.addLayout(cl)
         hint = QtWidgets.QLabel(
@@ -926,8 +966,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if d.raw is not None:
             self.file_label.setText(f"{os.path.basename(d.image_path)}  ({d.raw.shape[1]}×{d.raw.shape[0]}, max {d.raw.max():.0f})")
             self.setWindowTitle(f"Blot Profiler – {os.path.basename(d.image_path)}")
+            self.refresh_marker_view()
             self.update_display(reset_zoom=True)
         else:
+            self.view.set_marker(None)
+            self.marker_label.setText("없음")
             self.file_label.setText("-")
             self.setWindowTitle("Blot Profiler")
             if self.view.pix_item is not None:
@@ -1012,6 +1055,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_label = QtWidgets.QLabel("-")
         self.file_label.setWordWrap(True)
         f.addRow("파일", self.file_label)
+        hb = QtWidgets.QHBoxLayout()
+        self.marker_label = QtWidgets.QLabel("없음")
+        self.marker_label.setWordWrap(True)
+        hb.addWidget(self.marker_label, 1)
+        b = QtWidgets.QPushButton("마커 열기…")
+        b.setToolTip("현재 블롯과 같은 위치에서 찍은 마커(ladder, white-light) 이미지")
+        b.clicked.connect(self.open_marker)
+        hb.addWidget(b)
+        b = QtWidgets.QPushButton("빼기")
+        b.clicked.connect(self.clear_marker)
+        hb.addWidget(b)
+        f.addRow("마커", hb)
+        self.ask_marker = QtWidgets.QCheckBox("블롯 TIF를 열면 짝이 되는 마커 이미지도 받기")
+        self.ask_marker.setToolTip("같은 폴더에 '…Marker…' 파일이 있으면 자동으로 붙이고, 없으면 마커 파일을 고르는 창을 띄웁니다 (취소 = 건너뛰기)")
+        self.ask_marker.setChecked(True)
+        f.addRow(self.ask_marker)
         lay.addWidget(g_img)
 
         g_bg = QtWidgets.QGroupBox("배경 노이즈 제거")
@@ -1369,23 +1428,152 @@ class MainWindow(QtWidgets.QMainWindow):
             e.acceptProposedAction()
 
     def dropEvent(self, e):
-        paths = [u.toLocalFile() for u in e.mimeData().urls() if u.toLocalFile()]
-        for p in paths:
-            self.open_path(p)
+        self.open_paths([u.toLocalFile() for u in e.mimeData().urls() if u.toLocalFile()])
+
+    @staticmethod
+    def is_marker_file(p: str) -> bool:
+        return "marker" in os.path.basename(p).lower()
 
     def open_path(self, p: str):
-        if p.lower().endswith(".json"):
-            self.load_project(p)
-        else:
-            self.load_image(p)
+        self.open_paths([p])
+
+    def open_paths(self, paths):
+        """Open analysis files and blots; files named '…marker…' become the marker of their blot
+        (or of the current image when no blot is opened with them)."""
+        paths = [p for p in paths if p]
+        markers = [p for p in paths if self.is_marker_file(p) and not p.lower().endswith(".json")]
+        for p in paths:
+            if p.lower().endswith(".json"):
+                self.load_project(p)
+        blots = [p for p in paths if p not in markers and not p.lower().endswith(".json")]
+        for p in blots:
+            self.load_image(p, marker_candidates=markers)
+        if markers and not blots:
+            if self.doc.raw is None:
+                for p in markers:  # no blot open: treat it as an image after all
+                    self.load_image(p, ask_marker=False)
+            else:
+                self.set_marker(self.doc, markers[0])
 
     def open_image(self):
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "TIF 파일 열기 (여러 개 선택 가능)", "", "Images (*.tif *.tiff *.png *.jpg *.jpeg);;All files (*)")
-        for p in paths:
-            self.load_image(p)
+        self.open_paths(paths)
 
-    def load_image(self, path: str, detect=True, doc: Optional[ImageDoc] = None):
-        """Open ``path`` in ``doc`` (default: a new tab, or the current one if it is empty)."""
+    # ---------------------------------------------------------------- marker (ladder) image
+    @staticmethod
+    def find_marker_for(path: str, candidates=()) -> Optional[str]:
+        """The marker file belonging to blot ``path``: among ``candidates`` (opened with it)
+        or files in its folder whose name contains 'marker' and otherwise matches the blot's."""
+        import difflib
+
+        def stem(p):
+            s_ = os.path.splitext(os.path.basename(p))[0].lower()
+            return re.sub(r"^[0-9a-f]{6,}[-_]", "", s_)  # ignore a leading random id (copied/uploaded files)
+
+        def base(p):
+            return re.sub(r"[-_ .]?marker", "", stem(p), flags=re.I)
+
+        folder = os.path.dirname(os.path.abspath(path))
+        try:
+            local = [os.path.join(folder, f) for f in os.listdir(folder)]
+        except OSError:
+            local = []
+        exts = (".tif", ".tiff", ".png", ".jpg", ".jpeg")
+        pool = [p for p in list(candidates) + local
+                if p.lower().endswith(exts) and "marker" in os.path.basename(p).lower()
+                and os.path.abspath(p) != os.path.abspath(path)]
+        if not pool:
+            return None
+        b = stem(path)
+        scored = sorted(((difflib.SequenceMatcher(None, base(p), b).ratio(), p) for p in pool), reverse=True)
+        best_score, best = scored[0]
+        if best in candidates or best_score >= 0.8:
+            return best
+        return None
+
+    def ask_marker_for(self, d: ImageDoc, candidates=()):
+        path = self.find_marker_for(d.image_path, candidates)
+        if path:
+            if self.set_marker(d, path):
+                self.statusBar().showMessage(f"마커 이미지를 자동으로 붙였습니다: {os.path.basename(path)}")
+            return
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, f"'{os.path.basename(d.image_path)}'의 마커(ladder) 이미지를 고르세요 — 없으면 취소",
+            os.path.dirname(d.image_path), "Images (*.tif *.tiff *.png *.jpg *.jpeg);;All files (*)")
+        if p:
+            self.set_marker(d, p)
+
+    def open_marker(self):
+        if self.doc.raw is None:
+            self.statusBar().showMessage("먼저 블롯 TIF를 여세요")
+            return
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "마커(ladder) 이미지 열기", os.path.dirname(self.doc.image_path or ""),
+                                                     "Images (*.tif *.tiff *.png *.jpg *.jpeg);;All files (*)")
+        if p:
+            self.set_marker(self.doc, p)
+
+    def set_marker(self, d: ImageDoc, path: str, quiet: bool = False) -> bool:
+        """Attach a marker image (same geometry as the blot) to image ``d``."""
+        try:
+            m = core.load_image(path)
+            resized = m.shape != d.raw.shape
+            if resized:
+                m = figure.match_marker(m, d.raw.shape)
+        except Exception as e:
+            if not quiet:
+                QtWidgets.QMessageBox.warning(self, "마커 이미지", f"쓸 수 없는 마커 이미지입니다:\n{e}")
+            return False
+        if resized and not quiet:
+            QtWidgets.QMessageBox.information(self, "마커 이미지 크기", "마커 이미지의 크기가 블롯과 달라 같은 비율로 맞췄습니다. "
+                                              "두 이미지가 같은 위치에서 찍힌 것인지 확인하세요.")
+        d.marker = m
+        if d.figure is None:
+            d.figure = figure.default_settings()
+        s = d.figure
+        s["marker_path"] = path
+        if not quiet:
+            s["marker_invert"] = not core.needs_inversion(m)
+            if d.analysis.bands:
+                s["strip_x0"], s["strip_x1"] = figure.guess_ladder_x(m, d.analysis)
+            s["show_strip"] = True
+        if d is self.doc:
+            self.refresh_marker_view()
+            self.view.fit()
+            self._figure_changed(d)
+        return True
+
+    def clear_marker(self):
+        d = self.doc
+        d.marker = None
+        if d.figure:
+            d.figure["marker_path"] = None
+            d.figure["show_strip"] = False
+        self.refresh_marker_view()
+        self.view.fit()
+        self._figure_changed(d)
+
+    def refresh_marker_view(self):
+        d = self.doc
+        m = d.marker
+        if m is None and d.figure and d.figure.get("marker_path") and d.raw is not None and os.path.exists(d.figure["marker_path"]):
+            self.set_marker(d, d.figure["marker_path"], quiet=True)
+            return
+        self.marker_label.setText(os.path.basename(d.figure["marker_path"]) if m is not None and d.figure else "없음")
+        if m is None or not self.show_marker.isChecked():
+            self.view.set_marker(None)
+            return
+        x = figure._stretch(m, 1, 99.5, 1.0)
+        if (d.figure or {}).get("marker_invert", True):
+            x = 1.0 - x  # dark ladder on white, like the blot preview
+        self.view.set_marker(to_qimage(x, 0.0, 1.0))
+
+    def load_image(self, path: str, detect=True, doc: Optional[ImageDoc] = None, ask_marker: bool = True,
+                   marker_candidates=()):
+        """Open ``path`` in ``doc`` (default: a new tab, or the current one if it is empty).
+
+        After detection the matching marker image is attached (found next to the
+        blot or among ``marker_candidates``) or asked for.
+        """
         try:
             raw = core.load_image(path)
         except Exception as e:
@@ -1396,11 +1584,15 @@ class MainWindow(QtWidgets.QMainWindow):
         d.image_path = path
         d.analysis = core.Analysis()
         d.measurements = []
+        d.marker = None
+        d.figure = None
         self._make_signal(d)
         self.refresh_doc_tabs()
         self.switch_doc(self.docs.index(d))
         if detect:
             self.detect()
+        if ask_marker and self.ask_marker.isChecked():
+            self.ask_marker_for(d, marker_candidates)
 
     def _invert_choice(self, doc: Optional[ImageDoc] = None):
         return {0: None, 1: True, 2: False}[(doc or self.doc).invert]
