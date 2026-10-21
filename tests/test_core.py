@@ -252,3 +252,68 @@ def test_figure_numbers_and_layout():
     s["panels"][0]["pad_bottom"] += 40
     lay3 = figure.render(fig, sig, a, s)
     assert lay3["panels"][0]["y1"] == lay2["panels"][0]["y1"] + 40
+
+
+def _figure_setup():
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    import matplotlib
+    matplotlib.use("Agg")
+    from blot_profiler import figure
+    import synth
+    raw, _ = synth.chemi_blot()
+    sig = core.to_signal(raw.astype(float))
+    a = core.detect_bands(core.corrected_signal(sig, core.BackgroundSettings()), core.DetectSettings())
+    return figure, raw, sig, a
+
+
+def test_figure_old_settings_migrate_to_tiers():
+    figure, raw, sig, a = _figure_setup()
+    old = figure.default_settings()
+    old.update(font_size=10.0, lane_rotation=45, groups=[{"text": "IgG", "first": 2, "last": 3}])
+    old.pop("tiers", None)
+    s = figure.sync_settings(old, a, raw.shape)
+    assert [t["kind"] for t in s["tiers"]] == ["groups", "lanes"]
+    assert s["tiers"][0]["groups"][0]["text"] == "IgG" and s["tiers"][1]["auto"] and s["tiers"][1]["rotation"] == 45
+    assert s["fonts"]["lane"] == 10.0 and s["fonts"]["kda"] == 8.5
+
+
+def test_figure_tiers_conditions_overrides_and_sides():
+    from matplotlib.figure import Figure
+    figure, raw, sig, a = _figure_setup()
+    s = figure.sync_settings(figure.default_settings(), a, raw.shape)
+    n = len(s["lanes"])
+    g1 = figure.default_tier("groups")
+    g1["groups"] = [{"text": "Brain", "first": 0, "last": 3}, {"text": "Microglia", "first": 4, "last": n - 1}]
+    g2 = figure.default_tier("groups")
+    g2.update(groups=[{"text": "Con", "first": 0, "last": 1}], rotation=60)
+    lanes = figure.default_tier("lanes", n)
+    lanes.update(texts=["+", "-"] * (n // 2), condition="Dox", cond_side="right", italic=True)
+    s["tiers"] = [g1, g2, lanes] + s["tiers"]
+    s["protein_side"] = "right"
+    s["kda_side"] = "right"
+    s["show_kda"] = True
+    s["kda"] = [{"kda": 40, "y": 370}]
+    fig = Figure()
+    lay = figure.render(fig, sig, a, s)
+    keys = {t["key"]: t for t in lay["texts"]}
+    assert {"group:0:0", "group:0:1", "group:1:0", "lane:2:0", "cond:2", "kda:0"} <= set(keys)
+    blot_right = lay["left"] + lay["panel_w"]
+    # condition "Dox" and protein labels on the right of the blot, kDa label too
+    assert keys["cond:2"]["x0"] > blot_right
+    assert all(t["x0"] > blot_right for k, t in keys.items() if k.startswith("protein:"))
+    assert keys["kda:0"]["x0"] > blot_right
+    # tiers stack top to bottom
+    assert keys["group:0:0"]["y1"] <= keys["group:1:0"]["y1"] <= keys["lane:2:0"]["y1"]
+    # per-text override: bigger font and moved
+    before = keys["group:0:0"]
+    s["overrides"]["group:0:0"] = {"size": 16.0, "dx": 0.3}
+    lay2 = figure.render(fig, sig, a, s)
+    after = {t["key"]: t for t in lay2["texts"]}["group:0:0"]
+    assert (after["x1"] - after["x0"]) > 1.5 * (before["x1"] - before["x0"])
+    # category font size
+    s["fonts"]["protein"] = 14.0
+    lay3 = figure.render(fig, sig, a, s)
+    p3 = [t for t in lay3["texts"] if t["key"].startswith("protein:")][0]
+    p2 = [t for t in lay2["texts"] if t["key"].startswith("protein:")][0]
+    assert (p3["y1"] - p3["y0"]) > (p2["y1"] - p2["y0"])
