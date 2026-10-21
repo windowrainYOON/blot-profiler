@@ -244,6 +244,7 @@ class BandItem(QtWidgets.QGraphicsRectItem):
 
 
 class BlotView(QtWidgets.QGraphicsView):
+    filesDropped = QtCore.Signal(list)  # image/analysis files dropped on the view
     changed = QtCore.Signal()  # boxes moved/added/removed
     selectionChangedBands = QtCore.Signal()
     contextRequested = QtCore.Signal(QtCore.QPoint, object)  # global pos, BandItem | None
@@ -257,6 +258,8 @@ class BlotView(QtWidgets.QGraphicsView):
         self.setDragMode(QtWidgets.QGraphicsView.RubberBandDrag)
         self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
         self.setBackgroundBrush(QtGui.QColor("#d9d9d9"))
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
         self.pix_item: Optional[QtWidgets.QGraphicsPixmapItem] = None
         self.items_: List[BandItem] = []
         self.analysis = core.Analysis()
@@ -342,6 +345,34 @@ class BlotView(QtWidgets.QGraphicsView):
             it.setSelected(id(it.band) in ids)
         self.scene().blockSignals(False)
         self.viewport().update()
+
+    @staticmethod
+    def _paths(e):
+        md = e.mimeData()
+        if not md.hasUrls():
+            return []
+        exts = (".tif", ".tiff", ".png", ".jpg", ".jpeg", ".json")
+        return [u.toLocalFile() for u in md.urls() if u.toLocalFile().lower().endswith(exts)]
+
+    def dragEnterEvent(self, e):
+        if self._paths(e):
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e):
+        if self._paths(e):
+            e.acceptProposedAction()
+        else:
+            super().dragMoveEvent(e)
+
+    def dropEvent(self, e):
+        paths = self._paths(e)
+        if paths:
+            e.acceptProposedAction()
+            self.filesDropped.emit(paths)
+        else:
+            super().dropEvent(e)
 
     def wheelEvent(self, e: QtGui.QWheelEvent):
         if e.modifiers() & (Qt.ControlModifier | Qt.MetaModifier) or not e.pixelDelta().y():
@@ -772,6 +803,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.selectionChangedBands.connect(self.on_view_selection)
         self.view.contextRequested.connect(self.show_band_menu)
         self.view.addRequested.connect(self.add_band_at)
+        self.view.filesDropped.connect(lambda ps: [self.open_path(p) for p in ps])
         self.view.resizeModeExited.connect(lambda: self.resize_mode.setChecked(False))
 
         self.tabs = QtWidgets.QTabWidget()

@@ -6,11 +6,12 @@ and the exported file are identical. Pixel values are only *displayed* here
 
 Layout, top to bottom::
 
-            group text            group text
-            ━━━━━━━━━━━━         ━━━━━━━━━━━━
-    lane    12h    24h            12h    24h          <- lane headers
+            group text            group text           <- header tiers (any number):
+            ━━━━━━━━━━━━         ━━━━━━━━━━━━             group bars or one label per lane,
+    cond    12h    24h            12h    24h              each with an optional condition text
     IB: X  [ladder strip][  crop of protein X  ]      <- one panel per protein
     IB: Y  [ladder strip][  crop of protein Y  ]
+    label   1.00   0.85  ...                          <- number rows (optional)
 """
 
 from __future__ import annotations
@@ -50,6 +51,11 @@ FIGURE_DEFAULTS = {
     "show_kda": False,
     "kda": [],  # {kda, y}  y in blot pixel rows
     "numbers": [],  # {source, label, pos, decimals, rel_lane}: quantified values under the lanes
+    "protein_side": "left",  # protein labels left or right of the panels
+    "kda_side": "left",
+    "strip_gap_in": 0.0,  # space between the marker strip and the blot
+    # "fonts" (size per text category), "tiers" (header rows) and "overrides"
+    # (per-text size/angle/offset) are filled in by _migrate()
 }
 
 
@@ -92,6 +98,8 @@ def sync_settings(s: dict, a: core.Analysis, shape) -> dict:
     s["lanes"] = lanes
     n = len(lanes)
     s["groups"] = [g for g in s.get("groups", []) if 0 <= int(g["first"]) <= int(g["last"]) < n]
+    _migrate(s)
+    _sync_tiers(s, n)
     if shape is not None and not s.get("strip_x1"):
         W = shape[1]
         s["strip_x0"], s["strip_x1"] = 0, max(4, int(0.06 * W))
@@ -175,73 +183,172 @@ def format_numbers(values, decimals: int = 2, rel_lane: Optional[int] = None):
     return texts, suffix
 
 
+FONT_CATEGORIES = {  # key: (label, factor of the base font size)
+    "lane": ("레인 이름", 1.0),
+    "group": ("상위 그룹", 1.0),
+    "cond": ("조건 설명", 1.0),
+    "protein": ("단백질 이름", 1.0),
+    "kda": ("마커(kDa)", 0.85),
+    "number": ("정량 숫자", 0.9),
+}
+
+
+def default_tier(kind: str, n_lanes: int = 0) -> dict:
+    t = {"kind": kind, "condition": "", "cond_side": "left", "rotation": 0, "italic": False}
+    if kind == "lanes":
+        t["texts"] = [""] * n_lanes
+    else:
+        t["groups"] = []
+    return t
+
+
+def _migrate(s: dict):
+    """Older settings: one lane-label row + one group row, one font size."""
+    base = float(s.get("font_size", 8.0))
+    fonts = s.setdefault("fonts", {})
+    for k, (_, f) in FONT_CATEGORIES.items():
+        fonts.setdefault(k, round(base * f, 1))
+    if "tiers" not in s:
+        tiers = []
+        if s.get("groups"):
+            g = default_tier("groups")
+            g["groups"] = s["groups"]
+            tiers.append(g)
+        lane = default_tier("lanes")
+        lane.update(auto=True, rotation=int(s.get("lane_rotation", 0)))
+        lane.pop("texts", None)
+        tiers.append(lane)
+        s["tiers"] = tiers
+        s["groups"] = []
+    s.setdefault("overrides", {})
+
+
+def _sync_tiers(s: dict, n: int):
+    for t in s["tiers"]:
+        for k, v in default_tier(t.get("kind", "lanes")).items():
+            if k not in ("texts", "groups"):
+                t.setdefault(k, v)
+        if t["kind"] == "lanes" and not t.get("auto"):
+            texts = list(t.get("texts", []))[:n]
+            t["texts"] = texts + [""] * (n - len(texts))
+        elif t["kind"] == "groups":
+            t["groups"] = [g for g in t.get("groups", []) if 0 <= int(g["first"]) <= int(g["last"]) < n]
+
+
+def tier_texts(s: dict, t: dict) -> List[str]:
+    """Per-lane texts of a lane tier (the auto tier follows the lane groups)."""
+    if t.get("auto"):
+        return [str(l.get("text", "")) for l in s["lanes"]]
+    return [str(x) for x in t.get("texts", [])]
+
+
+def _text_h(text: str, fs: float, rot: float) -> float:
+    """Rough height (inches) of a possibly rotated text."""
+    lines = text.count("\n") + 1
+    h = lines * fs * 1.2 / 72.0
+    if not rot:
+        return h
+    import math
+
+    r = math.radians(abs(rot))
+    return _text_w(text, fs) * math.sin(r) + h * math.cos(r)
+
+
 def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[np.ndarray] = None,
            numbers: Optional[List[dict]] = None) -> dict:
     """Draw the figure into the matplotlib ``fig`` (it is cleared and resized).
 
     ``numbers`` are resolved number rows: ``{label, texts (one per lane), pos}``
     with ``pos`` "top", "bottom", "above:<protein>" or "below:<protein>".
-    Returns the layout (inches from the top-left) for interactive editing.
+    Returns the layout (inches from the top-left): panels, the marker strip and
+    every text with its key and bounding box, for interactive editing.
     """
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+    if not isinstance(fig.canvas, FigureCanvasAgg):
+        FigureCanvasAgg(fig)
     fig.clear()
+    _migrate(s)
     H, W = signal.shape
-    layout = {"panels": [], "size": (3.0, 1.0)}
+    layout = {"panels": [], "texts": [], "strips": [], "size": (3.0, 1.0)}
     if not a.bands:
         fig.set_size_inches(3, 1)
         fig.text(0.5, 0.5, "밴드 박스가 없습니다", ha="center", va="center")
         return layout
-    fs = float(s["font_size"])
+    fonts = s["fonts"]
+    ov = s.get("overrides", {})
     family = [s.get("font") or "Arial", "AppleGothic", "DejaVu Sans"]
     weight = "bold" if s.get("label_bold", True) else "normal"
-    line_h = fs * 1.25 / 72.0
     x0px, x1px = crop_x(a, s, W)
     panels = panel_rows(a, s, H)
     if not panels:
         fig.set_size_inches(3, 1)
         fig.text(0.5, 0.5, "표시할 단백질 패널이 없습니다", ha="center", va="center")
         return layout
+    _sync_tiers(s, len(s["lanes"]))
     scale = float(s["width_in"]) / max(x1px - x0px, 1)  # inches per pixel
     panel_w = (x1px - x0px) * scale
     numbers = [n for n in (numbers or []) if n.get("texts")]
+    tiers = s["tiers"]
+
+    def fsize(key, cat):
+        o = ov.get(key, {})
+        return float(o.get("size") or fonts.get(cat, s["font_size"]))
 
     show_strip = bool(s.get("show_strip")) and marker is not None and s["strip_x1"] > s["strip_x0"]
     strip_w = (s["strip_x1"] - s["strip_x0"]) * scale if show_strip else 0.0
+    strip_gap = float(s.get("strip_gap_in", 0.0)) if show_strip else 0.0
     kda = sorted(s.get("kda", []), key=lambda k: k["y"])
     show_kda = bool(s.get("show_kda")) and bool(kda)
+    kda_side = s.get("kda_side", "left")
+    prot_side = s.get("protein_side", "left")
     tick = 0.05
-    kda_w = (max(_text_w(_fmt_kda(k["kda"]), fs) for k in kda) + tick + 0.04) if show_kda else 0.0
-    label_w = max([_text_w(p["label"], fs) for p, *_ in panels] + [_text_w(n["label"], fs * 0.9) for n in numbers]) + 0.1
+    kda_w = (max(_text_w(_fmt_kda(k["kda"]), fonts["kda"]) for k in kda) + tick + 0.04) if show_kda else 0.0
 
-    # ---- header (lane texts and group bars)
-    lanes = s["lanes"]
-    texts = [str(l.get("text", "")).replace("|", "\n") for l in lanes]
-    rot = int(s.get("lane_rotation", 0))
-    nlines = max((t.count("\n") + 1 for t in texts if t), default=1)
-    if rot == 0:
-        lane_h = nlines * line_h
-    else:
-        longest = max((_text_w(t, fs) for t in texts), default=0.0)
-        lane_h = longest * (1.0 if rot == 90 else 0.75) + line_h * 0.5
-    groups = s.get("groups", [])
-    glines = max((str(g["text"]).count("|") + 1 for g in groups), default=0)
-    bar_gap, bar_lw = 0.035, 2.2
-    group_h = glines * line_h + 2 * bar_gap if groups else 0.0
-    header_h = lane_h + group_h + 0.04
-
-    left = 0.04 + label_w + kda_w + strip_w  # x of the blot panels
-    total_w = left + panel_w + 0.08
+    # widths of the label columns left and right of the blot
+    left_items, right_items = [], []
+    for p, *_ in panels:
+        (left_items if prot_side == "left" else right_items).append(_text_w(p["label"], fsize(f"protein:{p['row']}", "protein")))
+    for i, n in enumerate(numbers):
+        left_items.append(_text_w(n["label"], fsize(f"numlabel:{i}", "number")))
+    for ti, t in enumerate(tiers):
+        if t.get("condition"):
+            w_ = _text_w(str(t["condition"]).replace("|", "\n"), fsize(f"cond:{ti}", "cond"))
+            (left_items if t.get("cond_side", "left") == "left" else right_items).append(w_)
+    label_w = (max(left_items) + 0.1) if left_items else 0.04
+    right_w = (max(right_items) + 0.12) if right_items else 0.0
+    kda_l = kda_w if kda_side == "left" else 0.0
+    kda_r = kda_w if kda_side == "right" else 0.0
+    left = 0.04 + label_w + kda_l + strip_w + strip_gap  # x of the blot panels
+    total_w = left + panel_w + kda_r + right_w + 0.08
     gap = float(s["panel_gap_in"])
-    num_h = line_h * 1.05
+
+    # header tier heights
+    bar_gap, bar_lw = 0.035, 2.2
+    tier_h = []
+    for ti, t in enumerate(tiers):
+        rot = float(t.get("rotation", 0))
+        if t["kind"] == "lanes":
+            hs = [_text_h(x.replace("|", "\n"), fsize(f"lane:{ti}:{li}", "lane"), rot) for li, x in enumerate(tier_texts(s, t)) if x]
+            h = (max(hs) if hs else fonts["lane"] * 1.2 / 72.0) + 0.03
+        else:
+            hs = [_text_h(str(g["text"]).replace("|", "\n"), fsize(f"group:{ti}:{gi}", "group"), rot)
+                  for gi, g in enumerate(t.get("groups", [])) if g.get("text")]
+            h = (max(hs) if hs else 0.0) + 2 * bar_gap + 0.02
+        ch = _text_h(str(t.get("condition", "")).replace("|", "\n"), fsize(f"cond:{ti}", "cond"), 0) if t.get("condition") else 0
+        tier_h.append(max(h, ch + 0.02))
+    header_h = sum(tier_h) + 0.04
+    num_h = fonts["number"] * 1.3 / 72.0
 
     # vertical sequence: number rows and panels
-    seq = [("num", n) for n in numbers if n.get("pos") == "top"]
+    seq = [("num", (i, n)) for i, n in enumerate(numbers) if n.get("pos") == "top"]
     for item in panels:
         name = item[0]["row"]
-        seq += [("num", n) for n in numbers if n.get("pos") == f"above:{name}"]
+        seq += [("num", (i, n)) for i, n in enumerate(numbers) if n.get("pos") == f"above:{name}"]
         seq.append(("panel", item))
-        seq += [("num", n) for n in numbers if n.get("pos") == f"below:{name}"]
+        seq += [("num", (i, n)) for i, n in enumerate(numbers) if n.get("pos") == f"below:{name}"]
     shown = {p["row"] for p, *_ in panels}
-    seq += [("num", n) for n in numbers
+    seq += [("num", (i, n)) for i, n in enumerate(numbers)
             if n.get("pos") == "bottom" or (n.get("pos", "").split(":", 1)[-1] not in shown and n.get("pos") != "top")]
     body = 0.0
     prev = None
@@ -254,10 +361,20 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
     total_h = 0.04 + header_h + body + 0.04
     fig.set_size_inches(total_w, total_h)
     tr = fig.dpi_scale_trans
+    arts = []
 
-    def text(x, y, t, **kw):
-        kw.setdefault("fontsize", fs)
-        fig.text(x, total_h - y, t, transform=tr, family=family, **kw)
+    def text(key, cat, x, y, t, **kw):
+        """Text at (x, y) inches from the top-left, with the per-item override applied."""
+        o = ov.get(key, {})
+        kw["fontsize"] = fsize(key, cat)
+        if o.get("rot") is not None:
+            kw["rotation"] = float(o["rot"])
+            kw.setdefault("rotation_mode", "anchor")
+        x += float(o.get("dx", 0.0))
+        y += float(o.get("dy", 0.0))
+        art = fig.text(x, total_h - y, t, transform=tr, family=family, **kw)
+        arts.append((key, cat, art))
+        return art
 
     def hline(xa, xb, y, lw):
         fig.add_artist(Line2D([xa, xb], [total_h - y, total_h - y], transform=tr, color="k", lw=lw, solid_capstyle="butt"))
@@ -266,25 +383,53 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
     xs = [left + (c - x0px) * scale for c in centres]
     finite = [x for x in xs if np.isfinite(x)]
     pitch = float(np.median(np.diff(sorted(finite)))) if len(finite) > 1 else panel_w / 4
-    base = 0.04 + header_h - 0.04  # bottom of the lane text block (from top)
-    for x, t in zip(xs, texts):
-        if not np.isfinite(x) or not t:
-            continue
-        if rot == 0:
-            text(x, base, t, ha="center", va="bottom", linespacing=1.1)
+    label_x = 0.04 + label_w - 0.08  # right edge of the left label column
+    right_x = left + panel_w + kda_r + 0.08  # left edge of the right label column
+
+    def side_text(key, cat, side, y, t, **kw):
+        if side == "left":
+            return text(key, cat, label_x, y, t, ha="right", va="center", **kw)
+        return text(key, cat, right_x, y, t, ha="left", va="center", **kw)
+
+    # ---- header tiers
+    y = 0.04
+    for ti, (t, h) in enumerate(zip(tiers, tier_h)):
+        rot = float(t.get("rotation", 0))
+        style = "italic" if t.get("italic") else "normal"
+        bottom = y + h
+        if t["kind"] == "lanes":
+            base = bottom - 0.02
+            for li, (x, tx) in enumerate(zip(xs, tier_texts(s, t))):
+                if not np.isfinite(x) or not tx:
+                    continue
+                if rot:
+                    text(f"lane:{ti}:{li}", "lane", x, base, tx.replace("|", "\n"), ha="left", va="bottom",
+                         rotation=rot, rotation_mode="anchor", linespacing=1.1, style=style)
+                else:
+                    text(f"lane:{ti}:{li}", "lane", x, base, tx.replace("|", "\n"), ha="center", va="bottom",
+                         linespacing=1.1, style=style)
+            cy = base - (h - 0.03) / 2  # middle of this tier's text block
         else:
-            text(x, base, t, ha="left" if rot != 90 else "center", va="bottom", rotation=rot,
-                 rotation_mode="anchor", linespacing=1.1)
-    if groups:
-        bar_y = 0.04 + glines * line_h + bar_gap
-        for g in groups:
-            a_, b_ = int(g["first"]), int(g["last"])
-            if not (np.isfinite(xs[a_]) and np.isfinite(xs[b_])):
-                continue
-            xa, xb = xs[a_] - 0.42 * pitch, xs[b_] + 0.42 * pitch
-            hline(xa, xb, bar_y, bar_lw)
-            text((xa + xb) / 2, bar_y - bar_gap * 0.6, str(g["text"]).replace("|", "\n"),
-                 ha="center", va="bottom", linespacing=1.1)
+            bar_y = bottom - bar_gap
+            for gi, g in enumerate(t.get("groups", [])):
+                a_, b_ = int(g["first"]), int(g["last"])
+                if not (np.isfinite(xs[a_]) and np.isfinite(xs[b_])):
+                    continue
+                xa, xb = xs[a_] - 0.42 * pitch, xs[b_] + 0.42 * pitch
+                if t.get("bar", True):
+                    hline(xa, xb, bar_y, bar_lw)
+                gx = (xa + xb) / 2
+                if rot:
+                    text(f"group:{ti}:{gi}", "group", gx, bar_y - bar_gap * 0.8, str(g["text"]).replace("|", "\n"),
+                         ha="left", va="bottom", rotation=rot, rotation_mode="anchor", linespacing=1.1, style=style)
+                else:
+                    text(f"group:{ti}:{gi}", "group", gx, bar_y - bar_gap * 0.6, str(g["text"]).replace("|", "\n"),
+                         ha="center", va="bottom", linespacing=1.1, style=style)
+            cy = bar_y - bar_gap * 0.6 - max(h - 2 * bar_gap - 0.02, fonts["group"] / 72.0) / 2
+        if t.get("condition"):
+            side_text(f"cond:{ti}", "cond", t.get("cond_side", "left"), cy, str(t["condition"]).replace("|", "\n"),
+                      linespacing=1.1)
+        y = bottom
 
     # ---- panels and number rows
     src = signal
@@ -293,12 +438,13 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
     prev = None
     for kind, it in seq:
         if kind == "num":
+            ni, n = it
             y += 0.02 if prev == "panel" else 0.0
             cy = y + num_h / 2
-            text(0.04 + label_w - 0.08, cy, it["label"], ha="right", va="center", fontsize=fs * 0.9)
-            for x, t in zip(xs, it["texts"]):
+            text(f"numlabel:{ni}", "number", label_x, cy, n["label"], ha="right", va="center")
+            for li, (x, t) in enumerate(zip(xs, n["texts"])):
                 if np.isfinite(x):
-                    text(x, cy, t, ha="center", va="center", fontsize=fs * 0.9)
+                    text(f"num:{ni}:{li}", "number", x, cy, t, ha="center", va="center")
             y += num_h
             prev = kind
             continue
@@ -310,25 +456,42 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
         ax = fig.add_axes([left / total_w, (total_h - y - h) / total_h, panel_w / total_w, h / total_h])
         ax.imshow(1.0 - disp, cmap="gray", vmin=0, vmax=1, aspect="auto", interpolation="antialiased")
         _frame(ax, s["frame_lw"])
+        sx0 = left - strip_gap - strip_w
         if show_strip:
             mcrop = marker[y0:y1, s["strip_x0"]:s["strip_x1"]]
-            sx = fig.add_axes([(left - strip_w) / total_w, (total_h - y - h) / total_h, strip_w / total_w, h / total_h])
+            sx = fig.add_axes([sx0 / total_w, (total_h - y - h) / total_h, strip_w / total_w, h / total_h])
             md = _stretch(mcrop, 1, 99.5, 1.0, marker[:, s["strip_x0"]:s["strip_x1"]])
             sx.imshow(1.0 - md if s.get("marker_invert", True) else md, cmap="gray", vmin=0, vmax=1, aspect="auto",
                       interpolation="antialiased")
             _frame(sx, s["frame_lw"])
-        text(0.04 + label_w - 0.08, y + h / 2, p["label"], ha="right", va="center", weight=weight)
+            layout["strips"].append({"x": sx0, "y": y, "w": strip_w, "h": h})
+        side_text(f"protein:{p['row']}", "protein", prot_side, y + h / 2, p["label"], weight=weight)
         if show_kda:
-            xr = left - strip_w
-            for k in kda:
-                if y0 <= k["y"] <= y1:
-                    ky = y + (k["y"] - y0) * scale
+            for ki, k in enumerate(kda):
+                if not y0 <= k["y"] <= y1:
+                    continue
+                ky = y + (k["y"] - y0) * scale
+                if kda_side == "left":
+                    xr = sx0 if show_strip else left
                     hline(xr - tick, xr, ky, 0.6)
-                    text(xr - tick - 0.02, ky, _fmt_kda(k["kda"]), ha="right", va="center", fontsize=fs * 0.85)
-        layout["panels"].append({"row": p["row"], "x": left - strip_w, "x_blot": left, "y": y, "w": panel_w + strip_w,
-                                 "h": h, "y0": y0, "y1": y1})
+                    text(f"kda:{ki}", "kda", xr - tick - 0.02, ky, _fmt_kda(k["kda"]), ha="right", va="center")
+                else:
+                    xr = left + panel_w
+                    hline(xr, xr + tick, ky, 0.6)
+                    text(f"kda:{ki}", "kda", xr + tick + 0.02, ky, _fmt_kda(k["kda"]), ha="left", va="center")
+        layout["panels"].append({"row": p["row"], "x": sx0 if show_strip else left, "x_blot": left, "y": y,
+                                 "w": panel_w + strip_w + strip_gap, "h": h, "y0": y0, "y1": y1})
         y += h
         prev = kind
+
+    # text boxes for clicking/dragging in the preview
+    renderer = fig.canvas.get_renderer()
+    dpi = fig.dpi
+    for key, cat, art in arts:
+        bb = art.get_window_extent(renderer)
+        layout["texts"].append({"key": key, "cat": cat, "text": art.get_text(),
+                                "x0": bb.x0 / dpi, "x1": bb.x1 / dpi,
+                                "y0": total_h - bb.y1 / dpi, "y1": total_h - bb.y0 / dpi})
     layout.update(size=(total_w, total_h), scale=scale, left=left, panel_w=panel_w, x0px=x0px, x1px=x1px)
     return layout
 
