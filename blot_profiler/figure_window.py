@@ -36,7 +36,7 @@ def _spin(lo, hi, val, step=1.0, decimals=None, suffix=""):
     return w
 
 
-IMAGE_EXT = (".tif", ".tiff", ".png", ".jpg", ".jpeg", ".json")
+IMAGE_EXT = (".tif", ".tiff", ".png", ".jpg", ".jpeg", ".json", ".blotproj")
 
 
 def _dropped_paths(e) -> List[str]:
@@ -742,6 +742,7 @@ class FigureEditor(QtWidgets.QWidget):
         hb = QtWidgets.QHBoxLayout(g)
         hb.addWidget(QtWidgets.QLabel("해상도"))
         self.w_dpi = _spin(150, 2400, 600, 50, None, " dpi")
+        self.w_dpi.valueChanged.connect(lambda v: self.set("export_dpi", int(v)))
         hb.addWidget(self.w_dpi)
         b = QtWidgets.QPushButton("그림 저장 (PNG/TIFF/PDF/SVG)…")
         b.setStyleSheet("font-weight: bold;")
@@ -766,6 +767,7 @@ class FigureEditor(QtWidgets.QWidget):
             for w, key in ((self.w_bold, "label_bold"), (self.w_perpanel, "per_panel"), (self.w_corr, "use_corrected"),
                            (self.w_strip, "show_strip"), (self.w_minv, "marker_invert"), (self.w_kda, "show_kda")):
                 w.setChecked(bool(s[key]))
+            self.w_dpi.setValue(int(s.get("export_dpi", 600)))
             for key, sp in self.w_fonts.items():
                 sp.setValue(float(s["fonts"].get(key, 8.0)))
             self.w_prot_side.setCurrentIndex(0 if s.get("protein_side", "left") == "left" else 1)

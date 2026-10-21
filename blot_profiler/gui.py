@@ -22,6 +22,7 @@ from matplotlib.figure import Figure  # noqa: E402
 
 from . import core  # noqa: E402
 from . import figure  # noqa: E402
+from . import project as projfile  # noqa: E402
 from . import __version__  # noqa: E402
 
 
@@ -394,7 +395,7 @@ class BlotView(QtWidgets.QGraphicsView):
         md = e.mimeData()
         if not md.hasUrls():
             return []
-        exts = (".tif", ".tiff", ".png", ".jpg", ".jpeg", ".json")
+        exts = (".tif", ".tiff", ".png", ".jpg", ".jpeg", ".json", ".blotproj")
         return [u.toLocalFile() for u in md.urls() if u.toLocalFile().lower().endswith(exts)]
 
     def dragEnterEvent(self, e):
@@ -959,6 +960,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.multi_keys: List[str] = []
         self.multi_results: Dict[str, Dict[str, object]] = {}  # name -> {mean, sd, points}
         self._updating = False
+        self.project_path: Optional[str] = None  # where the project was last saved/opened
+        self._saved_fp: Optional[str] = None  # state at that moment (unsaved-change mark)
 
         self.view = BlotView()
         self.view.changed.connect(self.on_boxes_changed)
@@ -1055,6 +1058,10 @@ class MainWindow(QtWidgets.QMainWindow):
         bs_sc = QtGui.QShortcut(QtGui.QKeySequence(Qt.Key_Backspace), self.view)
         bs_sc.activated.connect(self.delete_selected)
         self.refresh_doc_tabs()
+        self._title_timer = QtCore.QTimer(self)
+        self._title_timer.setInterval(1500)
+        self._title_timer.timeout.connect(self.update_title)
+        self._title_timer.start()
 
     # ---------------------------------------------------------------- images (documents)
     @property
@@ -1091,7 +1098,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.on_bg_changed(recompute=False)
         if d.raw is not None:
             self.file_label.setText(f"{os.path.basename(d.image_path)}  ({d.raw.shape[1]}×{d.raw.shape[0]}, max {d.raw.max():.0f})")
-            self.setWindowTitle(f"Blot Profiler – {os.path.basename(d.image_path)}")
+            self.update_title()
             self.refresh_marker_view()
             self.update_display(reset_zoom=True)
         else:
@@ -1146,8 +1153,9 @@ class MainWindow(QtWidgets.QMainWindow):
         act = m.addAction("TIF 열기…", self.open_image)
         act.setShortcut(QtGui.QKeySequence.Open)
         m.addSeparator()
-        m.addAction("분석 저장 (.json)…", self.save_project).setShortcut(QtGui.QKeySequence.Save)
-        m.addAction("분석 불러오기…", self.load_project)
+        m.addAction("프로젝트 열기… (.blotproj / .json)", self.open_project_dialog).setShortcut("Ctrl+Shift+O")
+        m.addAction("프로젝트 저장", lambda: self.save_project()).setShortcut(QtGui.QKeySequence.Save)
+        m.addAction("프로젝트 다른 이름으로 저장…", lambda: self.save_project(save_as=True)).setShortcut("Ctrl+Shift+S")
         m.addSeparator()
         m.addAction("밴드 ROI·그룹 저장…", self.save_roi)
         m.addAction("밴드 ROI·그룹 불러오기 (현재 이미지에 적용)…", self.load_roi)
@@ -1572,11 +1580,11 @@ class MainWindow(QtWidgets.QMainWindow):
         """Open analysis files and blots; files named '…marker…' become the marker of their blot
         (or of the current image when no blot is opened with them)."""
         paths = [p for p in paths if p]
-        markers = [p for p in paths if self.is_marker_file(p) and not p.lower().endswith(".json")]
+        markers = [p for p in paths if self.is_marker_file(p) and not projfile.is_project_file(p)]
         for p in paths:
-            if p.lower().endswith(".json"):
+            if projfile.is_project_file(p):
                 self.load_project(p)
-        blots = [p for p in paths if p not in markers and not p.lower().endswith(".json")]
+        blots = [p for p in paths if p not in markers and not projfile.is_project_file(p)]
         for p in blots:
             self.load_image(p, marker_candidates=markers)
         if markers and not blots:
@@ -2600,27 +2608,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.multi_plot.plot_bars(self.multi_keys, series, ylabel, self.multi_points.isChecked())
 
     # ---------------------------------------------------------------- save / export
-    def project_dict(self):
-        return {
-            "app": "Blot Profiler",
-            "version": __version__,
-            "format": 3,
-            "detect": {
-                "sensitivity": self.sens.value(), "smooth": self.smooth.value(), "min_area": self.min_area.value(),
-                "pad": self.pad.value(), "edge": self.edge.value(), "lut_gamma": self.lut_gamma.value(),
-            },
-            "images": [
-                {
-                    "image_path": d.image_path, "invert": d.invert, "background": vars(d.bg),
-                    "reference_lane": d.ref_lane, "analysis": d.analysis.to_dict(), "figure": d.figure,
-                }
-                for d in self.docs if d.raw is not None
-            ],
-            "big_groups": self.big_groups,
-            "multi_formulas": self.multi_formulas,
-            "multi_reference": self.multi_ref,
-        }
-
     ROI_APP = "Blot Profiler ROI"
 
     def save_roi(self):
@@ -2682,33 +2669,178 @@ class MainWindow(QtWidgets.QMainWindow):
             traceback.print_exc()
             QtWidgets.QMessageBox.critical(self, "불러오기 실패", str(e))
 
-    def save_project(self):
-        base = os.path.splitext(self.image_path)[0] + "_analysis.json" if self.image_path else "analysis.json"
-        p, _ = QtWidgets.QFileDialog.getSaveFileName(self, "분석 저장", base, "JSON (*.json)")
-        if not p:
+    def project_dict(self, project_path: Optional[str] = None, arc: Optional[Dict[str, str]] = None) -> dict:
+        """Everything needed to restore the session. ``arc`` = embedded files {source: archive name}."""
+        pp = project_path or self.project_path or os.path.join(os.getcwd(), "project.blotproj")
+        arc = arc or {}
+        images = []
+        for d in self.docs:
+            if d.raw is None:
+                continue
+            if d.figure is None:  # the figure tab would create these; saved and reopened states stay equal
+                d.figure = figure.default_settings()
+            figure.sync_settings(d.figure, d.analysis, d.raw.shape)
+            marker = (d.figure or {}).get("marker_path") if d.marker is not None else None
+            images.append({
+                "image_path": d.image_path,  # older versions read this
+                "image": projfile.file_ref(d.image_path, pp, arc.get(d.image_path)),
+                "marker": projfile.file_ref(marker, pp, arc.get(marker)) if marker else None,
+                "invert": d.invert, "background": vars(d.bg), "reference_lane": d.ref_lane,
+                "analysis": d.analysis.to_dict(), "figure": d.figure,
+            })
+        return {
+            "app": "Blot Profiler",
+            "version": __version__,
+            "format": 4,
+            "detect": {
+                "sensitivity": self.sens.value(), "smooth": self.smooth.value(), "min_area": self.min_area.value(),
+                "pad": self.pad.value(), "edge": self.edge.value(), "lut_gamma": self.lut_gamma.value(),
+                "fill_lanes": self.fill_lanes.isChecked(), "snap_lanes": self.snap_lanes.isChecked(),
+            },
+            "images": images,
+            "big_groups": self.big_groups,
+            "multi_formulas": self.multi_formulas,
+            "multi_reference": self.multi_ref,
+            "ui": {
+                "current_image": self.cur, "auto_norm": self.auto_norm.isChecked(),
+                "by_condition": self.by_condition.isChecked(), "show_points": self.show_points.isChecked(),
+                "multi_points": self.multi_points.isChecked(), "auto_lanes": self.auto_lanes.isChecked(),
+                "show_marker": self.show_marker.isChecked(), "ask_marker": self.ask_marker.isChecked(),
+            },
+        }
+
+    # ---------------------------------------------------------------- unsaved changes
+    def _fingerprint(self) -> str:
+        d = self.project_dict(project_path="/project.blotproj")
+        d.pop("ui", None)
+        for im in d["images"]:
+            im.pop("image_path", None)
+        return json.dumps(d, sort_keys=True, default=str)
+
+    def mark_saved(self):
+        self._saved_fp = self._fingerprint()
+        self.update_title()
+
+    def is_dirty(self) -> bool:
+        if not self.loaded_docs():
+            return False
+        return self._fingerprint() != self._saved_fp
+
+    def update_title(self):
+        if self.project_path:
+            name = os.path.basename(self.project_path)
+        elif self.doc.raw is not None:
+            name = os.path.basename(self.doc.image_path)
+        else:
+            self.setWindowTitle("Blot Profiler")
             return
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(self.project_dict(), f, ensure_ascii=False, indent=2)
-        self.statusBar().showMessage(f"저장했습니다: {p}")
+        dirty = self._saved_fp is None or self.is_dirty()
+        self.setWindowTitle(f"{'● ' if dirty else ''}Blot Profiler – {name}{' (저장 안 됨)' if dirty else ''}")
 
-    def _find_image(self, img, project_path):
-        if img and os.path.exists(img):
-            return img
-        cand = os.path.join(os.path.dirname(project_path), os.path.basename(img or ""))
-        if img and os.path.exists(cand):
-            return cand
-        QtWidgets.QMessageBox.information(self, "이미지 찾기", f"원본 이미지를 찾을 수 없습니다:\n{img}\n이미지 파일을 선택하세요.")
-        img, _ = QtWidgets.QFileDialog.getOpenFileName(self, "TIF 파일 열기", "", "Images (*.tif *.tiff *.png *.jpg)")
-        return img or None
+    def maybe_save(self) -> bool:
+        """Ask to save unsaved changes. False = the user cancelled."""
+        if not self.is_dirty():
+            return True
+        r = QtWidgets.QMessageBox.question(
+            self, "저장하지 않은 변경", "저장하지 않은 변경이 있습니다. 프로젝트를 저장할까요?",
+            QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Discard | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Save)
+        if r == QtWidgets.QMessageBox.Cancel:
+            return False
+        if r == QtWidgets.QMessageBox.Save:
+            return self.save_project()
+        return True
 
-    def load_project(self, p=None):
+    def closeEvent(self, e):
+        if self.maybe_save():
+            e.accept()
+        else:
+            e.ignore()
+
+    # ---------------------------------------------------------------- save / open project
+    def save_project(self, save_as: bool = False) -> bool:
+        if not self.loaded_docs():
+            self.statusBar().showMessage("저장할 이미지가 없습니다")
+            return False
+        p = self.project_path
+        if save_as or not p:
+            base = p or (os.path.splitext(self.doc.image_path)[0] + projfile.PROJECT_EXT)
+            p, flt = QtWidgets.QFileDialog.getSaveFileName(
+                self, "프로젝트 저장", base,
+                "Blot Profiler 프로젝트 — 이미지 포함 (*.blotproj);;JSON — 이미지 미포함, 예전 방식 (*.json)")
+            if not p:
+                return False
+            if not os.path.splitext(p)[1]:
+                p += ".json" if flt.startswith("JSON") else projfile.PROJECT_EXT
+        embed = p.lower().endswith(projfile.PROJECT_EXT)
+        if embed:
+            files = self._project_files()
+            size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
+            if size > projfile.EMBED_WARN_BYTES:
+                r = QtWidgets.QMessageBox.question(
+                    self, "이미지 포함", f"이미지가 {size / 1e6:.0f} MB입니다. 프로젝트 파일에 이미지를 포함할까요?\n"
+                    "(포함하면 다른 컴퓨터에서도 바로 열리고, 포함하지 않으면 원본 파일 위치를 기억합니다)")
+                embed = r == QtWidgets.QMessageBox.Yes
+        try:
+            self.write_project(p, embed)
+        except Exception as e:
+            traceback.print_exc()
+            QtWidgets.QMessageBox.critical(self, "저장 실패", str(e))
+            return False
+        self.statusBar().showMessage(f"프로젝트를 저장했습니다: {p}" + (" (이미지 포함)" if embed and p.lower().endswith(projfile.PROJECT_EXT) else ""))
+        return True
+
+    def _project_files(self):
+        files = []
+        for d in self.loaded_docs():
+            files.append(d.image_path)
+            mp = (d.figure or {}).get("marker_path")
+            if d.marker is not None and mp and os.path.exists(mp):
+                files.append(mp)
+        return [f for f in files if f and os.path.exists(f)]
+
+    def write_project(self, path: str, embed: bool = True):
+        """Save everything to ``path`` (.blotproj = zip, with the images when ``embed``)."""
+        arc = projfile.archive_names(self._project_files()) if embed and path.lower().endswith(projfile.PROJECT_EXT) else {}
+        projfile.write(path, self.project_dict(project_path=path, arc=arc), arc)
+        self.project_path = path
+        self.mark_saved()
+
+    def open_project_dialog(self):
+        if not self.maybe_save():
+            return
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "프로젝트 열기", "",
+                                                     "Blot Profiler 프로젝트 (*.blotproj *.json);;All files (*)")
+        if p:
+            self.load_project(p, ask_save=False)
+
+    def _relocate(self, what: str, ref, project_path: str, embedded: Optional[str], optional: bool = False) -> Optional[str]:
+        path = projfile.resolve(ref, project_path, embedded)
+        if path:
+            return path
+        if isinstance(ref, str):
+            ref = {"path": ref, "name": os.path.basename(ref)}
+        orig = (ref or {}).get("path") or (ref or {}).get("name") or "?"
+        buttons = QtWidgets.QMessageBox.Open | (QtWidgets.QMessageBox.Ignore if optional else QtWidgets.QMessageBox.Cancel)
+        r = QtWidgets.QMessageBox.question(
+            self, "파일 다시 찾기", f"{what}을(를) 찾을 수 없습니다:\n{orig}\n\n파일을 직접 찾을까요?", buttons, QtWidgets.QMessageBox.Open)
+        if r != QtWidgets.QMessageBox.Open:
+            return None
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(self, f"{what} 다시 찾기 — {(ref or {}).get('name', '')}",
+                                                     os.path.dirname(project_path), "Images (*.tif *.tiff *.png *.jpg *.jpeg);;All files (*)")
+        return p or None
+
+    def load_project(self, p=None, ask_save: bool = True):
+        if ask_save and not self.maybe_save():
+            return
         if not p:
-            p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "분석 불러오기", "", "JSON (*.json)")
-        if not p:
+            self.open_project_dialog()
             return
         try:
-            with open(p, encoding="utf-8") as f:
-                d = json.load(f)
+            d, embedded = projfile.read(p)
+            if d.get("app") == self.ROI_APP:  # a band ROI file, not a project
+                self.load_roi(p)
+                return
             if "images" in d:
                 images = d["images"]
             else:  # format 1: a single image
@@ -2720,9 +2852,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.pad.setValue(det.get("pad", 3))
             self.edge.setValue(det.get("edge", 0))
             self.lut_gamma.setValue(det.get("lut_gamma", 0.6))
+            self.fill_lanes.setChecked(det.get("fill_lanes", True))
+            self.snap_lanes.setChecked(det.get("snap_lanes", True))
             docs, index = [], {}
             for i, im in enumerate(images):
-                path = self._find_image(im.get("image_path"), p)
+                path = self._relocate("블롯 이미지", im.get("image") or im.get("image_path"), p, embedded)
                 if not path:
                     continue
                 doc = ImageDoc(invert=int(im.get("invert") or 0), bg=core.BackgroundSettings(**(im.get("background") or {})))
@@ -2731,9 +2865,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 doc.ref_lane = im.get("reference_lane", 0)
                 doc.analysis = core.Analysis.from_dict(im.get("analysis") or {})
                 doc.analysis.ensure_lane_labels()
-                doc.figure = im.get("figure")
+                doc.figure = im.get("figure") or figure.default_settings()
+                figure.sync_settings(doc.figure, doc.analysis, doc.raw.shape)  # as the figure tab would
                 self._make_signal(doc)
                 self.measure_doc(doc)
+                mref = im.get("marker") or ((doc.figure or {}).get("marker_path") if doc.figure else None)
+                if mref:
+                    mpath = self._relocate("마커 이미지", mref, p, embedded, optional=True)
+                    if mpath:
+                        self.set_marker(doc, mpath, quiet=True)
+                    elif doc.figure:
+                        doc.figure["marker_path"] = None
                 index[i] = len(docs)
                 docs.append(doc)
             if not docs:
@@ -2750,14 +2892,25 @@ class MainWindow(QtWidgets.QMainWindow):
             ]
             self.multi_formulas = [dict(f) for f in d.get("multi_formulas", [])]
             self.multi_ref = d.get("multi_reference")
-            self.cur = 0
+            ui = d.get("ui", {})
+            for w, key in ((self.auto_norm, "auto_norm"), (self.by_condition, "by_condition"), (self.show_points, "show_points"),
+                           (self.multi_points, "multi_points"), (self.auto_lanes, "auto_lanes"),
+                           (self.show_marker, "show_marker"), (self.ask_marker, "ask_marker")):
+                if key in ui:
+                    w.blockSignals(True)
+                    w.setChecked(bool(ui[key]))
+                    w.blockSignals(False)
+            self.cur = min(int(ui.get("current_image", 0)), len(docs) - 1)
             self.refresh_doc_tabs()
             self.fill_multi_formulas()
-            self.switch_doc(0)
-            self.statusBar().showMessage(f"불러왔습니다: {p}")
+            self.switch_doc(self.cur)
+            self.figure_editor.dirty = True
+            self.project_path = p
+            self.mark_saved()
+            self.statusBar().showMessage(f"프로젝트를 열었습니다: {p} (이미지 {len(docs)}개)")
         except Exception as e:
             traceback.print_exc()
-            QtWidgets.QMessageBox.critical(self, "불러오기 실패", str(e))
+            QtWidgets.QMessageBox.critical(self, "열기 실패", str(e))
 
     def export_csv(self):
         docs = self.loaded_docs()
@@ -2938,10 +3091,7 @@ def main(argv=None):
         w.open_path(p)
     args = [a for a in argv[1:] if not a.startswith("-psn")]
     if args and os.path.exists(args[0]):
-        if args[0].lower().endswith(".json"):
-            w.load_project(args[0])
-        else:
-            w.load_image(args[0])
+        w.open_paths([args[0]])
     return app.exec()
 
 
