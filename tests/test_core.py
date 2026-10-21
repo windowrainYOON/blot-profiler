@@ -317,3 +317,42 @@ def test_figure_tiers_conditions_overrides_and_sides():
     p3 = [t for t in lay3["texts"] if t["key"].startswith("protein:")][0]
     p2 = [t for t in lay2["texts"] if t["key"].startswith("protein:")][0]
     assert (p3["y1"] - p3["y0"]) > (p2["y1"] - p2["y0"])
+
+
+def test_transform_and_line_straightening():
+    img = np.zeros((40, 60))
+    img[5, 10] = 1.0
+    r = core.apply_transform(img, {"rot90": 1, "angle": 0.0, "crop": None})
+    assert r.shape == (60, 40) and r[49, 5] == 1.0  # counter-clockwise quarter turn
+    c = core.apply_transform(img, {"rot90": 0, "angle": 0.0, "crop": [5, 2, 30, 20]})
+    assert c.shape == (18, 25) and c[3, 5] == 1.0
+    # a line that rises 3 degrees to the right becomes horizontal after rotating by its angle
+    from scipy import ndimage as ndi
+    line = np.zeros((200, 300))
+    line[100, 50:250] = 1.0
+    tilted = ndi.rotate(line, 3.0, reshape=False, order=1)
+    ys, xs = np.nonzero(tilted > 0.3)
+    i0, i1 = np.argmin(xs), np.argmax(xs)
+    ang = core.line_angle(xs[i0], ys[i0], xs[i1], ys[i1])
+    fixed = core.apply_transform(tilted, {"rot90": 0, "angle": ang, "crop": None})
+    ys2, xs2 = np.nonzero(fixed > 0.3)
+    slope = np.polyfit(xs2, ys2, 1)[0]
+    assert abs(np.degrees(np.arctan(slope))) < 0.5
+
+
+def test_gel_mode_detects_ladders_and_samples():
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    import synth
+    rgb, lanes, ladder_y = synth.gel_photo()
+    raw = rgb[..., 0].astype(float)
+    sig = core.to_signal(raw)
+    corr = core.corrected_signal(sig, core.BackgroundSettings())
+    assert core.looks_like_gel(corr)
+    a = core.detect_gel(corr)
+    assert a.n_lanes == 8 and core.ladder_lanes(a) == [0, 4]
+    assert [round(y) for y in core.ladder_band_ys(a)] == [int(y) for y in ladder_y]
+    assert sorted(r.name for r in a.rows if r.name != a.ladder_row) == ["B1", "B2", "B3"]
+    # a western blot is not mistaken for a gel
+    w = core.to_signal(core.load_image(os.path.join(DATA, "example_blot.tif")))
+    assert not core.looks_like_gel(core.corrected_signal(w, core.BackgroundSettings()))

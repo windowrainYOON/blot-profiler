@@ -481,6 +481,7 @@ class FigureEditor(QtWidgets.QWidget):
 
         controls = QtWidgets.QWidget()
         cl = QtWidgets.QVBoxLayout(controls)
+        cl.addWidget(self._build_layout())
         cl.addWidget(self._build_panels())
         cl.addWidget(self._build_tiers())
         cl.addWidget(self._build_fonts())
@@ -535,7 +536,7 @@ class FigureEditor(QtWidgets.QWidget):
         rl.addWidget(hint)
         mb = QtWidgets.QHBoxLayout()
         mb.addWidget(QtWidgets.QLabel("마우스로:"))
-        self.ref_kda_btn = QtWidgets.QRadioButton("클릭 = kDa 입력")
+        self.ref_kda_btn = QtWidgets.QRadioButton("클릭 = 크기(kDa/bp) 입력")
         self.ref_region_btn = QtWidgets.QRadioButton("드래그 = 마커 띠 영역 새로 그리기")
         self.ref_kda_btn.setChecked(True)
         self.ref_kda_btn.toggled.connect(lambda on: setattr(self.ref, "mode", "kda" if on else "region"))
@@ -550,7 +551,7 @@ class FigureEditor(QtWidgets.QWidget):
 
         self.right = QtWidgets.QTabWidget()
         self.right.addTab(pw, "미리보기")
-        self.right.addTab(rw, "마커 참고 (kDa 입력)")
+        self.right.addTab(rw, "마커 참고 (크기 입력)")
         self.right.currentChanged.connect(lambda i: i == 1 and QtCore.QTimer.singleShot(0, self.ref.fit))
         props_box = QtWidgets.QWidget()
         pbl = QtWidgets.QVBoxLayout(props_box)
@@ -593,7 +594,7 @@ class FigureEditor(QtWidgets.QWidget):
             self.stack.setCurrentIndex(0)
             return
         if doc.figure is None:
-            doc.figure = figure.default_settings()
+            doc.figure = figure.apply_mode_defaults(figure.default_settings(), doc.analysis, doc.mode)
         self.s = doc.figure
         figure.sync_settings(self.s, doc.analysis, doc.raw.shape)
         if self.s.get("marker_path") and os.path.exists(self.s["marker_path"]) and doc.marker is None:
@@ -609,6 +610,53 @@ class FigureEditor(QtWidgets.QWidget):
     def _group(self, title):
         g = QtWidgets.QGroupBox(title)
         return g
+
+    def _build_layout(self):
+        g = self._group("그림 형태")
+        f = QtWidgets.QFormLayout(g)
+        self.w_layout = QtWidgets.QComboBox()
+        self.w_layout.addItem("단백질(행)별로 가로로 잘라내기 (Western blot)", "rows")
+        self.w_layout.addItem("겔 전체를 한 패널로 (DNA gel)", "full")
+        self.w_layout.currentIndexChanged.connect(lambda _: self.set_layout_kind(self.w_layout.currentData()))
+        f.addRow("형태", self.w_layout)
+        hb = QtWidgets.QHBoxLayout()
+        self.w_gc = [_spin(0, 100000, 0, 1, None, "") for _ in range(4)]
+        for lab, sp in zip(("x", "y", "~ x", "y"), self.w_gc):
+            hb.addWidget(QtWidgets.QLabel(lab))
+            hb.addWidget(sp)
+            sp.valueChanged.connect(lambda _=None: self.set_gel_crop([w.value() for w in self.w_gc]))
+        b = QtWidgets.QPushButton("자동")
+        b.setToolTip("모든 밴드를 감싸는 범위로 되돌립니다")
+        b.clicked.connect(lambda: (self.s.__setitem__("gel_crop", None), self.load_from_settings()))
+        hb.addWidget(b)
+        self.gel_crop_row = QtWidgets.QWidget()
+        self.gel_crop_row.setLayout(hb)
+        hb.setContentsMargins(0, 0, 0, 0)
+        f.addRow("겔 범위 (px)", self.gel_crop_row)
+        self.w_gel_label = QtWidgets.QLineEdit()
+        self.w_gel_label.setPlaceholderText("예: Myco PCR")
+        self.w_gel_label.editingFinished.connect(lambda: self.set("gel_label", self.w_gel_label.text()))
+        f.addRow("겔 왼쪽 라벨", self.w_gel_label)
+        hint = QtWidgets.QLabel("겔 전체 패널은 미리보기 편집 모드에서 가장자리를 끌어 자를 수 있습니다.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #666;")
+        f.addRow(hint)
+        return g
+
+    def set_layout_kind(self, kind):
+        if self._loading:
+            return
+        self.s["layout"] = kind
+        self.load_from_settings()
+
+    def set_gel_crop(self, vals):
+        if self._loading:
+            return
+        x0, y0, x1, y1 = (int(v) for v in vals)
+        if x1 - x0 >= 4 and y1 - y0 >= 4:
+            self.s["gel_crop"] = [x0, y0, x1, y1]
+            self.refresh_reference()
+            self.schedule()
 
     def _build_panels(self):
         g = self._group("단백질 패널")
@@ -709,8 +757,21 @@ class FigureEditor(QtWidgets.QWidget):
         f.addRow("띠 세로 보정", self.w_sdy)
         self.w_minv = QtWidgets.QCheckBox("마커 띠 반전 (어두운 ladder / 흰 배경)")
         f.addRow(self.w_minv)
-        self.w_kda = QtWidgets.QCheckBox("kDa 눈금 표시")
+        self.w_kda = QtWidgets.QCheckBox("크기 눈금 표시 (kDa / bp)")
         f.addRow(self.w_kda)
+        self.w_unit = QtWidgets.QComboBox()
+        self.w_unit.addItems(["kDa", "bp"])
+        self.w_unit.currentTextChanged.connect(lambda t: self.set("unit", t))
+        f.addRow("단위", self.w_unit)
+        hb = QtWidgets.QHBoxLayout()
+        self.w_preset = QtWidgets.QComboBox()
+        self.w_preset.addItems(list(core.LADDER_PRESETS))
+        hb.addWidget(self.w_preset, 1)
+        b = QtWidgets.QPushButton("위에서부터 값 채우기")
+        b.setToolTip("아래 표의 눈금(위쪽 밴드부터)에 고른 ladder의 크기를 차례로 넣습니다")
+        b.clicked.connect(self.fill_preset)
+        hb.addWidget(b)
+        f.addRow("ladder 종류", hb)
         l.addLayout(f)
         self.w_strip.toggled.connect(lambda on: self.set("show_strip", on))
         self.w_sx0.valueChanged.connect(lambda v: self.set("strip_x0", int(v)))
@@ -718,14 +779,14 @@ class FigureEditor(QtWidgets.QWidget):
         self.w_minv.toggled.connect(lambda on: self.set("marker_invert", on))
         self.w_kda.toggled.connect(lambda on: self.set("show_kda", on))
         self.kda_table = QtWidgets.QTableWidget(0, 2)
-        self.kda_table.setHorizontalHeaderLabels(["kDa", "y (px)"])
+        self.kda_table.setHorizontalHeaderLabels(["크기", "y (px)"])
         self.kda_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         self.kda_table.verticalHeader().setVisible(False)
         self.kda_table.setMaximumHeight(170)
         self.kda_table.itemChanged.connect(self.on_kda_item)
         l.addWidget(self.kda_table)
         hb = QtWidgets.QHBoxLayout()
-        b = QtWidgets.QPushButton("kDa 추가 (직접 입력)")
+        b = QtWidgets.QPushButton("눈금 추가 (직접 입력)")
         b.clicked.connect(self.add_kda_row)
         hb.addWidget(b)
         b = QtWidgets.QPushButton("선택 삭제")
@@ -768,6 +829,16 @@ class FigureEditor(QtWidgets.QWidget):
                            (self.w_strip, "show_strip"), (self.w_minv, "marker_invert"), (self.w_kda, "show_kda")):
                 w.setChecked(bool(s[key]))
             self.w_dpi.setValue(int(s.get("export_dpi", 600)))
+            self.w_layout.setCurrentIndex(max(0, self.w_layout.findData(s.get("layout", "rows"))))
+            full = s.get("layout") == "full"
+            self.gel_crop_row.setEnabled(full)
+            self.w_gel_label.setEnabled(full)
+            self.w_gel_label.setText(s.get("gel_label", ""))
+            if self.doc is not None and self.doc.raw is not None and self.doc.analysis.bands:
+                crop = s.get("gel_crop") or figure.default_gel_crop(self.doc.analysis, self.doc.raw.shape)
+                for sp, v in zip(self.w_gc, crop):
+                    sp.setValue(int(v))
+            self.w_unit.setCurrentText(s.get("unit", "kDa"))
             for key, sp in self.w_fonts.items():
                 sp.setValue(float(s["fonts"].get(key, 8.0)))
             self.w_prot_side.setCurrentIndex(0 if s.get("protein_side", "left") == "left" else 1)
@@ -1249,14 +1320,14 @@ class FigureEditor(QtWidgets.QWidget):
         self.s["kda"].sort(key=lambda k: k["y"])
         t.setRowCount(len(self.s["kda"]))
         for i, k in enumerate(self.s["kda"]):
-            t.setItem(i, 0, QtWidgets.QTableWidgetItem(f"{float(k['kda']):g}"))
+            t.setItem(i, 0, QtWidgets.QTableWidgetItem("" if k.get("kda") in (None, "") else f"{float(k['kda']):g}"))
             t.setItem(i, 1, QtWidgets.QTableWidgetItem(f"{float(k['y']):.0f}"))
         t.blockSignals(False)
 
     def on_kda_item(self, item):
         k = self.s["kda"][item.row()]
         try:
-            v = float(item.text())
+            v = float(item.text()) if item.text().strip() or item.column() == 1 else None
         except ValueError:
             self.fill_kda()
             return
@@ -1269,7 +1340,8 @@ class FigureEditor(QtWidgets.QWidget):
         H = self.doc.raw.shape[0]
         if not 0 <= y < H:
             return
-        v, ok = QtWidgets.QInputDialog.getDouble(self, "kDa 입력", f"y = {y:.0f} px 의 ladder 밴드 크기 (kDa):", 100.0, 0.1, 10000.0, 1)
+        unit = self.s.get("unit", "kDa")
+        v, ok = QtWidgets.QInputDialog.getDouble(self, "크기 입력", f"y = {y:.0f} px 의 ladder 밴드 크기 ({unit}):", 100.0, 0.1, 100000.0, 1)
         if not ok:
             return
         self.s["kda"].append({"kda": v, "y": float(round(y))})
@@ -1280,7 +1352,7 @@ class FigureEditor(QtWidgets.QWidget):
         self.schedule()
 
     def add_kda_row(self):
-        v, ok = QtWidgets.QInputDialog.getDouble(self, "kDa 추가", "ladder 밴드 크기 (kDa):", 100.0, 0.1, 10000.0, 1)
+        v, ok = QtWidgets.QInputDialog.getDouble(self, "눈금 추가", f"ladder 밴드 크기 ({self.s.get('unit', 'kDa')}):", 100.0, 0.1, 100000.0, 1)
         if not ok:
             return
         y, ok = QtWidgets.QInputDialog.getInt(self, "kDa 추가", "그 밴드의 y 위치 (블롯 픽셀):", 0, 0, self.doc.raw.shape[0] - 1)
@@ -1291,6 +1363,21 @@ class FigureEditor(QtWidgets.QWidget):
         self.fill_kda()
         self.refresh_reference()
         self.schedule()
+
+    def fill_preset(self):
+        values = core.LADDER_PRESETS.get(self.w_preset.currentText(), [])
+        marks = sorted(self.s["kda"], key=lambda k: k["y"])
+        if not marks:
+            QtWidgets.QMessageBox.information(self, "ladder 값", "먼저 ladder 밴드 위치(눈금)가 있어야 합니다. DNA gel 모드에서는 검출된 ladder 밴드가 자동으로 들어옵니다.")
+            return
+        for k, v in zip(marks, values):
+            k["kda"] = float(v)
+        self.s["unit"] = "bp" if "DNA" in self.w_preset.currentText() else self.s.get("unit", "kDa")
+        self.s["show_kda"] = True
+        n = min(len(marks), len(values))
+        self.status(f"{self.w_preset.currentText()}: 위에서부터 {n}개 눈금에 크기를 넣었습니다"
+                    + ("" if len(marks) == len(values) else f" (눈금 {len(marks)}개, ladder {len(values)}개 — 확인하세요)"))
+        self.load_from_settings()
 
     def delete_kda(self):
         for r in sorted({i.row() for i in self.kda_table.selectedIndexes()}, reverse=True):
@@ -1414,6 +1501,8 @@ class FigureEditor(QtWidgets.QWidget):
         if head == "cond":
             t = s["tiers"][int(rest[0])]
             return (lambda: t.get("condition", ""), lambda v: t.__setitem__("condition", v))
+        if head == "protein" and key.split(":", 1)[1] == figure.GEL_ROW:
+            return (lambda: s.get("gel_label", ""), lambda v: s.__setitem__("gel_label", v))
         if head == "protein":
             row = key.split(":", 1)[1]
             p = next((p for p in s["panels"] if p["row"] == row), None)
@@ -1489,6 +1578,17 @@ class FigureEditor(QtWidgets.QWidget):
         f.addRow(b)
 
     def _props_panel(self, row):
+        if row == figure.GEL_ROW:
+            f = self._p_box("겔 전체 패널")
+            s = self.s
+            self._p_line(f, "왼쪽 라벨", s.get("gel_label", ""), lambda v: s.__setitem__("gel_label", v))
+            crop = s.get("gel_crop") or figure.default_gel_crop(self.doc.analysis, self.doc.raw.shape)
+            s["gel_crop"] = list(crop)
+            for i, lab in enumerate(("왼쪽 x", "위 y", "오른쪽 x", "아래 y")):
+                self._p_num(f, lab, int(crop[i]), 0, 100000, 1, None, " px", lambda v, i=i: s["gel_crop"].__setitem__(i, int(v)))
+            self._p_combo(f, "형태", [("겔 전체 한 패널", "full"), ("단백질(행)별 잘라내기", "rows")], s.get("layout", "rows"),
+                          lambda v: s.__setitem__("layout", v))
+            return
         p = next((p for p in self.s["panels"] if p["row"] == row), None)
         if p is None:
             return
@@ -1522,12 +1622,13 @@ class FigureEditor(QtWidgets.QWidget):
         f.addRow(b)
 
     def _props_kda(self, i):
-        kda = sorted(self.s["kda"], key=lambda k: k["y"])
+        kda = sorted((k for k in self.s["kda"] if k.get("kda") not in (None, "")), key=lambda k: k["y"])
         if i >= len(kda):
             return
         k = kda[i]
-        f = self._p_box("kDa 눈금")
-        self._p_num(f, "크기", float(k["kda"]), 0.1, 10000.0, 1.0, 1, " kDa", lambda v: k.__setitem__("kda", float(v)))
+        unit = self.s.get("unit", "kDa")
+        f = self._p_box(f"크기 눈금 ({unit})")
+        self._p_num(f, "크기", float(k["kda"]), 0.1, 100000.0, 1.0, 1, f" {unit}", lambda v: k.__setitem__("kda", float(v)))
         self._p_num(f, "위치 y", float(k["y"]), 0.0, 100000.0, 1.0, 0, " px", lambda v: k.__setitem__("y", float(v)))
         self._p_combo(f, "눈금 위치 (전체)", [("왼쪽", "left"), ("오른쪽", "right")], self.s.get("kda_side", "left"),
                       lambda v: self.s.__setitem__("kda_side", v))
@@ -1567,6 +1668,21 @@ class FigureEditor(QtWidgets.QWidget):
         if not scale:
             return
         d = int(round(d_in / scale))  # blot pixels
+        if self.s.get("layout") == "full":
+            H, W = self.doc.raw.shape
+            x0, y0, x1, y1 = self.s.get("gel_crop") or figure.default_gel_crop(self.doc.analysis, (H, W))
+            if edge == "top":
+                y0 = min(max(0, y0 + d), y1 - 4)
+            elif edge == "bottom":
+                y1 = max(min(H, y1 + d), y0 + 4)
+            elif edge == "left":
+                x0 = min(max(0, x0 + d), x1 - 4)
+            else:
+                x1 = max(min(W, x1 + d), x0 + 4)
+            self.s["gel_crop"] = [int(x0), int(y0), int(x1), int(y1)]
+            self.load_from_settings()
+            self.render()
+            return
         if edge in ("top", "bottom"):
             p = next((p for p in self.s["panels"] if p["row"] == row), None)
             if p is None:
@@ -1774,8 +1890,8 @@ class FigureEditor(QtWidgets.QWidget):
         t.setPos(x_blot + 4, -30)
         pen = QtGui.QPen(QtGui.QColor("#e65100"), 1.5, Qt.DashLine)
         pen.setCosmetic(True)
-        x0, x1 = figure.crop_x(d.analysis, self.s, W)
-        for p, _, y0, y1 in figure.panel_rows(d.analysis, self.s, H):
+        panels, x0, x1 = figure.layout_panels(d.analysis, self.s, (H, W))
+        for p, _, y0, y1 in panels:
             sc.addRect(x_blot + x0, y0, x1 - x0, y1 - y0, pen)
         total_w = x_blot + W
         kpen = QtGui.QPen(QtGui.QColor("#c62828"), 1)
@@ -1784,7 +1900,7 @@ class FigureEditor(QtWidgets.QWidget):
         f.setPointSize(10)
         for k in self.s["kda"]:
             sc.addLine(0, k["y"], total_w, k["y"], kpen)
-            t = sc.addSimpleText(f"{float(k['kda']):g} kDa", f)
+            t = sc.addSimpleText(("?" if k.get("kda") in (None, "") else f"{float(k['kda']):g}") + f" {self.s.get('unit', 'kDa')}", f)
             t.setBrush(QtGui.QColor("#c62828"))
             t.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations)
             t.setPos(total_w + 6, k["y"] - 8)

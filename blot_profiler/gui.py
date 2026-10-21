@@ -247,6 +247,7 @@ class BandItem(QtWidgets.QGraphicsRectItem):
 
 class BlotView(QtWidgets.QGraphicsView):
     filesDropped = QtCore.Signal(list)  # image/analysis files dropped on the view
+    drawn = QtCore.Signal(str, float, float, float, float)  # "line"/"crop", x0, y0, x1, y1 (image px)
     changed = QtCore.Signal()  # boxes moved/added/removed
     selectionChangedBands = QtCore.Signal()
     contextRequested = QtCore.Signal(QtCore.QPoint, object)  # global pos, BandItem | None
@@ -270,6 +271,8 @@ class BlotView(QtWidgets.QGraphicsView):
         self.ids: Dict[int, str] = {}  # id(band) -> band ID
         self.show_labels = True
         self.resize_mode = False
+        self.draw_mode: Optional[str] = None  # "line" (straighten) / "crop": the next drag draws
+        self._draw = None
         self._move_timer = QtCore.QTimer(self)
         self._move_timer.setSingleShot(True)
         self._move_timer.setInterval(150)
@@ -425,6 +428,50 @@ class BlotView(QtWidgets.QGraphicsView):
         else:
             super().wheelEvent(e)
 
+    def set_draw_mode(self, mode: Optional[str]):
+        self.draw_mode = mode
+        self.setDragMode(QtWidgets.QGraphicsView.NoDrag if mode else QtWidgets.QGraphicsView.RubberBandDrag)
+        self.viewport().setCursor(Qt.CrossCursor if mode else Qt.ArrowCursor)
+
+    def mousePressEvent(self, e):
+        if self.draw_mode and e.button() == Qt.LeftButton and self.pix_item is not None:
+            p = self.mapToScene(e.position().toPoint())
+            pen = QtGui.QPen(QtGui.QColor("#ff6d00"), 2, Qt.DashLine)
+            pen.setCosmetic(True)
+            item = (self.scene().addLine(p.x(), p.y(), p.x(), p.y(), pen) if self.draw_mode == "line"
+                    else self.scene().addRect(p.x(), p.y(), 0, 0, pen))
+            item.setZValue(20)
+            self._draw = (p, item)
+            return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._draw is not None:
+            p0, item = self._draw
+            p = self.mapToScene(e.position().toPoint())
+            if self.draw_mode == "line":
+                item.setLine(p0.x(), p0.y(), p.x(), p.y())
+            else:
+                item.setRect(QtCore.QRectF(p0, p).normalized())
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self._draw is not None:
+            p0, item = self._draw
+            self._draw = None
+            p = self.mapToScene(e.position().toPoint())
+            self.scene().removeItem(item)
+            kind = self.draw_mode
+            if (p - p0).manhattanLength() > 5:
+                if kind == "crop":  # clip to the image
+                    r = self.pix_item.sceneBoundingRect()
+                    p0 = QtCore.QPointF(min(max(p0.x(), r.left()), r.right()), min(max(p0.y(), r.top()), r.bottom()))
+                    p = QtCore.QPointF(min(max(p.x(), r.left()), r.right()), min(max(p.y(), r.top()), r.bottom()))
+                self.drawn.emit(kind, p0.x(), p0.y(), p.x(), p.y())
+            return
+        super().mouseReleaseEvent(e)
+
     def mouseDoubleClickEvent(self, e):
         p = self.mapToScene(e.position().toPoint())
         item = self.itemAt(e.position().toPoint())
@@ -445,6 +492,9 @@ class BlotView(QtWidgets.QGraphicsView):
         self.contextRequested.emit(e.globalPos(), item if isinstance(item, BandItem) else None)
 
     def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape and self.draw_mode:
+            self.drawn.emit("cancel", 0, 0, 0, 0)
+            return
         if e.key() == Qt.Key_Escape and self.resize_mode:
             self.resizeModeExited.emit()
             return
@@ -920,6 +970,10 @@ class ImageDoc:
         self.ref_lane: Optional[int] = 0
         self.figure: Optional[dict] = None  # Figure 만들기 settings (saved with the analysis)
         self.marker: Optional[np.ndarray] = None  # ladder/marker image (not saved, path is)
+        self.mode = core.MODE_WESTERN  # or core.MODE_GEL
+        self.transform = core.default_transform()  # rotation / crop applied to the file's pixels
+        self.raw_orig: Optional[np.ndarray] = None  # the file as loaded (before rotation/crop)
+        self.marker_orig: Optional[np.ndarray] = None
 
     @property
     def name(self) -> str:
@@ -969,6 +1023,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.contextRequested.connect(self.show_band_menu)
         self.view.addRequested.connect(self.add_band_at)
         self.view.filesDropped.connect(self.open_paths)
+        self.view.drawn.connect(lambda k, *xy: self.set_draw_mode(None) if k == "cancel" else self.on_drawn(k, *xy))
         self.view.resizeModeExited.connect(lambda: self.resize_mode.setChecked(False))
 
         self.tabs = QtWidgets.QTabWidget()
@@ -1100,6 +1155,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.file_label.setText(f"{os.path.basename(d.image_path)}  ({d.raw.shape[1]}×{d.raw.shape[0]}, max {d.raw.max():.0f})")
             self.update_title()
             self.refresh_marker_view()
+            self.sync_orient_widgets()
             self.update_display(reset_zoom=True)
         else:
             self.view.set_marker(None)
@@ -1210,6 +1266,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ask_marker.setChecked(True)
         f.addRow(self.ask_marker)
         lay.addWidget(g_img)
+        lay.addWidget(self._build_orient())
 
         g_bg = QtWidgets.QGroupBox("배경 노이즈 제거")
         f = QtWidgets.QFormLayout(g_bg)
@@ -1656,9 +1713,12 @@ class MainWindow(QtWidgets.QMainWindow):
         """Attach a marker image (same geometry as the blot) to image ``d``."""
         try:
             m = core.load_image(path)
-            resized = m.shape != d.raw.shape
+            base = d.raw_orig if d.raw_orig is not None else d.raw
+            resized = m.shape != base.shape
             if resized:
-                m = figure.match_marker(m, d.raw.shape)
+                m = figure.match_marker(m, base.shape)
+            d.marker_orig = m
+            m = core.apply_transform(m, d.transform)
         except Exception as e:
             if not quiet:
                 QtWidgets.QMessageBox.warning(self, "마커 이미지", f"쓸 수 없는 마커 이미지입니다:\n{e}")
@@ -1685,6 +1745,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def clear_marker(self):
         d = self.doc
         d.marker = None
+        d.marker_orig = None
         if d.figure:
             d.figure["marker_path"] = None
             d.figure["show_strip"] = False
@@ -1736,6 +1797,9 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "열기 실패", f"이미지를 열 수 없습니다:\n{e}")
             return
         d = doc or self.new_doc()
+        d.raw_orig = raw
+        d.transform = core.default_transform()
+        d.marker_orig = None
         d.raw = raw
         d.image_path = path
         d.analysis = core.Analysis()
@@ -1743,11 +1807,15 @@ class MainWindow(QtWidgets.QMainWindow):
         d.marker = None
         d.figure = None
         self._make_signal(d)
+        d.mode = self.suggest_mode(d, marker_candidates)
         self.refresh_doc_tabs()
         self.switch_doc(self.docs.index(d))
         if detect:
             self.detect()
-        if ask_marker and self.ask_marker.isChecked():
+        if d.mode == core.MODE_GEL:
+            self.statusBar().showMessage(self.statusBar().currentMessage() +
+                                         "  · 자동 선택: DNA gel 모드 (이미지 안에 ladder 레인이 보입니다) — 1번 탭에서 바꿀 수 있습니다")
+        elif ask_marker and self.ask_marker.isChecked():
             self.ask_marker_for(d, marker_candidates)
 
     def _invert_choice(self, doc: Optional[ImageDoc] = None):
@@ -1812,6 +1880,189 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.refresh_items()
 
     # ---------------------------------------------------------------- detection / editing
+    # ---------------------------------------------------------------- experiment type and orientation
+    def _build_orient(self):
+        g = QtWidgets.QGroupBox("실험 종류 · 이미지 방향 · 자르기")
+        f = QtWidgets.QFormLayout(g)
+        self.mode_combo = QtWidgets.QComboBox()
+        self.mode_combo.addItem("Western blot (마커 사진이 따로 있음)", core.MODE_WESTERN)
+        self.mode_combo.addItem("DNA gel 전기영동 (ladder가 이미지 안에 있음)", core.MODE_GEL)
+        self.mode_combo.setToolTip("이미지를 열 때 자동으로 정합니다: 짝이 되는 마커 파일이 있으면 Western, "
+                                   "이미지 안에 ladder 레인이 보이면 DNA gel, 애매하면 Western. 언제든 바꿀 수 있습니다.")
+        self.mode_combo.currentIndexChanged.connect(lambda _: self.set_mode(self.doc, self.mode_combo.currentData()))
+        f.addRow("실험 종류", self.mode_combo)
+        hb = QtWidgets.QHBoxLayout()
+        for text, tip, fn in (("⟲ 90°", "반시계 방향 90° 회전", lambda: self.rotate90(1)),
+                              ("⟳ 90°", "시계 방향 90° 회전", lambda: self.rotate90(-1)),
+                              ("180°", "180° 회전", lambda: self.rotate90(2))):
+            b = QtWidgets.QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(fn)
+            hb.addWidget(b)
+        self.angle_spin = _spin(-45.0, 45.0, 0.0, 0.1, 1, "°")
+        self.angle_spin.setToolTip("미세 회전 (반시계 방향 +). 회전·자르기를 바꾸면 밴드를 다시 검출합니다")
+        self.angle_spin.setKeyboardTracking(False)
+        self.angle_spin.valueChanged.connect(self.set_fine_angle)
+        hb.addWidget(QtWidgets.QLabel("미세"))
+        hb.addWidget(self.angle_spin)
+        f.addRow("회전", hb)
+        hb = QtWidgets.QHBoxLayout()
+        self.line_btn = QtWidgets.QPushButton("선으로 수평 맞추기")
+        self.line_btn.setCheckable(True)
+        self.line_btn.setToolTip("이미지 위에서 well이나 밴드를 따라 선을 그으면 그 선이 수평이 되도록 돌립니다")
+        self.line_btn.toggled.connect(lambda on: self.set_draw_mode("line" if on else None))
+        hb.addWidget(self.line_btn)
+        self.crop_btn = QtWidgets.QPushButton("자르기 영역 그리기")
+        self.crop_btn.setCheckable(True)
+        self.crop_btn.setToolTip("이미지 위에서 남길 영역(겔)을 드래그해 그립니다. 트레이나 배경을 잘라냅니다")
+        self.crop_btn.toggled.connect(lambda on: self.set_draw_mode("crop" if on else None))
+        hb.addWidget(self.crop_btn)
+        b = QtWidgets.QPushButton("자르기 해제")
+        b.clicked.connect(lambda: self.set_transform(self.doc, dict(self.doc.transform, crop=None)))
+        hb.addWidget(b)
+        b = QtWidgets.QPushButton("원본으로")
+        b.clicked.connect(lambda: self.set_transform(self.doc, core.default_transform()))
+        hb.addWidget(b)
+        f.addRow(hb)
+        self.orient_label = QtWidgets.QLabel()
+        self.orient_label.setStyleSheet("color: #666; font-size: 11px;")
+        f.addRow(self.orient_label)
+        return g
+
+    def set_draw_mode(self, mode):
+        for b, m in ((self.line_btn, "line"), (self.crop_btn, "crop")):
+            if m != mode and b.isChecked():
+                b.blockSignals(True)
+                b.setChecked(False)
+                b.blockSignals(False)
+        self.view.set_draw_mode(mode)
+        if mode:
+            self.statusBar().showMessage("이미지 위에서 " + ("well/밴드를 따라 선을 그으세요 (그 선이 수평이 됩니다)" if mode == "line"
+                                                       else "남길 영역을 드래그하세요") + " · Esc: 취소")
+
+    def on_drawn(self, kind, x0, y0, x1, y1):
+        self.set_draw_mode(None)
+        d = self.doc
+        if d.raw is None:
+            return
+        tf = dict(d.transform)
+        if kind == "line":
+            delta = core.line_angle(x0, y0, x1, y1)
+            if abs(delta) < 0.05:
+                return
+            tf["angle"] = round(float(tf.get("angle", 0.0)) + delta, 2)  # ndimage.rotate(+a) turns image-y-down lines by -a
+            tf["crop"] = None  # the old crop was in the old orientation
+        else:
+            ox, oy = (tf["crop"][0], tf["crop"][1]) if tf.get("crop") else (0, 0)
+            xa, xb = sorted((x0, x1))
+            ya, yb = sorted((y0, y1))
+            tf["crop"] = [int(ox + xa), int(oy + ya), int(ox + xb), int(oy + yb)]
+        self.set_transform(d, tf)
+
+    def rotate90(self, k):
+        d = self.doc
+        if d.raw is None:
+            return
+        tf = dict(d.transform)
+        tf["rot90"] = (int(tf.get("rot90", 0)) + k) % 4
+        tf["crop"] = None
+        self.set_transform(d, tf)
+
+    def set_fine_angle(self, v):
+        d = self.doc
+        if self._updating or d.raw is None or abs(float(d.transform.get("angle", 0.0)) - v) < 1e-6:
+            return
+        self.set_transform(d, dict(d.transform, angle=float(v), crop=None))
+
+    def set_transform(self, d: ImageDoc, tf: dict, redetect: bool = True):
+        """Rotate/crop image ``d`` (and its marker); boxes are found again in the new geometry."""
+        if d.raw_orig is None:
+            return
+        d.transform = {"rot90": int(tf.get("rot90", 0)) % 4, "angle": float(tf.get("angle", 0.0) or 0.0),
+                       "crop": tf.get("crop")}
+        d.raw = core.apply_transform(d.raw_orig, d.transform)
+        if d.marker_orig is not None:
+            d.marker = core.apply_transform(d.marker_orig, d.transform)
+        self._make_signal(d)
+        if d.figure:  # positions in pixels belong to the old geometry
+            d.figure["kda"] = []
+            d.figure["gel_crop"] = None
+            if d.marker is not None and d.analysis.bands:
+                d.figure["strip_x0"], d.figure["strip_x1"] = 0, 0
+        if d is self.doc:
+            self.sync_orient_widgets()
+            self.update_display(reset_zoom=True)
+            self.refresh_marker_view()
+        if redetect:
+            cur = self.cur
+            self.cur = self.docs.index(d)
+            self.detect()
+            self.cur = cur
+            if d.figure and d.marker is not None and d.analysis.bands and not d.figure.get("strip_x1"):
+                d.figure["strip_x0"], d.figure["strip_x1"] = figure.guess_ladder_x(d.marker, d.analysis)
+        H, W = d.raw.shape
+        self.statusBar().showMessage(f"이미지 방향/자르기를 적용했습니다 ({W}×{H}). 밴드를 다시 검출했습니다.")
+
+    def sync_orient_widgets(self):
+        d = self.doc
+        self._updating = True
+        try:
+            self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(d.mode)))
+            self.angle_spin.setValue(float(d.transform.get("angle", 0.0)))
+        finally:
+            self._updating = False
+        tf = d.transform
+        parts = []
+        if tf.get("rot90"):
+            parts.append(f"{90 * int(tf['rot90'])}° 회전")
+        if abs(float(tf.get("angle", 0.0))) > 1e-6:
+            parts.append(f"미세 {tf['angle']:+.1f}°")
+        if tf.get("crop"):
+            x0, y0, x1, y1 = tf["crop"]
+            parts.append(f"자름 {x1 - x0}×{y1 - y0}")
+        self.orient_label.setText("현재: " + (", ".join(parts) if parts else "원본 그대로") +
+                                  " · 정량은 회전/자른 이미지의 raw 값으로 합니다 (미세 회전은 선형 보간)")
+
+    def set_mode(self, d: ImageDoc, mode: str, redetect: bool = True):
+        if self._updating or d.raw is None or mode == d.mode:
+            return
+        d.mode = mode
+        if mode == core.MODE_GEL and d.bg.method == "rolling_ball" and d is self.doc:
+            pass  # keep the user's background choice
+        if d is self.doc:
+            self.sync_orient_widgets()
+        if redetect:
+            self.detect()
+        if d.figure is not None:
+            figure.apply_mode_defaults(d.figure, d.analysis, mode)
+            self._figure_changed(d)
+        self.statusBar().showMessage(("DNA gel 모드: 레인별로 밴드를 찾고, ladder 레인을 따로 묶었습니다 (Figure는 겔 전체 한 패널)."
+                                      if mode == core.MODE_GEL else "Western blot 모드: 단백질(행)과 레인으로 밴드를 찾습니다."))
+
+    def suggest_mode(self, d: ImageDoc, marker_candidates=()) -> str:
+        """Western when a separate marker file belongs to the image; DNA gel when the image
+        itself has ladder-like lanes; Western when unsure."""
+        if self.find_marker_for(d.image_path, marker_candidates):
+            return core.MODE_WESTERN
+        try:
+            corr = self.get_corrected(d)
+            return core.MODE_GEL if core.looks_like_gel(corr) else core.MODE_WESTERN
+        except Exception:
+            return core.MODE_WESTERN
+
+    def set_ladder_selected(self, on: bool):
+        a = self.analysis
+        lanes = {b.lane for b in self.view.selected_bands()}
+        if not lanes:
+            return
+        cur = set(core.ladder_lanes(a))
+        core.set_ladder_lanes(a, (cur | lanes) if on else (cur - lanes))
+        if self.doc.figure is not None:
+            self.doc.figure["kda"] = []
+            figure.apply_mode_defaults(self.doc.figure, a, self.doc.mode)
+        self.structure_changed()
+        self.statusBar().showMessage(f"ladder 레인: {', '.join(a.lane_labels[l] for l in core.ladder_lanes(a)) or '없음'}")
+
     def detect(self):
         if self.signal is None:
             self.statusBar().showMessage("먼저 TIF 파일을 여세요")
@@ -1824,6 +2075,19 @@ class MainWindow(QtWidgets.QMainWindow):
             lut_gamma=self.lut_gamma.value(),
         )
         old = self.analysis
+        if self.doc.mode == core.MODE_GEL:
+            a = core.detect_gel(corr, settings)
+            if old.lane_labels and len(old.lane_labels) == a.n_lanes:
+                a.lane_labels = list(old.lane_labels)
+            a.formulas = list(old.formulas)
+            self.set_analysis(a)
+            if self.doc.figure is not None:
+                figure.apply_mode_defaults(self.doc.figure, a, core.MODE_GEL)
+            lad = core.ladder_lanes(a)
+            self.statusBar().showMessage(
+                f"DNA gel: 레인 {a.n_lanes}개, 밴드 {len(a.bands)}개, ladder 레인 {len(lad)}개"
+                f"({', '.join(a.lane_labels[l] for l in lad) or '없음'}). 밴드를 선택해 우클릭 → 'ladder로 지정/빼기'로 고칠 수 있습니다.")
+            return
         names = [r.name for r in old.rows]
         a = core.detect_bands(corr, settings, names if names else None)
         # keep the user's protein/lane group names, roles and formulas when re-detecting
@@ -1922,6 +2186,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if sel:
             menu.addAction(f"새 단백질(행) 그룹 만들기… ({len(sel)}개 밴드)", self.make_protein_group)
             menu.addAction(f"새 레인(열) 그룹 만들기… ({len(sel)}개 밴드)", self.make_lane_group)
+            if self.doc.mode == core.MODE_GEL:
+                menu.addAction("선택한 밴드의 레인을 ladder로 지정", lambda: self.set_ladder_selected(True))
+                menu.addAction("선택한 밴드의 레인을 ladder에서 빼기", lambda: self.set_ladder_selected(False))
             rows = sorted({b.row for b in sel})
             if len(rows) == 1:
                 ro = menu.addMenu(f"'{self.analysis.rows[rows[0]].name}' 역할")
@@ -2678,7 +2945,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if d.raw is None:
                 continue
             if d.figure is None:  # the figure tab would create these; saved and reopened states stay equal
-                d.figure = figure.default_settings()
+                d.figure = figure.apply_mode_defaults(figure.default_settings(), d.analysis, d.mode)
             figure.sync_settings(d.figure, d.analysis, d.raw.shape)
             marker = (d.figure or {}).get("marker_path") if d.marker is not None else None
             images.append({
@@ -2686,6 +2953,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "image": projfile.file_ref(d.image_path, pp, arc.get(d.image_path)),
                 "marker": projfile.file_ref(marker, pp, arc.get(marker)) if marker else None,
                 "invert": d.invert, "background": vars(d.bg), "reference_lane": d.ref_lane,
+                "mode": d.mode, "transform": d.transform,
                 "analysis": d.analysis.to_dict(), "figure": d.figure,
             })
         return {
@@ -2860,7 +3128,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 if not path:
                     continue
                 doc = ImageDoc(invert=int(im.get("invert") or 0), bg=core.BackgroundSettings(**(im.get("background") or {})))
-                doc.raw = core.load_image(path)
+                doc.raw_orig = core.load_image(path)
+                doc.transform = dict(core.default_transform(), **(im.get("transform") or {}))
+                doc.raw = core.apply_transform(doc.raw_orig, doc.transform)
+                doc.mode = im.get("mode", core.MODE_WESTERN)
                 doc.image_path = path
                 doc.ref_lane = im.get("reference_lane", 0)
                 doc.analysis = core.Analysis.from_dict(im.get("analysis") or {})
