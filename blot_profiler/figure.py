@@ -54,6 +54,7 @@ FIGURE_DEFAULTS = {
     "protein_side": "left",  # protein labels left or right of the panels
     "kda_side": "left",
     "strip_gap_in": 0.0,  # space between the marker strip and the blot
+    "strip_dy": 0,  # vertical offset of the marker crop (marker pixels), if the marker photo is shifted
     # "fonts" (size per text category), "tiers" (header rows) and "overrides"
     # (per-text size/angle/offset) are filled in by _migrate()
 }
@@ -372,6 +373,10 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             kw.setdefault("rotation_mode", "anchor")
         x += float(o.get("dx", 0.0))
         y += float(o.get("dy", 0.0))
+        if o.get("bold") is not None:
+            kw["weight"] = "bold" if o["bold"] else "normal"
+        if o.get("italic") is not None:
+            kw["style"] = "italic" if o["italic"] else "normal"
         art = fig.text(x, total_h - y, t, transform=tr, family=family, **kw)
         arts.append((key, cat, art))
         return art
@@ -441,10 +446,11 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             ni, n = it
             y += 0.02 if prev == "panel" else 0.0
             cy = y + num_h / 2
-            text(f"numlabel:{ni}", "number", label_x, cy, n["label"], ha="right", va="center")
+            idx = n.get("idx", ni)  # index in the settings' number rows
+            text(f"numlabel:{idx}", "number", label_x, cy, n["label"], ha="right", va="center")
             for li, (x, t) in enumerate(zip(xs, n["texts"])):
                 if np.isfinite(x):
-                    text(f"num:{ni}:{li}", "number", x, cy, t, ha="center", va="center")
+                    text(f"num:{idx}:{li}", "number", x, cy, t, ha="center", va="center")
             y += num_h
             prev = kind
             continue
@@ -458,7 +464,8 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
         _frame(ax, s["frame_lw"])
         sx0 = left - strip_gap - strip_w
         if show_strip:
-            mcrop = marker[y0:y1, s["strip_x0"]:s["strip_x1"]]
+            mcrop = marker_crop(marker, y0 + int(s.get("strip_dy", 0)), y1 + int(s.get("strip_dy", 0)),
+                                s["strip_x0"], s["strip_x1"])
             sx = fig.add_axes([sx0 / total_w, (total_h - y - h) / total_h, strip_w / total_w, h / total_h])
             md = _stretch(mcrop, 1, 99.5, 1.0, marker[:, s["strip_x0"]:s["strip_x1"]])
             sx.imshow(1.0 - md if s.get("marker_invert", True) else md, cmap="gray", vmin=0, vmax=1, aspect="auto",
@@ -494,6 +501,17 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
                                 "y0": total_h - bb.y1 / dpi, "y1": total_h - bb.y0 / dpi})
     layout.update(size=(total_w, total_h), scale=scale, left=left, panel_w=panel_w, x0px=x0px, x1px=x1px)
     return layout
+
+
+def marker_crop(marker: np.ndarray, y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
+    """``marker[y0:y1, x0:x1]``; rows outside the image (after an offset) are filled with the median."""
+    H, W = marker.shape
+    x0, x1 = max(0, int(x0)), min(W, int(x1))
+    out = np.full((max(0, y1 - y0), max(0, x1 - x0)), float(np.median(marker)))
+    a, b = max(0, y0), min(H, y1)
+    if b > a and x1 > x0:
+        out[a - y0:b - y0] = marker[a:b, x0:x1]
+    return out
 
 
 def _fmt_kda(v) -> str:

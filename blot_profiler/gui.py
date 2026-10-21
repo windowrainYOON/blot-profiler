@@ -286,8 +286,11 @@ class BlotView(QtWidgets.QGraphicsView):
         if reset_zoom:
             self.fit()
 
-    def set_marker(self, qimg: Optional[QtGui.QImage]):
-        """Show the marker (ladder) image left of the blot, same height, for reference."""
+    def set_marker(self, qimg: Optional[QtGui.QImage], region=None, on_region=None):
+        """Show the marker (ladder) image left of the blot, same height, for reference.
+
+        ``region`` = (x0, x1, dy) of the figure's marker strip, editable with the mouse.
+        """
         sc = self.scene()
         for it in (self.marker_item, self.marker_caption):
             if it is not None:
@@ -303,6 +306,11 @@ class BlotView(QtWidgets.QGraphicsView):
             self.marker_caption.setBrush(QtGui.QColor("#1565c0"))
             self.marker_caption.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations)
             self.marker_caption.setPos(-(pm.width() + gap), -22)
+            if region is not None and on_region is not None:
+                from .figure_window import StripRegionItem
+
+                x0, x1, dy = region
+                StripRegionItem(x0, x1, dy, pm.height(), pm.width(), on_region, parent=self.marker_item)
         self._update_rect()
 
     def content_rect(self) -> QtCore.QRectF:
@@ -777,6 +785,124 @@ def _spin(lo, hi, val, step=1, decimals=None, suffix=""):
     return w
 
 
+class MarkerStepDialog(QtWidgets.QDialog):
+    """Step 2 after opening a blot: explain and add the matching marker (ladder) image."""
+
+    THUMB_H = 260
+
+    def __init__(self, parent, doc, candidate: Optional[str] = None):
+        super().__init__(parent)
+        self.setWindowTitle("2단계: 마커 이미지 추가")
+        self.setAcceptDrops(True)
+        self.doc = doc
+        self.path: Optional[str] = None
+        lay = QtWidgets.QVBoxLayout(self)
+        title = QtWidgets.QLabel("2단계: 마커(ladder) 이미지 추가")
+        f = title.font()
+        f.setPointSizeF(f.pointSizeF() * 1.4)
+        f.setBold(True)
+        title.setFont(f)
+        lay.addWidget(title)
+        steps = QtWidgets.QLabel("1단계 블롯 열기 ✓  →  <b>2단계 마커 이미지</b>  →  3단계 밴드 확인 · 그룹 이름  →  정량 / Figure")
+        steps.setStyleSheet("color: #555;")
+        lay.addWidget(steps)
+        info = QtWidgets.QLabel(
+            "방금 연 블롯과 <b>같은 막(membrane)을 같은 자리에서 찍은 마커 사진</b>(white-light / marker 채널)을 넣어 주세요.<br>"
+            "보통 이미저가 블롯과 함께 저장하는 '…Marker…' 파일이며, <b>블롯과 크기(픽셀 수)가 같아야</b> 합니다.<br>"
+            "마커는 밴드 박스를 잡을 때 옆에 참고용으로 보이고, Figure에서 ladder 띠와 kDa 눈금에 쓰입니다. 정량에는 쓰이지 않습니다.")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        row = QtWidgets.QHBoxLayout()
+        self.blot_thumb = QtWidgets.QLabel()
+        self.marker_thumb = QtWidgets.QLabel("마커 TIF를 여기로 끌어다 놓거나\n아래 '마커 이미지 추가하기'를 누르세요")
+        for lab in (self.blot_thumb, self.marker_thumb):
+            lab.setAlignment(Qt.AlignCenter)
+            lab.setMinimumSize(300, self.THUMB_H)
+        self.marker_thumb.setStyleSheet("border: 2px dashed #90a4ae; color: #607d8b; background: #fafafa;")
+        for caption, lab in ((f"블롯 (1단계): {doc.name}", self.blot_thumb), ("마커 (2단계)", self.marker_thumb)):
+            col = QtWidgets.QVBoxLayout()
+            c = QtWidgets.QLabel(caption)
+            c.setStyleSheet("font-weight: bold;")
+            col.addWidget(c)
+            col.addWidget(lab, 1)
+            row.addLayout(col, 1)
+        lay.addLayout(row, 1)
+        self.state = QtWidgets.QLabel()
+        self.state.setWordWrap(True)
+        lay.addWidget(self.state)
+        self.add_btn = QtWidgets.QPushButton("마커 이미지 추가하기…")
+        self.add_btn.setStyleSheet("font-size: 15px; font-weight: bold; padding: 10px;")
+        self.add_btn.clicked.connect(self.choose)
+        lay.addWidget(self.add_btn)
+        bb = QtWidgets.QHBoxLayout()
+        skip = QtWidgets.QPushButton("건너뛰기 (마커 없이 계속)")
+        skip.clicked.connect(self.reject)
+        bb.addWidget(skip)
+        bb.addStretch(1)
+        self.ok = QtWidgets.QPushButton("이 마커 사용")
+        self.ok.setDefault(True)
+        self.ok.setEnabled(False)
+        self.ok.clicked.connect(self.accept)
+        bb.addWidget(self.ok)
+        lay.addLayout(bb)
+        self.blot_thumb.setPixmap(self._thumb(1.0 - figure._stretch(doc.signal, 0.5, 99.8, 0.6)))
+        if candidate:
+            self.set_path(candidate, found=True)
+        else:
+            self.state.setText("같은 폴더에서 짝이 되는 마커 파일을 찾지 못했습니다. 마커 사진이 없으면 '건너뛰기'를 누르세요. "
+                               "(나중에 1번 탭의 '마커 열기…'로 넣을 수 있습니다)")
+        self.resize(760, 520)
+
+    def _thumb(self, a01) -> QtGui.QPixmap:
+        qimg = to_qimage(a01, 0.0, 1.0)
+        return QtGui.QPixmap.fromImage(qimg).scaledToHeight(self.THUMB_H, Qt.SmoothTransformation)
+
+    def choose(self):
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "마커(ladder) 이미지 선택", os.path.dirname(self.doc.image_path or ""),
+                                                     "Images (*.tif *.tiff *.png *.jpg *.jpeg);;All files (*)")
+        if p:
+            self.set_path(p)
+
+    def set_path(self, p: str, found: bool = False):
+        try:
+            m = core.load_image(p)
+        except Exception as e:
+            self.state.setText(f"<span style='color:#c62828'>열 수 없는 이미지입니다: {e}</span>")
+            return
+        H, W = self.doc.raw.shape
+        mh, mw = m.shape
+        x = figure._stretch(m, 1, 99.5, 1.0)
+        if not core.needs_inversion(m):
+            x = 1.0 - x
+        self.marker_thumb.setPixmap(self._thumb(x))
+        self.marker_thumb.setStyleSheet("border: 2px solid #1e88ff; background: white;")
+        name = os.path.basename(p)
+        if (mh, mw) == (H, W):
+            msg = f"<span style='color:#2e7d32'>✓ {'자동으로 찾은 마커' if found else '선택한 마커'}: <b>{name}</b> — 크기가 블롯과 같습니다 ({mw}×{mh}).</span>"
+        elif abs(mw / mh - W / H) <= 0.01 * (W / H):
+            msg = (f"<span style='color:#ef6c00'>⚠ {name}: 크기({mw}×{mh})가 블롯({W}×{H})과 달라 같은 비율로 맞춥니다. "
+                   "같은 위치에서 찍은 사진인지 확인하세요.</span>")
+        else:
+            self.state.setText(f"<span style='color:#c62828'>✗ {name}: 가로세로 비율이 블롯과 달라 쓸 수 없습니다 "
+                               f"({mw}×{mh} vs {W}×{H}). 같은 막을 찍은 마커 사진을 고르세요.</span>")
+            self.path = None
+            self.ok.setEnabled(False)
+            return
+        self.state.setText(msg + ("<br>맞으면 '이 마커 사용', 다른 파일이면 '마커 이미지 추가하기…'로 바꾸세요." if found else ""))
+        self.path = p
+        self.ok.setEnabled(True)
+        self.add_btn.setText("다른 마커 이미지 고르기…")
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        urls = [u.toLocalFile() for u in e.mimeData().urls() if u.toLocalFile()]
+        if urls:
+            self.set_path(urls[0])
+
+
 class ImageDoc:
     """One opened blot image with its own boxes, settings and measurements."""
 
@@ -1067,6 +1193,10 @@ class MainWindow(QtWidgets.QMainWindow):
         b.clicked.connect(self.clear_marker)
         hb.addWidget(b)
         f.addRow("마커", hb)
+        hint = QtWidgets.QLabel("왼쪽 화면의 마커 위 파란 상자 = 그림에 쓰는 마커 띠. 끌어서 옮기고 가장자리로 폭을 바꿉니다.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #1565c0; font-size: 11px;")
+        f.addRow(hint)
         self.ask_marker = QtWidgets.QCheckBox("블롯 TIF를 열면 짝이 되는 마커 이미지도 받기")
         self.ask_marker.setToolTip("같은 폴더에 '…Marker…' 파일이 있으면 자동으로 붙이고, 없으면 마커 파일을 고르는 창을 띄웁니다 (취소 = 건너뛰기)")
         self.ask_marker.setChecked(True)
@@ -1316,12 +1446,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.setCurrentIndex(self.FIG_TAB)
 
     def on_tab_changed(self, i):
-        """The figure tab gets most of the window width; the blot view shrinks."""
+        """The figure tab gets the whole window width; the blot view returns on the other tabs."""
         if i == self.FIG_TAB:
             if self._split_sizes is None:
                 self._split_sizes = self.split.sizes()
             total = sum(self.split.sizes())
-            self.split.setSizes([int(total * 0.28), total - int(total * 0.28)])
+            self.split.setCollapsible(0, True)
+            self.split.setSizes([0, total])  # the figure tab has its own preview; the blot view comes back on other tabs
         elif self._split_sizes is not None:
             self.split.setSizes(self._split_sizes)
             self._split_sizes = None
@@ -1492,16 +1623,17 @@ class MainWindow(QtWidgets.QMainWindow):
         return None
 
     def ask_marker_for(self, d: ImageDoc, candidates=()):
+        """Step 2 after opening a blot: the marker image. A marker opened/dropped together with
+        the blot is attached directly; otherwise the step window explains and asks for it."""
         path = self.find_marker_for(d.image_path, candidates)
-        if path:
+        if path and path in candidates:
             if self.set_marker(d, path):
-                self.statusBar().showMessage(f"마커 이미지를 자동으로 붙였습니다: {os.path.basename(path)}")
+                self.statusBar().showMessage(f"함께 연 마커 이미지를 붙였습니다: {os.path.basename(path)}")
             return
-        p, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, f"'{os.path.basename(d.image_path)}'의 마커(ladder) 이미지를 고르세요 — 없으면 취소",
-            os.path.dirname(d.image_path), "Images (*.tif *.tiff *.png *.jpg *.jpeg);;All files (*)")
-        if p:
-            self.set_marker(d, p)
+        dlg = MarkerStepDialog(self, d, path)
+        if dlg.exec() == QtWidgets.QDialog.Accepted and dlg.path:
+            if self.set_marker(d, dlg.path):
+                self.statusBar().showMessage(f"마커 이미지를 붙였습니다: {os.path.basename(dlg.path)} — 왼쪽 마커 위 파란 상자로 띠 영역을 고칠 수 있습니다")
 
     def open_marker(self):
         if self.doc.raw is None:
@@ -1563,9 +1695,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self.view.set_marker(None)
             return
         x = figure._stretch(m, 1, 99.5, 1.0)
-        if (d.figure or {}).get("marker_invert", True):
+        f = d.figure or {}
+        if f.get("marker_invert", True):
             x = 1.0 - x  # dark ladder on white, like the blot preview
-        self.view.set_marker(to_qimage(x, 0.0, 1.0))
+        region = None
+        if f.get("strip_x1"):
+            region = (int(f["strip_x0"]), int(f["strip_x1"]), int(f.get("strip_dy", 0)))
+        self.view.set_marker(to_qimage(x, 0.0, 1.0), region, lambda x0, x1, dy: self.set_strip_region(d, x0, x1, dy))
+
+    def set_strip_region(self, d: ImageDoc, x0, x1, dy):
+        """Marker strip region dragged on the main view's marker preview."""
+        if d.figure is None:
+            d.figure = figure.default_settings()
+        d.figure.update(strip_x0=int(x0), strip_x1=int(x1), strip_dy=int(dy), show_strip=True)
+        if self.figure_editor.doc is d:
+            self.figure_editor.set_strip_region(x0, x1, dy)
+        else:
+            self.refresh_marker_view()
+            self._figure_changed(d)
+        self.statusBar().showMessage(f"마커 띠 영역: x {x0}~{x1} px, 세로 보정 {dy} px (Figure에 쓰이는 범위)")
 
     def load_image(self, path: str, detect=True, doc: Optional[ImageDoc] = None, ask_marker: bool = True,
                    marker_candidates=()):
