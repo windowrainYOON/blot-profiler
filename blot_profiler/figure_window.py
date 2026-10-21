@@ -1006,8 +1006,7 @@ class FigureEditor(QtWidgets.QWidget):
         self.render()
 
     def on_files_dropped(self, paths):
-        for p in paths:
-            self.main.open_path(p)
+        self.main.open_paths(paths)
         self.main.open_figure_window()
 
     # ladder / kDa
@@ -1026,25 +1025,9 @@ class FigureEditor(QtWidgets.QWidget):
             self._load_marker(p)
 
     def _load_marker(self, p, quiet=False):
-        try:
-            m = core.load_image(p)
-            shape = self.doc.raw.shape
-            if m.shape != shape:
-                m = figure.match_marker(m, shape)
-                if not quiet:
-                    QtWidgets.QMessageBox.information(
-                        self, "마커 이미지 크기", "마커 이미지의 크기가 블롯과 달라 같은 비율로 맞춰 늘렸습니다. "
-                        "두 이미지가 같은 위치에서 찍힌 것인지 확인하세요.")
-        except Exception as e:
-            if not quiet:
-                QtWidgets.QMessageBox.warning(self, "마커 이미지", f"쓸 수 없는 마커 이미지입니다:\n{e}")
+        if self.doc is None or not self.main.set_marker(self.doc, p, quiet=quiet):
             return
-        self.doc.marker = m
-        self.s["marker_path"] = p
         if not quiet:
-            self.s["marker_invert"] = not core.needs_inversion(m)
-            self.s["strip_x0"], self.s["strip_x1"] = figure.guess_ladder_x(m, self.doc.analysis)
-            self.s["show_strip"] = True
             self.right.setCurrentIndex(1)
             self.load_from_settings()
         self._update_marker_label()
