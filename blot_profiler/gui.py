@@ -1810,6 +1810,8 @@ class MainWindow(QtWidgets.QMainWindow):
         d.mode = self.suggest_mode(d, marker_candidates)
         self.refresh_doc_tabs()
         self.switch_doc(self.docs.index(d))
+        if d.mode == core.MODE_GEL and self.auto_gel_crop.isChecked():
+            self.auto_crop_gel(redetect=False)
         if detect:
             self.detect()
         if d.mode == core.MODE_GEL:
@@ -1924,6 +1926,15 @@ class MainWindow(QtWidgets.QMainWindow):
         b.clicked.connect(lambda: self.set_transform(self.doc, core.default_transform()))
         hb.addWidget(b)
         f.addRow(hb)
+        hb = QtWidgets.QHBoxLayout()
+        self.auto_gel_crop = QtWidgets.QCheckBox("겔 사진을 열면 겔 영역만 자동으로 자르기")
+        self.auto_gel_crop.setChecked(True)
+        self.auto_gel_crop.setToolTip("DNA gel 모드로 열린 사진에서 트레이·배경을 빼고 겔 부분만 남깁니다. '자르기 해제'로 되돌립니다")
+        hb.addWidget(self.auto_gel_crop)
+        b = QtWidgets.QPushButton("겔 영역 자동 찾기")
+        b.clicked.connect(self.auto_crop_gel)
+        hb.addWidget(b)
+        f.addRow(hb)
         self.orient_label = QtWidgets.QLabel()
         self.orient_label.setStyleSheet("color: #666; font-size: 11px;")
         f.addRow(self.orient_label)
@@ -1958,6 +1969,18 @@ class MainWindow(QtWidgets.QMainWindow):
             ya, yb = sorted((y0, y1))
             tf["crop"] = [int(ox + xa), int(oy + ya), int(ox + xb), int(oy + yb)]
         self.set_transform(d, tf)
+
+    def auto_crop_gel(self, redetect: bool = True) -> bool:
+        d = self.doc
+        if d.raw_orig is None:
+            return False
+        base = core.apply_transform(d.raw_orig, dict(d.transform, crop=None))
+        crop = core.suggest_gel_crop(base)
+        if not crop:
+            self.statusBar().showMessage("겔 영역을 자동으로 찾지 못했습니다. '자르기 영역 그리기'로 직접 정하세요")
+            return False
+        self.set_transform(d, dict(d.transform, crop=crop), redetect=redetect)
+        return True
 
     def rotate90(self, k):
         d = self.doc
@@ -2974,6 +2997,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "by_condition": self.by_condition.isChecked(), "show_points": self.show_points.isChecked(),
                 "multi_points": self.multi_points.isChecked(), "auto_lanes": self.auto_lanes.isChecked(),
                 "show_marker": self.show_marker.isChecked(), "ask_marker": self.ask_marker.isChecked(),
+                "auto_gel_crop": self.auto_gel_crop.isChecked(),
             },
         }
 
@@ -3166,7 +3190,8 @@ class MainWindow(QtWidgets.QMainWindow):
             ui = d.get("ui", {})
             for w, key in ((self.auto_norm, "auto_norm"), (self.by_condition, "by_condition"), (self.show_points, "show_points"),
                            (self.multi_points, "multi_points"), (self.auto_lanes, "auto_lanes"),
-                           (self.show_marker, "show_marker"), (self.ask_marker, "ask_marker")):
+                           (self.show_marker, "show_marker"), (self.ask_marker, "ask_marker"),
+                           (self.auto_gel_crop, "auto_gel_crop")):
                 if key in ui:
                     w.blockSignals(True)
                     w.setChecked(bool(ui[key]))

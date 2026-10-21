@@ -61,7 +61,22 @@ def load_image(path: str) -> np.ndarray:
 
 
 def needs_inversion(img: np.ndarray) -> bool:
-    """True when bands are dark on a light background (the usual film/ECL look)."""
+    """True when bands are dark on a light background (the usual film/ECL look).
+
+    Bands are sparse local outliers: compare how far dark spots and bright spots
+    stand out from their surroundings. Gel photos with uneven illumination fool a
+    simple "is the median bright?" rule, which is only the fallback.
+    """
+    small = img[:: max(1, img.shape[0] // 256), :: max(1, img.shape[1] // 256)].astype(float)
+    if min(small.shape) >= 16:
+        r = small - ndi.median_filter(small, size=9)
+        h, w = r.shape
+        r = r[h // 20: h - h // 20, w // 20: w - w // 20]  # image borders (crop edges, frames) mislead
+        neg, pos = -float(np.percentile(r, 0.2)), float(np.percentile(r, 99.8))
+        if neg > 1.3 * pos:
+            return True
+        if pos > 1.3 * neg:
+            return False
     return float(np.median(img)) > float(img.min() + img.max()) / 2.0
 
 
@@ -279,10 +294,11 @@ class DetectSettings:
     # rows present in fewer than this fraction of lanes are dropped as smears/specks
     # (0 keeps every row, e.g. the many ladder bands of a DNA gel)
     min_row_fraction: float = 0.3
-    # DNA gel: objects wider than this many typical band widths are gel/tray edges, not bands
-    max_width_factor: Optional[float] = None
+    # DNA gel: objects wider than this fraction of the image are gel/tray edges, not bands
+    max_width_fraction: Optional[float] = None
     drop_wells: bool = False  # DNA gel: drop the row of wells at the top
     min_peak_fraction: float = 0.0  # DNA gel: drop objects weaker than this fraction of the strong bands
+    split_rows: bool = False  # DNA gel: split objects at horizontal valleys (closely spaced ladder bands)
 
 
 def detection_image(signal: np.ndarray, settings: "DetectSettings") -> np.ndarray:
@@ -338,10 +354,8 @@ def detect_bands(signal: np.ndarray, settings: DetectSettings, row_names: Option
     H, W = signal.shape
     regs = []
     props = [rp for rp in regionprops(lab, intensity_image=img) if rp.area >= max(1, settings.min_area)]
-    max_w = None
-    if settings.max_width_factor and props:
-        # gels: lanes are separate, so an object much wider than a typical band is an edge
-        max_w = settings.max_width_factor * float(np.median([rp.bbox[3] - rp.bbox[1] for rp in props]))
+    # gels: lanes are separate, so an object spanning a large part of the width is an edge
+    max_w = settings.max_width_fraction * W if settings.max_width_fraction else None
     for rp in props:
         y0, x0, y1, x1 = rp.bbox
         w, h = x1 - x0, y1 - y0
@@ -354,6 +368,22 @@ def detect_bands(signal: np.ndarray, settings: DetectSettings, row_names: Option
         # Bands of neighbouring lanes often touch and form one long object: split it
         # at the valleys of its column intensity profile.
         sub = np.where(lab[y0:y1, x0:x1] == rp.label, img[y0:y1, x0:x1], 0.0)
+        if settings.split_rows:
+            for sy0, sy1 in _split_rows(sub):
+                if sy1 - sy0 < 2:
+                    continue
+                piece = sub[sy0:sy1]
+                npx = int((piece > 0).sum())
+                if npx < max(1, settings.min_area) // 2:
+                    continue
+                cols = np.nonzero(piece.sum(axis=0) > 0)[0]
+                wy = piece.sum(axis=1)
+                cy = y0 + sy0 + float((np.arange(sy1 - sy0) * wy).sum() / max(wy.sum(), 1e-12))
+                ax0, ax1 = x0 + int(cols.min()), x0 + int(cols.max()) + 1
+                if settings.exclude_edge and (ax0 < settings.exclude_edge or ax1 > W - settings.exclude_edge):
+                    continue
+                regs.append(dict(x0=ax0, x1=ax1, y0=y0 + sy0, y1=y0 + sy1, cx=(ax0 + ax1) / 2, cy=cy, area=npx))
+            continue
         for sx0, sx1 in _split_columns(sub, h):
             ssub = sub[:, sx0:sx1]
             npx = int((ssub > 0).sum())
@@ -366,7 +396,7 @@ def detect_bands(signal: np.ndarray, settings: DetectSettings, row_names: Option
             if settings.exclude_edge and (ax0 < settings.exclude_edge or ax1 > W - settings.exclude_edge):
                 continue
             regs.append(dict(x0=ax0, x1=ax1, y0=y0 + int(ys.min()), y1=y0 + int(ys.max()) + 1, cx=(ax0 + ax1) / 2, cy=cy, area=npx))
-    regs = regs if settings.max_width_factor else _split_by_pitch(regs)
+    regs = regs if settings.max_width_fraction else _split_by_pitch(regs)
     return _build_analysis(regs, settings, row_names, signal)
 
 
@@ -417,6 +447,24 @@ def _split_columns(sub: np.ndarray, h: int):
     for p0, p1 in zip(peaks[:-1], peaks[1:]):
         cuts.append(int(p0 + np.argmin(prof[p0:p1])))
     cuts.append(w)
+    return [(a, b) for a, b in zip(cuts[:-1], cuts[1:]) if b > a]
+
+
+def _split_rows(sub: np.ndarray):
+    """Split a region vertically at intensity valleys (bands of a ladder lying close together)."""
+    from scipy.signal import find_peaks
+
+    h = sub.shape[0]
+    prof = ndi.gaussian_filter1d(sub.sum(axis=1), 1.0)
+    if h < 8 or prof.max() <= 0:
+        return [(0, h)]
+    peaks, _ = find_peaks(prof, distance=4, prominence=0.15 * prof.max())
+    if len(peaks) < 2:
+        return [(0, h)]
+    cuts = [0]
+    for p0, p1 in zip(peaks[:-1], peaks[1:]):
+        cuts.append(int(p0 + np.argmin(prof[p0:p1])))
+    cuts.append(h)
     return [(a, b) for a, b in zip(cuts[:-1], cuts[1:]) if b > a]
 
 
@@ -1115,9 +1163,10 @@ def gel_settings(base: Optional[DetectSettings] = None) -> DetectSettings:
     s = dataclasses.replace(base) if base is not None else DetectSettings()
     s.min_row_fraction = 0.0
     s.fill_missing_lanes = False
-    s.max_width_factor = 2.5
+    s.max_width_fraction = 0.25
     s.drop_wells = True
-    s.min_peak_fraction = 0.2
+    s.min_peak_fraction = 0.08
+    s.split_rows = True
     return s
 
 
@@ -1227,15 +1276,113 @@ def gel_detection_image(signal: np.ndarray) -> np.ndarray:
     return signal - ndi.grey_opening(signal, size=(L, 1))
 
 
+def blank_wells(work: np.ndarray, sensitivity: float = 1.0) -> list:
+    """Blank the strips of wells (and the gel's top edge) on the detection image, in place.
+
+    Wells show up in every lane, also the empty ones, as rings or slots: thin
+    horizontal strips in the top 30% of the image where the bright structure
+    covers much of the width. Returns the blanked row ranges.
+    """
+    H, W = work.shape
+    t = _threshold(ndi.gaussian_filter(work, 1.0), sensitivity)
+    cov = ndi.uniform_filter1d((work > t).mean(axis=1), 5)
+    top = int(0.3 * H)
+    base = float(np.median(cov))
+    hi, lo = max(0.2, 3 * base), max(0.06, 1.5 * base)
+    out = []
+    # straight lines across (almost) the whole width anywhere (gel/tray edges): never a row of bands,
+    # which always leaves gaps between the lanes
+    line = cov > 0.85
+    if line.any():
+        lab_, n = ndi.label(line)
+        for k in range(1, n + 1):
+            ys = np.nonzero(lab_ == k)[0]
+            a_, b_ = max(0, ys.min() - 4), min(H, ys.max() + 5)
+            work[a_:b_, :] = 0.0
+            out.append((a_, b_))
+        cov = ndi.uniform_filter1d((work > t).mean(axis=1), 5)
+    y = 0
+    while y < top:
+        if cov[y] <= lo:
+            y += 1
+            continue
+        y0 = y
+        while y < H and cov[y] > lo:
+            y += 1
+        y1 = y
+        if cov[y0:y1].max() > hi and (y1 - y0) <= 0.15 * H:
+            a_, b_ = max(0, y0 - 3), min(H, y1 + 3)
+            work[a_:b_, :] = 0.0
+            out.append((a_, b_))
+    return out
+
+
+def _lane_peak_regions(work: np.ndarray, lanes, sensitivity: float = 1.0) -> list:
+    """Bands of each lane from its vertical profile: peaks relative to the lane's own strongest band
+    (ladders have bands much weaker than the sample bands next to them)."""
+    from scipy.signal import find_peaks, peak_widths
+
+    Ts = ndi.gaussian_filter(work, 1.0)
+    vals = Ts[Ts > 0]
+    noise = float(np.median(np.abs(vals - np.median(vals)))) * 1.4826 if vals.size else 0.0
+    profs = []
+    for x0, x1 in lanes:
+        q = max(0, (x1 - x0) // 5)
+        profs.append(Ts[:, x0 + q:max(x0 + q + 1, x1 - q)].mean(axis=1))
+    high = float(np.percentile([p.max() for p in profs], 90)) if profs else 0.0
+    # columns between the lanes: a horizontal line (gel or tray edge) shows there too, a band does not
+    H, W = Ts.shape
+    in_lane = np.zeros(W, bool)
+    for x0, x1 in lanes:
+        in_lane[x0:x1] = True
+    span = np.zeros(W, bool)
+    if lanes:
+        span[min(x0 for x0, _ in lanes):max(x1 for _, x1 in lanes)] = True
+    gap_cols = np.nonzero(span & ~in_lane)[0]
+    gap_prof = Ts[:, gap_cols].mean(axis=1) if gap_cols.size else np.zeros(H)
+    regs = []
+    for (x0, x1), prof in zip(lanes, profs):
+        lane_max = float(prof.max())
+        if lane_max <= 0:
+            continue
+        prom = max(0.12 * lane_max, 3.0 * noise) / max(sensitivity, 1e-3)
+        floor = max(4.0 * noise, 0.04 * high) / max(sensitivity, 1e-3)
+        peaks, _ = find_peaks(prof, distance=4, prominence=prom, height=floor)
+        if not len(peaks):
+            continue
+        _, _, left, right = peak_widths(prof, peaks, rel_height=0.5)
+        for pk, a_, b_ in zip(peaks, left, right):
+            if gap_prof[pk] > 0.5 * prof[pk]:
+                continue  # a line across the gel, not a band
+            row = Ts[pk, x0:x1]
+            if row.size and (row > 0.5 * row.max()).mean() < 0.4:
+                continue  # a speck: a band fills most of the lane width
+            half = max(2.0, (b_ - a_) / 2.0)
+            y0, y1 = int(np.floor(pk - half)), int(np.ceil(pk + half)) + 1
+            regs.append(dict(x0=x0, x1=x1, y0=y0, y1=y1, cx=(x0 + x1) / 2, cy=float(pk), area=(x1 - x0) * (y1 - y0)))
+    return regs
+
+
 def detect_gel(signal: np.ndarray, settings: Optional[DetectSettings] = None) -> Analysis:
     """Lane-centric detection for DNA gels: every band row is kept, ladder lanes are found
     and grouped as 'Ladder' (role: ignore), sample band rows are named B1, B2 … top to bottom."""
     st = gel_settings(settings)
     work = gel_detection_image(signal)
-    a = detect_bands(work, st)
-    _drop_faint(a, work, st.min_peak_fraction)
     if st.drop_wells:
-        _drop_well_row(a)
+        blank_wells(work, st.sensitivity)
+    first = detect_bands(work, st)  # finds the lanes
+    _drop_faint(first, work, st.min_peak_fraction)
+    if st.drop_wells:
+        _drop_well_row(first)
+    lanes = []
+    for lane in range(first.n_lanes):
+        boxes = [b.box(first.rows) for b in first.bands if b.lane == lane]
+        if boxes:
+            x0 = int(np.median([x for x, _, _, _ in boxes]))
+            x1 = int(np.median([x + w for x, _, w, _ in boxes]))
+            lanes.append((max(0, x0), min(signal.shape[1], max(x1, x0 + 3))))
+    regs = _lane_peak_regions(work, lanes, st.sensitivity)
+    a = _build_analysis(regs, st, None, signal) if regs else first
     for i, r in enumerate(a.rows):
         r.name = f"B{i + 1}"
     lad = guess_ladder_lanes(a)
@@ -1258,6 +1405,8 @@ def looks_like_gel(signal: np.ndarray, settings: Optional[DetectSettings] = None
     try:
         st = gel_settings(settings)
         work = gel_detection_image(signal)
+        if st.drop_wells:
+            blank_wells(work, st.sensitivity)
         a = detect_bands(work, st)
         _drop_faint(a, work, st.min_peak_fraction)
         if st.drop_wells:
@@ -1265,3 +1414,25 @@ def looks_like_gel(signal: np.ndarray, settings: Optional[DetectSettings] = None
     except Exception:
         return False
     return bool(guess_ladder_lanes(a))
+
+
+def suggest_gel_crop(raw: np.ndarray, inset: float = 0.015) -> Optional[List[int]]:
+    """The gel's rectangle in a photo (gel in a tray on a light background): the largest
+    area clearly darker than the background, slightly inset. None if nothing plausible."""
+    from skimage.measure import label, regionprops
+
+    img = raw if needs_inversion(raw) else _dtype_max(raw) - raw  # light background, darker gel
+    sm = ndi.gaussian_filter(img, 3)
+    bg, lo = np.percentile(sm, 95), np.percentile(sm, 5)
+    if bg - lo <= 0:
+        return None
+    mask = ndi.binary_fill_holes(ndi.binary_opening(sm < bg - 0.25 * (bg - lo), iterations=5))
+    rps = sorted(regionprops(label(mask)), key=lambda r: r.area, reverse=True)
+    if not rps:
+        return None
+    frac = rps[0].area / raw.size
+    if not 0.08 <= frac <= 0.85:
+        return None
+    y0, x0, y1, x1 = rps[0].bbox
+    dx, dy = int(inset * (x1 - x0)), int(inset * (y1 - y0))
+    return [x0 + dx, y0 + dy, x1 - dx, y1 - dy]
