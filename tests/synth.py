@@ -38,3 +38,42 @@ def marker_photo(H=1024, W=1408, seed=1):
         img -= 25000 * np.exp(-(((xx - 95) / 30.0) ** 6)) * np.exp(-((yy - y) / 5.0) ** 2)
     img += rng.normal(0, 300, img.shape)
     return np.clip(img, 0, 65535).astype(np.uint16)
+
+
+GEL_LANES = 12
+
+
+def gel_photo(H=1024, W=1280, seed=2):
+    """Agarose gel photo, already inverted (dark bands on light grey), as RGB uint8.
+
+    The gel sits in a clear tray on a white background; 12 wells along the top;
+    lanes 1 and 5 are ladders (10 bands), lanes 2-4 and 6-8 carry one strong
+    band (lanes 3 and 7 a bit higher plus a faint band below), lanes 9-12 are empty.
+    Returns (rgb, lane x centres, ladder band ys).
+    """
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:H, 0:W]
+    img = np.full((H, W), 245.0)
+    gx0, gx1, gy0, gy1 = int(0.17 * W), int(0.83 * W), int(0.28 * H), int(0.73 * H)
+    img[gy0 - 30:gy1 + 30, gx0 - 30:gx1 + 30] = 225.0  # tray
+    img[gy0:gy1, gx0:gx1] = 200.0  # gel
+    lanes = gx0 + 40 + np.arange(GEL_LANES) * (gx1 - gx0 - 80) / (GEL_LANES - 1)
+    for cx in lanes:  # wells
+        img[(yy > gy0 + 12) & (yy < gy0 + 24) & (np.abs(xx - cx) < 16)] -= 40
+    ladder_y = gy0 + 50 + np.cumsum([0, 22, 22, 24, 26, 28, 32, 36, 42, 50])
+    dark = np.zeros((H, W))
+    for li, cx in enumerate(lanes):
+        prof = np.exp(-(((xx - cx) / 14.0) ** 6))
+        if li in (0, 4):
+            for y in ladder_y:
+                dark += 70 * prof * np.exp(-((yy - y) / 3.0) ** 2)
+        elif li in (1, 2, 3, 5, 6, 7):
+            y = gy0 + 200 - (12 if li in (2, 6) else 0)
+            dark += 110 * prof * np.exp(-((yy - y) / 5.0) ** 2)
+            if li in (2, 6):
+                dark += 35 * prof * np.exp(-((yy - (y + 45)) / 3.5) ** 2)
+    img -= dark
+    img += rng.normal(0, 2.0, img.shape)
+    gray = np.clip(img, 0, 255).astype(np.uint8)
+    rgb = np.stack([gray, gray, gray], axis=-1)
+    return rgb, lanes, ladder_y

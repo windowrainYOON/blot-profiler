@@ -55,6 +55,10 @@ FIGURE_DEFAULTS = {
     "kda_side": "left",
     "strip_gap_in": 0.0,  # space between the marker strip and the blot
     "strip_dy": 0,  # vertical offset of the marker crop (marker pixels), if the marker photo is shifted
+    "layout": "rows",  # "rows": one crop per protein (western) · "full": the whole gel as one panel (DNA gel)
+    "gel_crop": None,  # [x0, y0, x1, y1] of the full-gel panel (None = around all bands)
+    "gel_label": "",  # text left of the full-gel panel
+    "unit": "kDa",  # ladder unit shown next to the ticks' title ("kDa" or "bp")
     # "fonts" (size per text category), "tiers" (header rows) and "overrides"
     # (per-text size/angle/offset) are filled in by _migrate()
 }
@@ -141,6 +145,35 @@ def crop_x(a: core.Analysis, s: dict, width: int):
     x0 = max(0, min(lefts) - ml)
     x1 = min(width, max(rights) + mr)
     return x0, max(x1, x0 + 4)
+
+
+GEL_ROW = "__gel__"
+
+
+def default_gel_crop(a: core.Analysis, shape) -> List[int]:
+    """Around every band box, with a margin of a band pitch."""
+    H, W = shape
+    boxes = [b.box(a.rows) for b in a.bands]
+    x0 = min(x for x, _, _, _ in boxes)
+    x1 = max(x + w for x, _, w, _ in boxes)
+    y0 = min(y for _, y, _, _ in boxes)
+    y1 = max(y + h for _, y, _, h in boxes)
+    m = int(0.05 * max(x1 - x0, y1 - y0)) + 10
+    return [max(0, x0 - m), max(0, y0 - m), min(W, x1 + m), min(H, y1 + m)]
+
+
+def layout_panels(a: core.Analysis, s: dict, shape):
+    """(panels [(panel settings, row index, y0, y1)], x0px, x1px) for either layout."""
+    H, W = shape
+    if s.get("layout") == "full":
+        x0, y0, x1, y1 = s.get("gel_crop") or default_gel_crop(a, shape)
+        x0, x1 = max(0, int(x0)), min(W, int(x1))
+        y0, y1 = max(0, int(y0)), min(H, int(y1))
+        if x1 - x0 < 4 or y1 - y0 < 4:
+            x0, y0, x1, y1 = default_gel_crop(a, shape)
+        return [({"row": GEL_ROW, "label": s.get("gel_label", ""), "show": True}, -1, y0, y1)], x0, x1
+    x0, x1 = crop_x(a, s, W)
+    return panel_rows(a, s, H), x0, x1
 
 
 def panel_rows(a: core.Analysis, s: dict, height: int):
@@ -280,8 +313,7 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
     ov = s.get("overrides", {})
     family = [s.get("font") or "Arial", "AppleGothic", "DejaVu Sans"]
     weight = "bold" if s.get("label_bold", True) else "normal"
-    x0px, x1px = crop_x(a, s, W)
-    panels = panel_rows(a, s, H)
+    panels, x0px, x1px = layout_panels(a, s, (H, W))
     if not panels:
         fig.set_size_inches(3, 1)
         fig.text(0.5, 0.5, "표시할 단백질 패널이 없습니다", ha="center", va="center")
@@ -299,7 +331,7 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
     show_strip = bool(s.get("show_strip")) and marker is not None and s["strip_x1"] > s["strip_x0"]
     strip_w = (s["strip_x1"] - s["strip_x0"]) * scale if show_strip else 0.0
     strip_gap = float(s.get("strip_gap_in", 0.0)) if show_strip else 0.0
-    kda = sorted(s.get("kda", []), key=lambda k: k["y"])
+    kda = sorted((k for k in s.get("kda", []) if k.get("kda") not in (None, "")), key=lambda k: k["y"])
     show_kda = bool(s.get("show_kda")) and bool(kda)
     kda_side = s.get("kda_side", "left")
     prot_side = s.get("protein_side", "left")
@@ -565,3 +597,20 @@ def guess_ladder_x(marker: np.ndarray, a: core.Analysis):
     score = np.convolve(detail, np.ones(win) / win, mode="same")
     c = int(np.argmax(score))
     return max(0, c - win // 2), min(first, c + win // 2 + 1)
+
+
+def apply_mode_defaults(s: dict, a: core.Analysis, mode: str) -> dict:
+    """Figure defaults for the experiment type: a DNA gel is shown whole with bp ticks
+    taken from the ladder lane(s); a western blot is cut per protein with kDa ticks."""
+    if mode == core.MODE_GEL:
+        s["layout"] = "full"
+        s["unit"] = "bp"
+        ys = core.ladder_band_ys(a)
+        if ys and not any(k.get("kda") not in (None, "") for k in s.get("kda", [])):
+            s["kda"] = [{"kda": None, "y": float(y)} for y in ys]  # sizes are filled in by the user / a preset
+            s["show_kda"] = True
+    else:
+        s["layout"] = "rows"
+        if s.get("unit") == "bp":
+            s["unit"] = "kDa"
+    return s

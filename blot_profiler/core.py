@@ -163,6 +163,7 @@ class Analysis:
     bands: List[Band] = field(default_factory=list)
     lane_labels: List[str] = field(default_factory=list)  # lane group name of each physical lane
     named_lanes: List[str] = field(default_factory=list)  # lane group names the user gave (kept by auto lanes)
+    ladder_row: Optional[str] = None  # DNA gel: protein-group (row) name holding the ladder bands
     formulas: List[Dict[str, str]] = field(default_factory=list)  # {name, expr, normalize}
 
     @property
@@ -230,6 +231,7 @@ class Analysis:
         a.bands = [Band(**{k: b[k] for k in ("row", "lane", "cx", "cy")}) for b in d.get("bands", [])]
         a.lane_labels = list(d.get("lane_labels", []))
         a.named_lanes = list(d.get("named_lanes", []))
+        a.ladder_row = d.get("ladder_row")
         a.formulas = [dict(f) for f in d.get("formulas", [])]
         return a
 
@@ -274,6 +276,13 @@ class DetectSettings:
     lut_gamma: float = 0.6  # 1.0 = linear (no LUT)
     lut_low: float = 0.5  # percentile mapped to 0
     lut_high: float = 99.8  # percentile mapped to 1
+    # rows present in fewer than this fraction of lanes are dropped as smears/specks
+    # (0 keeps every row, e.g. the many ladder bands of a DNA gel)
+    min_row_fraction: float = 0.3
+    # DNA gel: objects wider than this many typical band widths are gel/tray edges, not bands
+    max_width_factor: Optional[float] = None
+    drop_wells: bool = False  # DNA gel: drop the row of wells at the top
+    min_peak_fraction: float = 0.0  # DNA gel: drop objects weaker than this fraction of the strong bands
 
 
 def detection_image(signal: np.ndarray, settings: "DetectSettings") -> np.ndarray:
@@ -328,11 +337,16 @@ def detect_bands(signal: np.ndarray, settings: DetectSettings, row_names: Option
     lab = label(mask)
     H, W = signal.shape
     regs = []
-    for rp in regionprops(lab, intensity_image=img):
-        if rp.area < max(1, settings.min_area):
-            continue
+    props = [rp for rp in regionprops(lab, intensity_image=img) if rp.area >= max(1, settings.min_area)]
+    max_w = None
+    if settings.max_width_factor and props:
+        # gels: lanes are separate, so an object much wider than a typical band is an edge
+        max_w = settings.max_width_factor * float(np.median([rp.bbox[3] - rp.bbox[1] for rp in props]))
+    for rp in props:
         y0, x0, y1, x1 = rp.bbox
         w, h = x1 - x0, y1 - y0
+        if max_w is not None and w > max_w:
+            continue
         if h <= max(6, 0.02 * H) and w > 0.6 * W:  # thin line across the membrane: panel border
             continue
         if h > 0.5 * H:
@@ -352,7 +366,7 @@ def detect_bands(signal: np.ndarray, settings: DetectSettings, row_names: Option
             if settings.exclude_edge and (ax0 < settings.exclude_edge or ax1 > W - settings.exclude_edge):
                 continue
             regs.append(dict(x0=ax0, x1=ax1, y0=y0 + int(ys.min()), y1=y0 + int(ys.max()) + 1, cx=(ax0 + ax1) / 2, cy=cy, area=npx))
-    regs = _split_by_pitch(regs)
+    regs = regs if settings.max_width_factor else _split_by_pitch(regs)
     return _build_analysis(regs, settings, row_names, signal)
 
 
@@ -466,8 +480,8 @@ def _build_analysis(regs, settings: DetectSettings, row_names, signal: np.ndarra
     # rows present in only a few lanes (specks, smears) while others span many lanes
     # are noise: drop them and cluster the lanes again without them
     nl = [len({lane_of[i] for i in c}) for c in row_clusters]
-    if not _refiltered and max(nl) >= 4:
-        keep = [c for c, n in zip(row_clusters, nl) if n >= max(2, 0.3 * max(nl))]
+    if not _refiltered and max(nl) >= 4 and settings.min_row_fraction > 0:
+        keep = [c for c, n in zip(row_clusters, nl) if n >= max(2, settings.min_row_fraction * max(nl))]
         if len(keep) < len(row_clusters):
             return _build_analysis([regs[i] for c in keep for i in c], settings, row_names, signal, _refiltered=True)
 
@@ -1030,3 +1044,224 @@ def combine_members(members: Sequence[np.ndarray], ref: Optional[int] = None):
         dev = np.where(np.isfinite(M), (M - mean) ** 2, 0.0).sum(axis=0)
         sd = np.where(n > 1, np.sqrt(dev / np.maximum(n - 1, 1)), 0.0)
     return mean, sd, n, scaled
+
+
+# --------------------------------------------------------------------------
+# Image orientation / crop (applied before detection and measurement)
+# --------------------------------------------------------------------------
+
+def default_transform() -> dict:
+    return {"rot90": 0, "angle": 0.0, "crop": None}
+
+
+def apply_transform(img: np.ndarray, tf: Optional[dict]) -> np.ndarray:
+    """Rotate by quarter turns, then by a fine angle (degrees, counter-clockwise),
+    then crop ``[x0, y0, x1, y1]`` (in the rotated image).
+
+    Quarter turns are exact; a fine angle interpolates linearly (sums of
+    intensity are preserved up to interpolation). Areas rotated in from
+    outside get the image median.
+    """
+    if not tf:
+        return img
+    out = np.rot90(img, k=int(tf.get("rot90", 0)) % 4)
+    ang = float(tf.get("angle", 0.0) or 0.0)
+    if abs(ang) > 1e-6:
+        out = ndi.rotate(out, ang, reshape=True, order=1, mode="constant", cval=float(np.median(out)))
+    crop = tf.get("crop")
+    if crop:
+        H, W = out.shape
+        x0, y0, x1, y1 = (int(round(v)) for v in crop)
+        x0, x1 = sorted((max(0, min(W, x0)), max(0, min(W, x1))))
+        y0, y1 = sorted((max(0, min(H, y0)), max(0, min(H, y1))))
+        if x1 - x0 >= 8 and y1 - y0 >= 8:
+            out = out[y0:y1, x0:x1]
+    return np.ascontiguousarray(out)
+
+
+def line_angle(x0, y0, x1, y1) -> float:
+    """Fine rotation (degrees) that makes the line (x0,y0)-(x1,y1) horizontal."""
+    import math
+
+    ang = math.degrees(math.atan2(y1 - y0, x1 - x0))
+    # a line drawn right-to-left means the same direction
+    if ang > 90:
+        ang -= 180
+    elif ang < -90:
+        ang += 180
+    return ang
+
+
+# --------------------------------------------------------------------------
+# DNA gel mode
+# --------------------------------------------------------------------------
+
+MODE_WESTERN = "western"
+MODE_GEL = "gel"
+LADDER_MIN_BANDS = 5
+
+LADDER_PRESETS = {  # top (largest) to bottom, bp
+    "1 kb DNA ladder": [10000, 8000, 6000, 5000, 4000, 3000, 2000, 1500, 1000, 500],
+    "1 kb Plus DNA ladder": [15000, 10000, 8000, 7000, 6000, 5000, 4000, 3000, 2000, 1500, 1000, 700, 500, 400, 300, 200, 75],
+    "100 bp DNA ladder": [1517, 1200, 1000, 900, 800, 700, 600, 500, 400, 300, 200, 100],
+    "50 bp DNA ladder": [1350, 916, 766, 700, 650, 600, 550, 500, 450, 400, 350, 300, 250, 200, 150, 100, 50],
+}
+
+
+def gel_settings(base: Optional[DetectSettings] = None) -> DetectSettings:
+    """Detection settings for a gel: keep every band row, no filled-in empty boxes."""
+    import dataclasses
+
+    s = dataclasses.replace(base) if base is not None else DetectSettings()
+    s.min_row_fraction = 0.0
+    s.fill_missing_lanes = False
+    s.max_width_factor = 2.5
+    s.drop_wells = True
+    s.min_peak_fraction = 0.2
+    return s
+
+
+def _drop_faint(a: Analysis, work: np.ndarray, frac: float) -> int:
+    """Remove boxes whose peak (on the detection image) is below ``frac`` of the strong bands
+    (tray edges, specks); faint real bands are usually well above that."""
+    if frac <= 0 or not a.bands:
+        return 0
+    H, W = work.shape
+    peaks = {}
+    for b in a.bands:
+        x, y, w, h = b.box(a.rows)
+        patch = work[max(0, y):min(H, y + h), max(0, x):min(W, x + w)]
+        peaks[id(b)] = float(patch.max()) if patch.size else 0.0
+    high = float(np.percentile(list(peaks.values()), 90))
+    keep = [b for b in a.bands if peaks[id(b)] >= frac * high]
+    n = len(a.bands) - len(keep)
+    if n:
+        a.bands = keep
+        remove_empty(a)
+    return n
+
+
+def _drop_well_row(a: Analysis) -> bool:
+    """Remove the wells: the topmost row, present in (almost) every lane, above all other bands."""
+    if len(a.rows) < 2:
+        return False
+    ys = {i: a._row_y(i) for i in range(len(a.rows))}
+    top = min(ys, key=ys.get)
+    lanes_top = {b.lane for b in a.bands if b.row == top}
+    if len(lanes_top) < max(3, 0.8 * a.n_lanes):
+        return False
+    a.bands = [b for b in a.bands if b.row != top]
+    remove_empty(a)
+    return True
+
+
+def ladder_lanes(a: Analysis) -> List[int]:
+    if not a.ladder_row:
+        return []
+    ri = next((i for i, r in enumerate(a.rows) if r.name == a.ladder_row), None)
+    return sorted({b.lane for b in a.bands if b.row == ri}) if ri is not None else []
+
+
+def lane_band_counts(a: Analysis) -> Dict[int, int]:
+    out: Dict[int, int] = {}
+    for b in a.bands:
+        out[b.lane] = out.get(b.lane, 0) + 1
+    return out
+
+
+def guess_ladder_lanes(a: Analysis) -> List[int]:
+    """Lanes that look like a DNA ladder: many separate bands, clearly more than the others."""
+    counts = lane_band_counts(a)
+    if not counts:
+        return []
+    med = float(np.median(list(counts.values())))
+    return sorted(l for l, n in counts.items() if n >= LADDER_MIN_BANDS and n >= 2 * max(med, 1))
+
+
+def set_ladder_lanes(a: Analysis, lanes: Sequence[int], name: str = "Ladder") -> None:
+    """Put every band of ``lanes`` into the ladder group (ignored in quantification),
+    and give those lanes ladder names (M, M2 …) unless the user named them."""
+    lanes = set(lanes)
+    cur = set(ladder_lanes(a))
+    # lanes no longer ladders: their bands go back to ordinary groups
+    if a.ladder_row and cur - lanes:
+        ri = next(i for i, r in enumerate(a.rows) if r.name == a.ladder_row)
+        back = [b for b in a.bands if b.row == ri and b.lane not in lanes]
+        if back:
+            make_row_group(a, back, unique_name("B", [r.name for r in a.rows]))
+    bands = [b for b in a.bands if b.lane in lanes]
+    if not bands:
+        a.ladder_row = None if not lanes else a.ladder_row
+        remove_empty(a)
+        return
+    a.ladder_row = make_row_group(a, bands, a.ladder_row or name)
+    ri = next(i for i, r in enumerate(a.rows) if r.name == a.ladder_row)
+    a.rows[ri].role = ROLE_IGNORE
+    remove_empty(a)
+    a.ensure_lane_labels()
+    k = 1
+    for l in ladder_lanes(a):
+        if a.lane_labels[l] not in a.named_lanes:
+            a.lane_labels[l] = unique_name("M" if k == 1 else f"M{k}", [x for i, x in enumerate(a.lane_labels) if i != l])
+        k += 1
+
+
+def ladder_band_ys(a: Analysis) -> List[float]:
+    """Band heights of the ladder (median over ladder lanes, top to bottom)."""
+    lanes = ladder_lanes(a)
+    if not lanes:
+        return []
+    ri = next(i for i, r in enumerate(a.rows) if r.name == a.ladder_row)
+    per_lane = [sorted(b.cy for b in a.bands if b.row == ri and b.lane == l) for l in lanes]
+    ref = max(per_lane, key=len)
+    return [float(y) for y in ref]
+
+
+def gel_detection_image(signal: np.ndarray) -> np.ndarray:
+    """Thin horizontal bands only: signal minus its vertical grey opening (white top-hat).
+
+    Removes the gel/tray plateau, its edges and vertical smears, which a rolling
+    ball leaves behind in gel photos. Used to *find* bands, never to measure.
+    """
+    L = max(15, int(signal.shape[0] / 25))
+    return signal - ndi.grey_opening(signal, size=(L, 1))
+
+
+def detect_gel(signal: np.ndarray, settings: Optional[DetectSettings] = None) -> Analysis:
+    """Lane-centric detection for DNA gels: every band row is kept, ladder lanes are found
+    and grouped as 'Ladder' (role: ignore), sample band rows are named B1, B2 … top to bottom."""
+    st = gel_settings(settings)
+    work = gel_detection_image(signal)
+    a = detect_bands(work, st)
+    _drop_faint(a, work, st.min_peak_fraction)
+    if st.drop_wells:
+        _drop_well_row(a)
+    for i, r in enumerate(a.rows):
+        r.name = f"B{i + 1}"
+    lad = guess_ladder_lanes(a)
+    if lad:
+        set_ladder_lanes(a, lad)
+    others = [r for r in a.rows if r.name != a.ladder_row]
+    for i, r in enumerate(sorted(others, key=lambda r: a._row_y(a.rows.index(r)))):
+        r.name = f"B{i + 1}"
+    lad = set(ladder_lanes(a))
+    for i in range(a.n_lanes):  # lanes numbered by position: M, L2, L3, …, M2, L6 …
+        if i not in lad:
+            a.lane_labels[i] = f"L{i + 1}"
+    if not any(r.role == ROLE_CONTROL for r in a.rows):
+        pass  # gels usually have no loading control: plain band intensities are shown
+    return a
+
+
+def looks_like_gel(signal: np.ndarray, settings: Optional[DetectSettings] = None) -> bool:
+    """True when the image itself contains ladder-like lanes (a DNA gel with its marker)."""
+    try:
+        st = gel_settings(settings)
+        work = gel_detection_image(signal)
+        a = detect_bands(work, st)
+        _drop_faint(a, work, st.min_peak_fraction)
+        if st.drop_wells:
+            _drop_well_row(a)
+    except Exception:
+        return False
+    return bool(guess_ladder_lanes(a))
