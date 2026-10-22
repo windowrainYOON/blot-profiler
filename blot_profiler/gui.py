@@ -1064,6 +1064,7 @@ class ImageDoc:
 
     def __init__(self, invert: int = 0, bg: Optional[core.BackgroundSettings] = None):
         self.image_path: Optional[str] = None
+        self.project: str = ""  # name of the project file the image came from (several projects open together)
         self.raw: Optional[np.ndarray] = None
         self.signal: Optional[np.ndarray] = None
         self.corrected: Optional[np.ndarray] = None
@@ -1249,6 +1250,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def doc(self) -> ImageDoc:
         return self.docs[self.cur]
 
+    def _n_projects(self) -> int:
+        return len({d.project for d in self.docs if d.raw is not None})
+
+    def doc_label(self, k: int) -> str:
+        d = self.docs[k]
+        return f"{self.doc_key(k)}: {d.name}" + (f" [{d.project}]" if d.project and self._n_projects() > 1 else "")
+
     def doc_key(self, k: int) -> str:
         return f"I{k + 1}"
 
@@ -1258,7 +1266,7 @@ class MainWindow(QtWidgets.QMainWindow):
         while t.count():
             t.removeTab(0)
         for k, d in enumerate(self.docs):
-            t.addTab(f"{self.doc_key(k)}: {d.name}")
+            t.addTab(f"{self.doc_key(k)}: {d.name}" + (f"  [{d.project}]" if d.project and self._n_projects() > 1 else ""))
             t.setTabToolTip(k, d.image_path or "")
         t.setCurrentIndex(self.cur)
         t.blockSignals(False)
@@ -1366,7 +1374,8 @@ class MainWindow(QtWidgets.QMainWindow):
         act = m.addAction("TIF 열기…", self.open_image)
         act.setShortcut(QtGui.QKeySequence.Open)
         m.addSeparator()
-        m.addAction("프로젝트 열기… (.blotproj / .json)", self.open_project_dialog).setShortcut("Ctrl+Shift+O")
+        m.addAction("프로젝트 열기… (.blotproj / .json, 여러 개 선택하면 함께 열기)", self.open_project_dialog).setShortcut("Ctrl+Shift+O")
+        m.addAction("프로젝트 추가로 불러오기… (지금 작업에 합치기)", self.add_project_dialog)
         m.addAction("프로젝트 저장", lambda: self.save_project()).setShortcut(QtGui.QKeySequence.Save)
         m.addAction("프로젝트 다른 이름으로 저장…", lambda: self.save_project(save_as=True)).setShortcut("Ctrl+Shift+S")
         m.addSeparator()
@@ -1702,8 +1711,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "열린 모든 이미지의 그룹입니다. 같은 종류(단백질 또는 레인)의 그룹을 체크하고 '큰 그룹 만들기'를 누르세요.\n"
             "  · 레인 큰 그룹: 이미지마다 이름이 다른 레인을 한 레인으로 맞춥니다 (예: I1의 'IgG 12h' + I2의 'IgG12').\n"
             "  · 단백질 큰 그룹: 여러 이미지의 단백질 값을 레인별로 평균 ± SD 합니다 (예: 반복 블롯의 Kras).\n"
-            "이미지 사이에서 레인은 레인 그룹 이름(또는 레인 큰 그룹)으로 맞춰집니다."
+            "이미지 사이에서 레인은 레인 그룹 이름(또는 레인 큰 그룹)으로 맞춰집니다.\n"
+            "여러 프로젝트를 함께 비교하려면 파일 → '프로젝트 열기'에서 여러 개를 고르거나 '프로젝트 추가로 불러오기'를 쓰세요.\n"
+            "각 이미지는 I1, I2 …로 불리고 [프로젝트 이름]이 붙습니다. '이미지 간 수식'에서 예) I1.Vinculin / I3.Vinculin"
         )
+        info.setWordWrap(True)
         info.setStyleSheet("color: #555;")
         lay.addWidget(info)
         self.group_tree = QtWidgets.QTreeWidget()
@@ -1794,9 +1806,12 @@ class MainWindow(QtWidgets.QMainWindow):
         (or of the current image when no blot is opened with them)."""
         paths = [p for p in paths if p]
         markers = [p for p in paths if self.is_marker_file(p) and not projfile.is_project_file(p)]
-        for p in paths:
-            if projfile.is_project_file(p):
-                self.load_project(p)
+        projects = [p for p in paths if projfile.is_project_file(p)]
+        if projects:
+            if any(d.raw is not None for d in self.docs) and len(projects) == 1 and not self._ask_replace():
+                self.load_project(projects[0], ask_save=False, append=True)
+            else:
+                self.open_projects(projects)
         blots = [p for p in paths if p not in markers and not projfile.is_project_file(p)]
         for p in blots:
             self.load_image(p, marker_candidates=markers)
@@ -2922,7 +2937,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for k, d in enumerate(self.docs):
             if d.raw is None:
                 continue
-            top = QtWidgets.QTreeWidgetItem([f"{self.doc_key(k)}: {d.name}", ""])
+            top = QtWidgets.QTreeWidgetItem([self.doc_label(k), ""])
             t.addTopLevelItem(top)
             for kind, names in ((KIND_PROTEIN, [r.name for r in d.analysis.rows]), (KIND_LANE, d.analysis.lane_groups())):
                 for name in names:
@@ -3006,9 +3021,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if d.raw is None:
                 continue
             key = self.doc_key(k)
-            terms.append((f"{key} 단백질 (레인별 값)", [(f"{key}: {r.name}", f"{key}.{core._safe_name(r.name)}") for r in d.analysis.rows]))
+            src = f" [{d.project}]" if d.project and self._n_projects() > 1 else ""
+            terms.append((f"{key}{src} 단백질 (레인별 값)", [(f"{key}: {r.name}", f"{key}.{core._safe_name(r.name)}") for r in d.analysis.rows]))
             ids = sorted({m.band_id for m in d.measurements})
-            terms.append((f"{key} 밴드 (값 하나)", [(f"{key}: {i}", f"{key}.{i}") for i in ids]))
+            terms.append((f"{key}{src} 밴드 (값 하나)", [(f"{key}: {i}", f"{key}.{i}") for i in ids]))
         prot = [g["name"] for g in self.big_groups if g["kind"] == KIND_PROTEIN and g["name"] in self.multi_results]
         terms.append(("단백질 큰 그룹 (이미지 평균)", [(n, core._safe_name(n)) for n in prot]))
         return terms
@@ -3240,6 +3256,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "mode": d.mode, "transform": d.transform, "marker_tf": d.marker_tf,
                 "analysis": d.analysis.to_dict(), "figure": d.figure,
             })
+            if self._n_projects() > 1:  # several projects combined: remember where each image came from
+                images[-1]["project"] = d.project
         return {
             "app": "Blot Profiler",
             "version": __version__,
@@ -3364,10 +3382,26 @@ class MainWindow(QtWidgets.QMainWindow):
     def open_project_dialog(self):
         if not self.maybe_save():
             return
-        p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "프로젝트 열기", "",
-                                                     "Blot Profiler 프로젝트 (*.blotproj *.json);;All files (*)")
-        if p:
-            self.load_project(p, ask_save=False)
+        ps, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "프로젝트 열기 (여러 개 선택 가능)", "",
+                                                       "Blot Profiler 프로젝트 (*.blotproj *.json);;All files (*)")
+        self.open_projects(ps, ask_save=False)
+
+    def add_project_dialog(self):
+        ps, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "프로젝트 추가로 불러오기 (여러 개 선택 가능)", "",
+                                                       "Blot Profiler 프로젝트 (*.blotproj *.json);;All files (*)")
+        for p in ps:
+            self.load_project(p, ask_save=False, append=True)
+
+    def open_projects(self, paths, ask_save: bool = True):
+        """Open the first project and add the others to it (their images are compared in tab 5)."""
+        paths = [p for p in paths if p]
+        if not paths:
+            return
+        if ask_save and not self.maybe_save():
+            return
+        self.load_project(paths[0], ask_save=False)
+        for p in paths[1:]:
+            self.load_project(p, ask_save=False, append=True)
 
     def _relocate(self, what: str, ref, project_path: str, embedded: Optional[str], optional: bool = False) -> Optional[str]:
         path = projfile.resolve(ref, project_path, embedded)
@@ -3385,8 +3419,21 @@ class MainWindow(QtWidgets.QMainWindow):
                                                      os.path.dirname(project_path), "Images (*.tif *.tiff *.png *.jpg *.jpeg);;All files (*)")
         return p or None
 
-    def load_project(self, p=None, ask_save: bool = True):
-        if ask_save and not self.maybe_save():
+    def _ask_replace(self) -> bool:
+        """Dropping a project while images are open: replace them, or add the project?"""
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("프로젝트 열기")
+        box.setText("지금 열린 작업을 이 프로젝트로 바꿀까요, 아니면 지금 작업에 추가할까요?\n"
+                    "(추가하면 이미지가 함께 열려 5번 탭에서 수식으로 비교할 수 있습니다)")
+        add = box.addButton("추가하기", QtWidgets.QMessageBox.AcceptRole)
+        box.addButton("바꾸기", QtWidgets.QMessageBox.DestructiveRole)
+        box.exec()
+        return box.clickedButton() is not add
+
+    def load_project(self, p=None, ask_save: bool = True, append: bool = False):
+        """Open project ``p``; with ``append`` its images are added to the ones already open
+        (image references I1, I2 … in its formulas and big groups are renumbered)."""
+        if ask_save and not append and not self.maybe_save():
             return
         if not p:
             self.open_project_dialog()
@@ -3401,6 +3448,9 @@ class MainWindow(QtWidgets.QMainWindow):
             else:  # format 1: a single image
                 images = [{k: d.get(k) for k in ("image_path", "invert", "background", "reference_lane", "analysis")}]
             det = d.get("detect", {})
+            proj_name = os.path.splitext(os.path.basename(p))[0]
+            if append:
+                return self._append_project(p, d, embedded, images, proj_name)
             self.sens.setValue(det.get("sensitivity", 1.0))
             self.smooth.setValue(det.get("smooth", 1.5))
             self.min_area.setValue(det.get("min_area", 30))
@@ -3411,40 +3461,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.snap_lanes.setChecked(det.get("snap_lanes", True))
             self.method_combo.setCurrentIndex(max(0, self.method_combo.findData(det.get("method", "legacy"))))
             self.auto_tilt.setChecked(bool(det.get("auto_tilt", True)))
-            docs, index = [], {}
-            for i, im in enumerate(images):
-                path = self._relocate("블롯 이미지", im.get("image") or im.get("image_path"), p, embedded)
-                if not path:
-                    continue
-                doc = ImageDoc(invert=int(im.get("invert") or 0), bg=core.BackgroundSettings(**(im.get("background") or {})))
-                doc.raw_orig = core.load_image(path)
-                doc.transform = dict(core.default_transform(), **(im.get("transform") or {}))
-                doc.raw = core.apply_transform(doc.raw_orig, doc.transform)
-                doc.mode = im.get("mode", core.MODE_WESTERN)
-                doc.image_path = path
-                doc.ref_lane = im.get("reference_lane", 0)
-                doc.analysis = core.Analysis.from_dict(im.get("analysis") or {})
-                doc.analysis.ensure_lane_labels()
-                doc.figure = im.get("figure") or figure.default_settings()
-                figure.sync_settings(doc.figure, doc.analysis, doc.raw.shape)  # as the figure tab would
-                self._make_signal(doc)
-                self.measure_doc(doc)
-                mref = im.get("marker") or ((doc.figure or {}).get("marker_path") if doc.figure else None)
-                if mref:
-                    mpath = self._relocate("마커 이미지", mref, p, embedded, optional=True)
-                    if mpath:
-                        self.set_marker(doc, mpath, quiet=True, marker_tf=im.get("marker_tf"))
-                    elif doc.figure:
-                        doc.figure["marker_path"] = None
-                index[i] = len(docs)
-                docs.append(doc)
+            docs, index = self._project_docs(p, d, embedded, images, proj_name)
             if not docs:
                 return
-            # format 2 kept formulas for all images in one list, each with a base image
-            for fml in d.get("formulas", []):
-                k = index.get(int(fml.get("image", 0)))
-                if k is not None:
-                    docs[k].analysis.formulas.append({x: fml[x] for x in ("name", "expr", "normalize") if x in fml})
             self.docs = docs
             self.big_groups = [
                 dict(g, members=[[index[int(k)], n] for k, n in g.get("members", []) if int(k) in index])
@@ -3472,6 +3491,83 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             traceback.print_exc()
             QtWidgets.QMessageBox.critical(self, "열기 실패", str(e))
+
+    def _append_project(self, p, d, embedded, images, proj_name):
+        docs, index = self._project_docs(p, d, embedded, images, proj_name)
+        if not docs:
+            return
+        self.docs = [x for x in self.docs if x.raw is not None]  # drop an empty first tab
+        off = len(self.docs)
+        index = {i: k + off for i, k in index.items()}
+        self.docs.extend(docs)
+        # names of big groups / image formulas must stay unique; image references move by ``off``
+        renames = {}
+        for g in d.get("big_groups", []):
+            name = core.unique_name(g["name"], [x["name"] for x in self.big_groups])
+            if name != g["name"]:
+                renames[core._safe_name(g["name"])] = core._safe_name(name)
+            self.big_groups.append(dict(g, name=name, members=[[index[int(k)], n] for k, n in g.get("members", [])
+                                                               if int(k) in index]))
+
+        def shift(expr):
+            def img(m):
+                k = index.get(int(m.group(1)) - 1)
+                return f"I{k + 1}." if k is not None else m.group(0)
+            expr = re.sub(r"\bI(\d+)\.", img, expr)
+            for old, new in renames.items():
+                expr = re.sub(rf"(?<![\w.]){re.escape(old)}(?![\w])", new, expr)
+            return expr
+
+        for f in d.get("multi_formulas", []):
+            name = core.unique_name(f.get("name", "수식"), [x.get("name") for x in self.multi_formulas])
+            self.multi_formulas.append(dict(f, name=name, expr=shift(f.get("expr", ""))))
+        self.project_path = None  # several projects together: saving asks for a new file
+        self.refresh_doc_tabs()
+        self.fill_multi_formulas()
+        self.switch_doc(off)
+        self.refresh_multi()
+        self.figure_editor.dirty = True
+        self.statusBar().showMessage(
+            f"프로젝트 '{proj_name}'를 추가했습니다: 이미지 {len(docs)}개 → {self.doc_key(off)}"
+            + (f"~{self.doc_key(off + len(docs) - 1)}" if len(docs) > 1 else "")
+            + ". 5번 탭에서 이미지(I1, I2 …) 값으로 수식을 만들 수 있습니다. 저장하면 합친 프로젝트를 새 파일로 저장합니다.")
+
+    def _project_docs(self, p, d, embedded, images, proj_name):
+        """ImageDocs of a project file; also {index in the file: index in the list}."""
+        docs, index = [], {}
+        for i, im in enumerate(images):
+            path = self._relocate("블롯 이미지", im.get("image") or im.get("image_path"), p, embedded)
+            if not path:
+                continue
+            doc = ImageDoc(invert=int(im.get("invert") or 0), bg=core.BackgroundSettings(**(im.get("background") or {})))
+            doc.project = im.get("project") or proj_name
+            doc.raw_orig = core.load_image(path)
+            doc.transform = dict(core.default_transform(), **(im.get("transform") or {}))
+            doc.raw = core.apply_transform(doc.raw_orig, doc.transform)
+            doc.mode = im.get("mode", core.MODE_WESTERN)
+            doc.image_path = path
+            doc.ref_lane = im.get("reference_lane", 0)
+            doc.analysis = core.Analysis.from_dict(im.get("analysis") or {})
+            doc.analysis.ensure_lane_labels()
+            doc.figure = im.get("figure") or figure.default_settings()
+            figure.sync_settings(doc.figure, doc.analysis, doc.raw.shape)  # as the figure tab would
+            self._make_signal(doc)
+            self.measure_doc(doc)
+            mref = im.get("marker") or ((doc.figure or {}).get("marker_path") if doc.figure else None)
+            if mref:
+                mpath = self._relocate("마커 이미지", mref, p, embedded, optional=True)
+                if mpath:
+                    self.set_marker(doc, mpath, quiet=True, marker_tf=im.get("marker_tf"))
+                elif doc.figure:
+                    doc.figure["marker_path"] = None
+            index[i] = len(docs)
+            docs.append(doc)
+        # format 2 kept formulas for all images in one list, each with a base image
+        for fml in d.get("formulas", []):
+            k = index.get(int(fml.get("image", 0)))
+            if k is not None:
+                docs[k].analysis.formulas.append({x: fml[x] for x in ("name", "expr", "normalize") if x in fml})
+        return docs, index
 
     def export_csv(self):
         docs = self.loaded_docs()
