@@ -23,6 +23,7 @@ from matplotlib.figure import Figure  # noqa: E402
 from . import core  # noqa: E402
 from . import figure  # noqa: E402
 from . import project as projfile  # noqa: E402
+from . import lanes  # noqa: E402
 from . import __version__  # noqa: E402
 
 
@@ -123,6 +124,7 @@ class BandItem(QtWidgets.QGraphicsRectItem):
             p = self.pos()
             self.band.cx = p.x() + r.width / 2
             self.band.cy = p.y() + r.height / 2
+            self.band.user = True
             self.view.band_moved()
         return super().itemChange(change, value)
 
@@ -245,9 +247,33 @@ class BandItem(QtWidgets.QGraphicsRectItem):
                     painter.drawRect(QtCore.QRectF(hx - s, hy - s, 2 * s, 2 * s))
 
 
+class SuggestionItem(QtWidgets.QGraphicsRectItem):
+    """A dashed box the detection was not sure about: click to turn it into a band box."""
+
+    def __init__(self, view: "BlotView", cand: dict):
+        super().__init__(cand["x"] - cand["w"] / 2, cand["y"] - cand["h"] / 2, cand["w"], cand["h"])
+        self.view = view
+        self.cand = cand
+        pen = QtGui.QPen(QtGui.QColor("#d500f9"), 1.3, Qt.DashLine)
+        pen.setCosmetic(True)
+        self.setPen(pen)
+        self.setBrush(QtGui.QColor(213, 0, 249, 25))
+        self.setZValue(3)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(f"검출 후보 (점수 {cand.get('score', 0):.2f}) — 클릭하면 밴드 박스로 받습니다")
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.view.suggestionAccepted.emit(self.cand)
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+
 class BlotView(QtWidgets.QGraphicsView):
     filesDropped = QtCore.Signal(list)  # image/analysis files dropped on the view
     drawn = QtCore.Signal(str, float, float, float, float)  # "line"/"crop", x0, y0, x1, y1 (image px)
+    suggestionAccepted = QtCore.Signal(dict)
     changed = QtCore.Signal()  # boxes moved/added/removed
     selectionChangedBands = QtCore.Signal()
     contextRequested = QtCore.Signal(QtCore.QPoint, object)  # global pos, BandItem | None
@@ -272,6 +298,9 @@ class BlotView(QtWidgets.QGraphicsView):
         self.show_labels = True
         self.resize_mode = False
         self.draw_mode: Optional[str] = None  # "line" (straighten) / "crop": the next drag draws
+        self.extra_items = []  # suggestions and lane lines
+        self.suggest_min = 0.6  # show suggestions scoring at least this (fraction of the threshold)
+        self.show_lanes = True
         self._draw = None
         self._move_timer = QtCore.QTimer(self)
         self._move_timer.setSingleShot(True)
@@ -353,6 +382,30 @@ class BlotView(QtWidgets.QGraphicsView):
                 it.setSelected(True)
             self.items_.append(it)
         sc.blockSignals(False)
+        self.rebuild_extras()
+
+    def rebuild_extras(self):
+        """Dashed suggestion boxes and the (slanted) lane centre lines of lane-first detection."""
+        sc = self.scene()
+        for it in self.extra_items:
+            sc.removeItem(it)
+        self.extra_items = []
+        a = self.analysis
+        for c in getattr(a, "candidates", []):
+            if c.get("score", 0) >= self.suggest_min:
+                it = SuggestionItem(self, c)
+                sc.addItem(it)
+                self.extra_items.append(it)
+        if self.show_lanes and self.pix_item is not None and getattr(a, "lane_geom", None):
+            H = self.pix_item.pixmap().height()
+            pen = QtGui.QPen(QtGui.QColor(0, 151, 167, 150), 1, Qt.DashLine)
+            pen.setCosmetic(True)
+            for g in a.lane_geom:
+                x_top = lanes.lane_line_x(g, 0.0)
+                x_bot = lanes.lane_line_x(g, float(H))
+                line = sc.addLine(x_top, 0, x_bot, H, pen)
+                line.setZValue(1)
+                self.extra_items.append(line)
 
     def refresh_items(self):
         self.ids = self.analysis.band_ids()
@@ -1065,6 +1118,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.multi_keys: List[str] = []
         self.multi_results: Dict[str, Dict[str, object]] = {}  # name -> {mean, sd, points}
         self._updating = False
+        self._tilt_done = False
         self.project_path: Optional[str] = None  # where the project was last saved/opened
         self._saved_fp: Optional[str] = None  # state at that moment (unsaved-change mark)
 
@@ -1074,6 +1128,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.contextRequested.connect(self.show_band_menu)
         self.view.addRequested.connect(self.add_band_at)
         self.view.filesDropped.connect(self.open_paths)
+        self.view.suggestionAccepted.connect(self.accept_suggestion)
         self.view.drawn.connect(lambda k, *xy: self.set_draw_mode(None) if k == "cancel" else self.on_drawn(k, *xy))
         self.view.resizeModeExited.connect(lambda: self.resize_mode.setChecked(False))
 
@@ -1138,6 +1193,10 @@ class MainWindow(QtWidgets.QMainWindow):
         cl.addWidget(self.show_corrected)
         cl.addWidget(self.show_labels)
         cl.addWidget(self.show_marker)
+        self.show_lane_lines = QtWidgets.QCheckBox("레인 선")
+        self.show_lane_lines.setChecked(True)
+        self.show_lane_lines.toggled.connect(lambda on: (setattr(self.view, "show_lanes", on), self.view.rebuild_extras()))
+        cl.addWidget(self.show_lane_lines)
         cl.addWidget(self.resize_mode)
         ll.addLayout(cl)
         hint = QtWidgets.QLabel(
@@ -1359,6 +1418,26 @@ class MainWindow(QtWidgets.QMainWindow):
         f.addRow("최소 밴드 면적", self.min_area)
         self.pad = _spin(0, 100, 3, suffix=" px")
         f.addRow("박스 여백", self.pad)
+        self.method_combo = QtWidgets.QComboBox()
+        self.method_combo.addItem("레인 먼저 찾기 (새 방식: 레인 → 레인 안 밴드 → 줄 맞추기)", "lane")
+        self.method_combo.addItem("이전 검출 방식", "legacy")
+        self.method_combo.setToolTip("새 방식은 레인을 먼저 찾고(기울어진 레인 ±10°, 좌우 ±10% 어긋남 허용), 레인마다 밴드를 찾은 뒤\n"
+                                     "같은 높이의 밴드를 줄로 묶습니다. 애매한 후보는 점선 '제안' 상자로 보여 줍니다.")
+        f.addRow("검출 방식", self.method_combo)
+        hb = QtWidgets.QHBoxLayout()
+        self.suggest_spin = _spin(0.3, 1.0, 0.6, 0.05, decimals=2)
+        self.suggest_spin.setToolTip("점선 제안 상자를 보여 줄 기준 (검출 기준 대비). 낮추면 더 많은 후보가 보입니다 — 다시 검출하지 않습니다")
+        self.suggest_spin.valueChanged.connect(self.on_suggest_level)
+        hb.addWidget(self.suggest_spin)
+        b = QtWidgets.QPushButton("제안 모두 받기")
+        b.clicked.connect(self.accept_all_suggestions)
+        hb.addWidget(b)
+        f.addRow("제안 상자 기준", hb)
+        self.auto_tilt = QtWidgets.QCheckBox("검출 후 기울기 자동 보정 (이미지 전체 회전 · 마커도 같이)")
+        self.auto_tilt.setChecked(True)
+        self.auto_tilt.setToolTip("밴드 줄의 기울기를 재서 0.3° 이상이면 이미지 전체를 그만큼 돌리고 다시 검출합니다.\n"
+                                  "1번 탭 '미세' 회전에서 확인·되돌릴 수 있습니다")
+        f.addRow(self.auto_tilt)
         self.lut_gamma = _spin(0.2, 1.0, 0.6, 0.05, decimals=2)
         self.lut_gamma.setToolTip("밴드를 찾을 때만 쓰는 대비 조정(LUT) 감마. 1보다 작을수록 흐린 밴드를 더 잘 잡습니다. 1 = 조정 안 함.\n"
                                   "정량에는 쓰이지 않습니다.")
@@ -2213,6 +2292,10 @@ class MainWindow(QtWidgets.QMainWindow):
             lut_gamma=self.lut_gamma.value(),
         )
         old = self.analysis
+        user_bands = [(b.cx, b.cy, old.rows[b.row].name) for b in old.bands if getattr(b, "user", False)]
+        if self.method_combo.currentData() == "lane":
+            self._detect_lane_first(corr, settings, old, user_bands)
+            return
         if self.doc.mode == core.MODE_GEL:
             a = core.detect_gel(corr, settings)
             if old.lane_labels and len(old.lane_labels) == a.n_lanes:
@@ -2242,6 +2325,79 @@ class MainWindow(QtWidgets.QMainWindow):
             f"자동 그룹 제안: 단백질 {len(a.rows)}개({', '.join(r.name for r in a.rows)}), 레인 {a.n_lanes}개, 박스 {len(a.bands)}개. "
             "바로 '6. Figure 만들기'로 가거나, 밴드를 드래그로 선택 → 우클릭으로 그룹 이름·구성을 고치세요."
         )
+
+    def _detect_lane_first(self, corr, settings, old, user_bands):
+        d = self.doc
+        a = lanes.detect(corr, settings, d.mode)
+        if d.mode != core.MODE_GEL:
+            for i, r in enumerate(a.rows):  # keep the user's names and roles when re-detecting
+                if i < len(old.rows):
+                    r.name = core.unique_name(old.rows[i].name, [x.name for x in a.rows[:i]])
+                    r.role = old.rows[i].role
+            if a.rows and not any(r.role == core.ROLE_CONTROL for r in a.rows):
+                a.rows[0].role = core.ROLE_CONTROL
+        if old.lane_labels and len(old.lane_labels) == a.n_lanes:
+            a.lane_labels = list(old.lane_labels)
+            a.named_lanes = [n for n in old.named_lanes if n in a.lane_labels]
+        a.formulas = list(old.formulas)
+        # boxes the user placed or moved stay
+        kept = 0
+        for x, y, _name in user_bands:
+            near = any(abs(b.cx - x) < 0.5 * a.rows[b.row].width and abs(b.cy - y) < 0.5 * a.rows[b.row].height for b in a.bands)
+            if not near and a.rows:
+                nb = core.add_band(a, x, y)
+                nb.user = True
+                kept += 1
+        if kept and a.method == "lane":
+            core.auto_assign_lanes(a)
+        # tilt: corrected only by turning the whole image (and the marker with it)
+        ang = lanes.tilt_angle(a)
+        if self.auto_tilt.isChecked() and not self._tilt_done and 0.3 <= abs(ang) <= 10:
+            self._tilt_done = True
+            try:
+                self.set_transform(d, dict(d.transform, angle=round(float(d.transform.get("angle", 0.0)) + ang, 2)))
+            finally:
+                self._tilt_done = False
+            self.statusBar().showMessage(
+                f"밴드 줄이 {ang:+.1f}° 기울어 있어 이미지 전체(마커 포함)를 돌려 맞추고 다시 검출했습니다 — 1번 탭 '미세' 회전에서 되돌릴 수 있습니다")
+            return
+        self.set_analysis(a)
+        if d.figure is not None:
+            figure.apply_mode_defaults(d.figure, a, d.mode)
+        lad = core.ladder_lanes(a)
+        msg = (f"레인 {a.n_lanes}개, 박스 {len(a.bands)}개, 줄 {len(a.rows)}개"
+               + (f", ladder 레인 {', '.join(a.lane_labels[l] for l in lad)}" if lad else "")
+               + f", 제안(점선) {sum(1 for c in a.candidates if c['score'] >= self.view.suggest_min)}개. "
+               "점선 상자를 클릭하면 받고, 박스는 드래그로 고칩니다.")
+        if kept:
+            msg += f" 직접 고친 박스 {kept}개는 그대로 두었습니다."
+        self.statusBar().showMessage(msg)
+
+    def on_suggest_level(self, v):
+        self.view.suggest_min = float(v)
+        self.view.rebuild_extras()
+
+    def accept_suggestion(self, cand):
+        a = self.analysis
+        if cand in a.candidates:
+            a.candidates.remove(cand)
+        nb = core.add_band(a, cand["x"], cand["y"])
+        nb.user = True
+        if self.auto_lanes.isChecked():
+            core.auto_assign_lanes(a)
+        self.structure_changed()
+
+    def accept_all_suggestions(self):
+        a = self.analysis
+        cands = [c for c in a.candidates if c.get("score", 0) >= self.view.suggest_min]
+        for c in cands:
+            a.candidates.remove(c)
+            nb = core.add_band(a, c["x"], c["y"])
+            nb.user = True
+        if cands and self.auto_lanes.isChecked():
+            core.auto_assign_lanes(a)
+        self.structure_changed()
+        self.statusBar().showMessage(f"제안 상자 {len(cands)}개를 받았습니다")
 
     def set_analysis(self, a: core.Analysis):
         self.analysis = a
@@ -2287,7 +2443,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._figure_changed(self.doc)
 
     def add_band_at(self, x, y):
-        core.add_band(self.analysis, x, y)
+        core.add_band(self.analysis, x, y).user = True
         if self.auto_lanes.isChecked():
             core.auto_assign_lanes(self.analysis)
         self.structure_changed()
@@ -3102,6 +3258,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "sensitivity": self.sens.value(), "smooth": self.smooth.value(), "min_area": self.min_area.value(),
                 "pad": self.pad.value(), "edge": self.edge.value(), "lut_gamma": self.lut_gamma.value(),
                 "fill_lanes": self.fill_lanes.isChecked(), "snap_lanes": self.snap_lanes.isChecked(),
+                "method": self.method_combo.currentData(), "suggest_min": self.suggest_spin.value(),
+                "auto_tilt": self.auto_tilt.isChecked(),
             },
             "images": images,
             "big_groups": self.big_groups,
@@ -3261,6 +3419,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lut_gamma.setValue(det.get("lut_gamma", 0.6))
             self.fill_lanes.setChecked(det.get("fill_lanes", True))
             self.snap_lanes.setChecked(det.get("snap_lanes", True))
+            self.method_combo.setCurrentIndex(max(0, self.method_combo.findData(det.get("method", "legacy"))))
+            self.suggest_spin.setValue(float(det.get("suggest_min", 0.6)))
+            self.auto_tilt.setChecked(bool(det.get("auto_tilt", True)))
             docs, index = [], {}
             for i, im in enumerate(images):
                 path = self._relocate("블롯 이미지", im.get("image") or im.get("image_path"), p, embedded)
