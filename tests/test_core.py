@@ -374,3 +374,17 @@ def test_marker_orientation_candidates():
     turned = np.rot90(m, 1)
     fits = [core.orient(turned, tf) for tf in core.marker_orientations(turned.shape, m.shape)]
     assert any(f.shape == m.shape and np.allclose(f, m) for f in fits)
+
+
+def test_merge_bands_lane_by_lane():
+    a = core.Analysis(rows=[core.Row(name="P1", width=20, height=10), core.Row(name="P2", width=20, height=10)])
+    for lane in range(3):
+        a.bands.append(core.Band(row=0, lane=lane, cx=50 + 40 * lane, cy=100))
+        a.bands.append(core.Band(row=1, lane=lane, cx=50 + 40 * lane, cy=112))
+    # one band split into two rows: select both rows in every lane -> one box per lane
+    assert core.merge_bands(a, list(a.bands)) == 3
+    assert len(a.rows) == 1 and len(a.bands) == 3
+    assert a.rows[0].height == 22 and all(abs(b.cy - 106) <= 1 for b in a.bands)
+    # two neighbouring boxes of one row -> one wide box
+    assert core.merge_bands(a, a.bands[:2]) == 1
+    assert len(a.bands) == 2 and a.rows[0].width == 60

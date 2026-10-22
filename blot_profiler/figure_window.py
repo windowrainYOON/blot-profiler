@@ -388,6 +388,16 @@ class PreviewLabel(QtWidgets.QLabel):
             return
         super().mouseReleaseEvent(e)
 
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            sel = self.hit_object(e.position().toPoint())
+            if sel:  # double-click on an object: select it and start editing (drag to change)
+                self.select(sel)
+                if not self.edit_mode:
+                    self.modeToggled.emit(True)
+                return
+        super().mouseDoubleClickEvent(e)
+
     def contextMenuEvent(self, e):
         t = self.hit_text(e.pos())
         if t:
@@ -479,22 +489,28 @@ class FigureEditor(QtWidgets.QWidget):
         self._timer.setInterval(250)
         self._timer.timeout.connect(self.render)
 
+        # left: tools that add new things (lane names, groups, ladder marks, number rows)
         controls = QtWidgets.QWidget()
         cl = QtWidgets.QVBoxLayout(controls)
-        cl.addWidget(self._build_layout())
-        cl.addWidget(self._build_panels())
+        title = QtWidgets.QLabel("추가하기 — 이름 · 그룹 · 마커 · 숫자")
+        title.setStyleSheet("font-weight: bold; padding: 2px;")
+        cl.addWidget(title)
         cl.addWidget(self._build_tiers())
-        cl.addWidget(self._build_fonts())
-        cl.addWidget(self._build_style())
-        cl.addWidget(self._build_contrast())
         cl.addWidget(self._build_ladder())
         cl.addWidget(self._build_numbers())
-        cl.addWidget(self._build_export())
         cl.addStretch(1)
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(controls)
-        scroll.setMinimumWidth(330)
+        scroll = self._scrolled(controls)
+        scroll.setMinimumWidth(300)
+        # right: properties of what is already there (the selected object, the whole figure)
+        whole = QtWidgets.QWidget()
+        wl = QtWidgets.QVBoxLayout(whole)
+        wl.addWidget(self._build_layout())
+        wl.addWidget(self._build_panels())
+        wl.addWidget(self._build_style())
+        wl.addWidget(self._build_fonts())
+        wl.addWidget(self.ladder_display)
+        wl.addWidget(self._build_contrast())
+        wl.addStretch(1)
 
         self.preview = PreviewLabel()
         self.preview.setStyleSheet("background: white;")
@@ -509,11 +525,12 @@ class FigureEditor(QtWidgets.QWidget):
         pv.setWidgetResizable(True)
         pv.setWidget(self.preview)
         self.preview_area = pv
+        pv.viewport().installEventFilter(self)  # the preview follows the size of its pane
         self.size_label = QtWidgets.QLabel()
         pw = QtWidgets.QWidget()
         pl = QtWidgets.QVBoxLayout(pw)
         pl.setContentsMargins(0, 0, 0, 0)
-        self.w_editmode = QtWidgets.QCheckBox("편집 모드: 패널 가장자리·글자·마커 띠 드래그 (우클릭으로도 켜고 끔 · Esc 종료)")
+        self.w_editmode = QtWidgets.QCheckBox("편집 모드 — 대상을 더블클릭하면 켜집니다: 패널 가장자리·글자·마커 띠를 끌어서 수정 (Esc로 끝)")
         self.w_editmode.setToolTip("패널 위/아래 가장자리: 그 단백질 패널의 높이, 왼쪽/오른쪽: 모든 패널의 너비 (레인 정렬 유지).\n"
                                    "글자: 끌어서 이동 (우클릭: 크기·각도). 마커 띠: 왼쪽으로 끌면 블롯과 간격이 생깁니다.\n"
                                    "마커 띠와 kDa 눈금은 패널 범위를 따라갑니다. TIF를 미리보기에 끌어다 놓으면 이미지로 열립니다.")
@@ -553,19 +570,19 @@ class FigureEditor(QtWidgets.QWidget):
         self.right.addTab(pw, "미리보기")
         self.right.addTab(rw, "마커 참고 (크기 입력)")
         self.right.currentChanged.connect(lambda i: i == 1 and QtCore.QTimer.singleShot(0, self.ref.fit))
-        props_box = QtWidgets.QWidget()
-        pbl = QtWidgets.QVBoxLayout(props_box)
-        pbl.setContentsMargins(0, 0, 0, 0)
-        ptitle = QtWidgets.QLabel("선택한 대상 편집")
-        ptitle.setStyleSheet("font-weight: bold; padding: 4px;")
-        pbl.addWidget(ptitle)
-        pbl.addWidget(self._build_props(), 1)
+        self.props_tabs = QtWidgets.QTabWidget()
+        self.props_tabs.addTab(self._build_props(), "선택한 대상")
+        self.props_tabs.addTab(self._scrolled(whole), "그림 전체")
+        self.props_tabs.setMinimumWidth(280)
         split = QtWidgets.QSplitter()
         split.addWidget(scroll)
         split.addWidget(self.right)
-        split.addWidget(props_box)
-        split.setStretchFactor(1, 1)
-        split.setSizes([400, 800, 300])
+        split.addWidget(self.props_tabs)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 2)
+        split.setStretchFactor(2, 1)
+        split.setChildrenCollapsible(False)
+        split.setSizes([400, 800, 340])
         self.split = split
         note = QtWidgets.QLabel("그림의 대비는 보기용입니다. 정량값은 원본 raw intensity로 계산됩니다.")
         note.setStyleSheet("color: #1565c0; font-size: 11px;")
@@ -607,6 +624,15 @@ class FigureEditor(QtWidgets.QWidget):
         self.load_from_settings()
 
     # ------------------------------------------------------------ building blocks
+    @staticmethod
+    def _scrolled(w):
+        sc = QtWidgets.QScrollArea()
+        sc.setWidgetResizable(True)
+        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sc.setFrameShape(QtWidgets.QFrame.NoFrame)
+        sc.setWidget(w)
+        return sc
+
     def _group(self, title):
         g = QtWidgets.QGroupBox(title)
         return g
@@ -696,6 +722,10 @@ class FigureEditor(QtWidgets.QWidget):
         f.addRow("좌우 여백", hb)
         self.w_frame = _spin(0.0, 3.0, 0.8, 0.1, 1, " pt")
         f.addRow("테두리 두께", self.w_frame)
+        self.w_dpi = _spin(150, 2400, 600, 50, None, " dpi")
+        self.w_dpi.setToolTip("파일 → 'Figure 그림 저장'의 해상도")
+        self.w_dpi.valueChanged.connect(lambda v: self.set("export_dpi", int(v)))
+        f.addRow("저장 해상도", self.w_dpi)
         for w, key in ((self.w_width, "width_in"), (self.w_gap, "panel_gap_in"),
                        (self.w_ml, "margin_left_px"), (self.w_mr, "margin_right_px"), (self.w_frame, "frame_lw")):
             w.valueChanged.connect(lambda v, key=key: self.set(key, v))
@@ -737,7 +767,8 @@ class FigureEditor(QtWidgets.QWidget):
         self.marker_label.setWordWrap(True)
         hb.addWidget(self.marker_label, 1)
         l.addLayout(hb)
-        f = QtWidgets.QFormLayout()
+        self.ladder_display = self._group("마커 띠 · 크기 눈금 표시")
+        f = QtWidgets.QFormLayout(self.ladder_display)
         self.w_strip = QtWidgets.QCheckBox("마커 이미지 띠를 패널 왼쪽에 표시")
         f.addRow(self.w_strip)
         hb = QtWidgets.QHBoxLayout()
@@ -763,6 +794,7 @@ class FigureEditor(QtWidgets.QWidget):
         self.w_unit.addItems(["kDa", "bp"])
         self.w_unit.currentTextChanged.connect(lambda t: self.set("unit", t))
         f.addRow("단위", self.w_unit)
+        f2 = QtWidgets.QFormLayout()
         hb = QtWidgets.QHBoxLayout()
         self.w_preset = QtWidgets.QComboBox()
         self.w_preset.addItems(list(core.LADDER_PRESETS))
@@ -771,8 +803,8 @@ class FigureEditor(QtWidgets.QWidget):
         b.setToolTip("아래 표의 눈금(위쪽 밴드부터)에 고른 ladder의 크기를 차례로 넣습니다")
         b.clicked.connect(self.fill_preset)
         hb.addWidget(b)
-        f.addRow("ladder 종류", hb)
-        l.addLayout(f)
+        f2.addRow("ladder 종류", hb)
+        l.addLayout(f2)
         self.w_strip.toggled.connect(lambda on: self.set("show_strip", on))
         self.w_sx0.valueChanged.connect(lambda v: self.set("strip_x0", int(v)))
         self.w_sx1.valueChanged.connect(lambda v: self.set("strip_x1", int(v)))
@@ -796,19 +828,6 @@ class FigureEditor(QtWidgets.QWidget):
         b.clicked.connect(lambda: self.right.setCurrentIndex(1))
         hb.addWidget(b)
         l.addLayout(hb)
-        return g
-
-    def _build_export(self):
-        g = self._group("내보내기")
-        hb = QtWidgets.QHBoxLayout(g)
-        hb.addWidget(QtWidgets.QLabel("해상도"))
-        self.w_dpi = _spin(150, 2400, 600, 50, None, " dpi")
-        self.w_dpi.valueChanged.connect(lambda v: self.set("export_dpi", int(v)))
-        hb.addWidget(self.w_dpi)
-        b = QtWidgets.QPushButton("그림 저장 (PNG/TIFF/PDF/SVG)…")
-        b.setStyleSheet("font-weight: bold;")
-        b.clicked.connect(self.export)
-        hb.addWidget(b, 1)
         return g
 
     # ------------------------------------------------------------ settings <-> widgets
@@ -1452,6 +1471,7 @@ class FigureEditor(QtWidgets.QWidget):
     def on_object_selected(self, sel):
         self.selection = sel
         self.show_props(sel)
+        self.props_tabs.setCurrentIndex(0)
 
     def show_props(self, sel):
         self._clear_props()
@@ -1944,23 +1964,29 @@ class FigureEditor(QtWidgets.QWidget):
     def _show_preview(self):
         if self._png is None:
             return
-        avail = self.preview_area.viewport().width() - 10
+        vp = self.preview_area.viewport()
+        aw, ah = vp.width() - 10, vp.height() - 10
         pm = self._png
-        if pm.width() > avail > 50:
-            pm = pm.scaledToWidth(avail, Qt.SmoothTransformation)
+        if aw > 50 and ah > 50 and (pm.width() > aw or pm.height() > ah):  # fit the window, keep the aspect ratio
+            pm = pm.scaled(aw, ah, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.preview.setPixmap(pm)
 
     def showEvent(self, e):
         super().showEvent(e)
         total = sum(self.split.sizes()) or self.width()
-        if total > 600:  # settings | preview | selected-object properties
-            self.split.setSizes([int(total * 0.3), int(total * 0.48), total - int(total * 0.3) - int(total * 0.48)])
+        if total > 600:  # add tools | preview | properties
+            self.split.setSizes([int(total * 0.27), int(total * 0.48), total - int(total * 0.27) - int(total * 0.48)])
         if self.dirty or self.doc is not self.main.doc:
             self.set_doc(self.main.doc)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
         QtCore.QTimer.singleShot(0, self._show_preview)
+
+    def eventFilter(self, obj, e):
+        if e.type() == QtCore.QEvent.Resize and obj is self.preview_area.viewport():
+            QtCore.QTimer.singleShot(0, self._show_preview)
+        return super().eventFilter(obj, e)
 
     def export(self):
         if not self.ready():
