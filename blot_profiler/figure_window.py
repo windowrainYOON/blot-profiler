@@ -541,7 +541,7 @@ class FigureEditor(QtWidgets.QWidget):
 
         self.ref = ReferenceView()
         self.ref.clicked.connect(self.add_kda_at)
-        self.ref.markerDropped.connect(lambda p: self._load_marker(p))
+        self.ref.markerDropped.connect(lambda p: QtCore.QTimer.singleShot(0, lambda: self._load_marker(p)))
         self.ref.regionDrawn.connect(lambda x0, x1: self.set_strip_region(x0, x1, None))
         rw = QtWidgets.QWidget()
         rl = QtWidgets.QVBoxLayout(rw)
@@ -1290,8 +1290,10 @@ class FigureEditor(QtWidgets.QWidget):
         self.render()
 
     def on_files_dropped(self, paths):
-        self.main.open_paths(paths)
-        self.main.open_figure_window()
+        def go():
+            self.main.open_paths(paths)
+            self.main.open_figure_window()
+        QtCore.QTimer.singleShot(0, go)  # after the drop has finished (dialogs may open)
 
     # ladder / kDa
     def _update_marker_label(self):

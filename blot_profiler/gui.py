@@ -899,7 +899,7 @@ class MarkerStepDialog(QtWidgets.QDialog):
         lay.addWidget(steps)
         info = QtWidgets.QLabel(
             "방금 연 블롯과 <b>같은 막(membrane)을 같은 자리에서 찍은 마커 사진</b>(white-light / marker 채널)을 넣어 주세요.<br>"
-            "보통 이미저가 블롯과 함께 저장하는 '…Marker…' 파일이며, <b>블롯과 크기(픽셀 수)가 같아야</b> 합니다.<br>"
+            "보통 이미저가 블롯과 함께 저장하는 '…Marker…' 파일입니다. 크기(픽셀 수)가 달라도 <b>가로세로 비율이 비슷하면</b> 블롯 크기에 맞춰 불러옵니다.<br>"
             "마커는 밴드 박스를 잡을 때 옆에 참고용으로 보이고, Figure에서 ladder 띠와 kDa 눈금에 쓰입니다. 정량에는 쓰이지 않습니다.")
         info.setWordWrap(True)
         lay.addWidget(info)
@@ -920,6 +920,8 @@ class MarkerStepDialog(QtWidgets.QDialog):
         lay.addLayout(row, 1)
         self.state = QtWidgets.QLabel()
         self.state.setWordWrap(True)
+        self.state.setMinimumHeight(48)
+        self.state.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         lay.addWidget(self.state)
         # orientation of the marker photo: one button per orientation that fits the blot
         self.orient_box = QtWidgets.QGroupBox("마커 방향 (블롯과 같은 방향을 고르세요)")
@@ -951,7 +953,7 @@ class MarkerStepDialog(QtWidgets.QDialog):
         else:
             self.state.setText("같은 폴더에서 짝이 되는 마커 파일을 찾지 못했습니다. 마커 사진이 없으면 '건너뛰기'를 누르세요. "
                                "(나중에 1번 탭의 '마커 열기…'로 넣을 수 있습니다)")
-        self.resize(760, 520)
+        self.resize(800, 640)
 
     def _thumb(self, a01) -> QtGui.QPixmap:
         qimg = to_qimage(a01, 0.0, 1.0)
@@ -1001,7 +1003,8 @@ class MarkerStepDialog(QtWidgets.QDialog):
         except Exception as e:
             self.state.setText(f"<span style='color:#c62828'>열 수 없는 이미지입니다: {e}</span>")
             return
-        H, W = self.doc.raw.shape
+        base = self.doc.raw_orig if self.doc.raw_orig is not None else self.doc.raw  # before rotation/crop
+        H, W = base.shape
         self._marker_raw = m
         cands = core.marker_orientations(m.shape, (H, W))
         self.marker_thumb.setStyleSheet("border: 2px solid #1e88ff; background: white;")
@@ -1020,12 +1023,13 @@ class MarkerStepDialog(QtWidgets.QDialog):
         mh, mw = m.shape
         if (mh, mw) == (H, W):
             msg = f"<span style='color:#2e7d32'>✓ {'자동으로 찾은 마커' if found else '선택한 마커'}: <b>{name}</b> — 크기가 블롯과 같습니다 ({mw}×{mh}).</span>"
-        elif abs(mw / mh - W / H) <= 0.01 * (W / H):
-            msg = (f"<span style='color:#ef6c00'>⚠ {name}: 크기({mw}×{mh})가 블롯({W}×{H})과 달라 같은 비율로 맞춥니다. "
-                   "같은 위치에서 찍은 사진인지 확인하세요.</span>")
+        elif core._aspect_ok((mh, mw), (H, W)):
+            msg = (f"<span style='color:#ef6c00'>⚠ {name}: 크기({mw}×{mh})가 블롯({W}×{H})과 달라 블롯 크기에 맞춰 불러옵니다 "
+                   f"(비율 차이 {100 * core.aspect_error((mh, mw), (H, W)):.1f}%). 같은 막을 찍은 사진인지 확인하세요.</span>")
         else:
-            self.state.setText(f"<span style='color:#c62828'>✗ {name}: 가로세로 비율이 블롯과 달라 쓸 수 없습니다 "
-                               f"({mw}×{mh} vs {W}×{H}). 같은 막을 찍은 마커 사진을 고르세요.</span>")
+            self.state.setText(f"<span style='color:#c62828'>✗ {name}: 가로세로 비율이 블롯과 너무 달라 쓸 수 없습니다 "
+                               f"({mw}×{mh} vs {W}×{H}, 차이 {100 * core.aspect_error((mh, mw), (H, W)):.0f}% — "
+                               f"{100 * core.MARKER_ASPECT_TOL:.0f}%까지 허용). 같은 막을 찍은 마커 사진을 고르세요.</span>")
             self.path = None
             self.ok.setEnabled(False)
             return
@@ -1034,14 +1038,25 @@ class MarkerStepDialog(QtWidgets.QDialog):
         self.ok.setEnabled(True)
         self.add_btn.setText("다른 마커 이미지 고르기…")
 
+    @staticmethod
+    def _image_urls(e):
+        exts = (".tif", ".tiff", ".png", ".jpg", ".jpeg")
+        return [u.toLocalFile() for u in e.mimeData().urls() if u.toLocalFile().lower().endswith(exts)]
+
     def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
+        if self._image_urls(e):
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        if self._image_urls(e):
             e.acceptProposedAction()
 
     def dropEvent(self, e):
-        urls = [u.toLocalFile() for u in e.mimeData().urls() if u.toLocalFile()]
+        urls = self._image_urls(e)
         if urls:
-            self.set_path(urls[0])
+            e.acceptProposedAction()
+            # handle it after the drop has finished (no file dialogs inside the drag session)
+            QtCore.QTimer.singleShot(0, lambda: self.set_path(urls[0]))
 
 
 class ImageDoc:
@@ -1114,7 +1129,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.selectionChangedBands.connect(self.on_view_selection)
         self.view.contextRequested.connect(self.show_band_menu)
         self.view.addRequested.connect(self.add_band_at)
-        self.view.filesDropped.connect(self.open_paths)
+        # dropped files are opened once the drop has finished: the marker step window runs its own
+        # event loop and, inside a drag session (macOS), its file dialog and drops do not work
+        self.view.filesDropped.connect(lambda ps: QtCore.QTimer.singleShot(0, lambda: self.open_paths(ps)))
         self.view.editRequested.connect(self.edit_band_size)
         self.view.drawn.connect(lambda k, *xy: self.set_draw_mode(None) if k == "cancel" else self.on_drawn(k, *xy))
         self.view.resizeModeExited.connect(lambda: self.resize_mode.setChecked(False))
@@ -1760,7 +1777,10 @@ class MainWindow(QtWidgets.QMainWindow):
             e.acceptProposedAction()
 
     def dropEvent(self, e):
-        self.open_paths([u.toLocalFile() for u in e.mimeData().urls() if u.toLocalFile()])
+        paths = [u.toLocalFile() for u in e.mimeData().urls() if u.toLocalFile()]
+        if paths:
+            e.acceptProposedAction()
+            QtCore.QTimer.singleShot(0, lambda: self.open_paths(paths))
 
     @staticmethod
     def is_marker_file(p: str) -> bool:

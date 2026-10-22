@@ -568,7 +568,7 @@ def match_marker(marker: np.ndarray, shape) -> np.ndarray:
         return marker
     mh, mw = marker.shape
     H, W = shape
-    if abs(mw / mh - W / H) > 0.01 * (W / H):
+    if abs(mw / mh - W / H) > core.MARKER_ASPECT_TOL * (W / H):
         raise ValueError(f"마커 이미지({mw}×{mh})와 블롯 이미지({W}×{H})의 가로세로 비율이 다릅니다")
     from scipy import ndimage as ndi
 
