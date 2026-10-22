@@ -1436,3 +1436,58 @@ def suggest_gel_crop(raw: np.ndarray, inset: float = 0.015) -> Optional[List[int
     y0, x0, y1, x1 = rps[0].bbox
     dx, dy = int(inset * (x1 - x0)), int(inset * (y1 - y0))
     return [x0 + dx, y0 + dy, x1 - dx, y1 - dy]
+
+
+# --------------------------------------------------------------------------
+# Marker orientation (white-light photo exported turned relative to the blot)
+# --------------------------------------------------------------------------
+
+MARKER_ORIENTATIONS = [  # (rot90, flip, label)
+    (0, False, "원래대로"),
+    (1, False, "90° 반시계"),
+    (3, False, "90° 시계"),
+    (2, False, "180°"),
+    (0, True, "좌우 반전"),
+    (1, True, "90° 반시계 + 좌우 반전"),
+    (3, True, "90° 시계 + 좌우 반전"),
+    (2, True, "180° + 좌우 반전"),
+]
+
+
+def orient(img: np.ndarray, tf: Optional[dict]) -> np.ndarray:
+    """Quarter turns (counter-clockwise), then a left-right mirror."""
+    if not tf:
+        return img
+    out = np.rot90(img, k=int(tf.get("rot90", 0)) % 4)
+    if tf.get("flip"):
+        out = out[:, ::-1]
+    return np.ascontiguousarray(out)
+
+
+def _aspect_ok(shape, target, tol=0.02) -> bool:
+    a, b = shape[1] / shape[0], target[1] / target[0]
+    return abs(a - b) <= tol * b
+
+
+def marker_orientations(marker_shape, blot_shape) -> list:
+    """Orientations whose width/height fit the blot, most likely first.
+
+    When the marker is "portrait" and the blot "landscape" (or the other way
+    round) only the quarter turns fit; which of the two is right cannot be told
+    reliably from a white-light photo and a chemiluminescence image, so the user
+    confirms it.
+    """
+    out = []
+    for k, flip, label in MARKER_ORIENTATIONS:
+        shape = marker_shape if k % 2 == 0 else marker_shape[::-1]
+        if _aspect_ok(shape, blot_shape):
+            out.append({"rot90": k, "flip": flip, "label": label})
+    return out
+
+
+def orientation_label(tf: Optional[dict]) -> str:
+    tf = tf or {}
+    for k, flip, label in MARKER_ORIENTATIONS:
+        if k == int(tf.get("rot90", 0)) % 4 and flip == bool(tf.get("flip", False)):
+            return label
+    return "원래대로"
