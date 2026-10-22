@@ -164,6 +164,7 @@ class Band:
     lane: int  # 0-based physical lane index
     cx: float  # box centre x
     cy: float  # box centre y
+    user: bool = False  # placed or moved by the user: kept when detecting again
 
     def box(self, rows: Sequence[Row]):
         r = rows[self.row]
@@ -179,6 +180,9 @@ class Analysis:
     lane_labels: List[str] = field(default_factory=list)  # lane group name of each physical lane
     named_lanes: List[str] = field(default_factory=list)  # lane group names the user gave (kept by auto lanes)
     ladder_row: Optional[str] = None  # DNA gel: protein-group (row) name holding the ladder bands
+    method: str = "legacy"  # detection method that made the boxes ("lane" = lane-first)
+    lane_geom: List[dict] = field(default_factory=list)  # lane-first: {x0, slope, half} per lane (x at mid-height)
+    candidates: List[dict] = field(default_factory=list)  # lane-first: suggested boxes {x, y, w, h, score}
     formulas: List[Dict[str, str]] = field(default_factory=list)  # {name, expr, normalize}
 
     @property
@@ -243,10 +247,13 @@ class Analysis:
     def from_dict(cls, d: dict) -> "Analysis":
         a = cls()
         a.rows = [Row(**r) for r in d.get("rows", [])]
-        a.bands = [Band(**{k: b[k] for k in ("row", "lane", "cx", "cy")}) for b in d.get("bands", [])]
+        a.bands = [Band(**{k: b[k] for k in ("row", "lane", "cx", "cy", "user") if k in b}) for b in d.get("bands", [])]
         a.lane_labels = list(d.get("lane_labels", []))
         a.named_lanes = list(d.get("named_lanes", []))
         a.ladder_row = d.get("ladder_row")
+        a.method = d.get("method", "legacy")
+        a.lane_geom = [dict(x) for x in d.get("lane_geom", [])]
+        a.candidates = [dict(x) for x in d.get("candidates", [])]
         a.formulas = [dict(f) for f in d.get("formulas", [])]
         return a
 
@@ -773,6 +780,8 @@ def auto_assign_lanes(a: Analysis) -> bool:
     if not a.bands:
         return False
     a.ensure_lane_labels()
+    if a.method == "lane" and a.lane_geom:
+        return _assign_to_lane_lines(a)
     named = set(a.named_lanes)
     gap = 0.5 * float(np.median([a.rows[b.row].width for b in a.bands]))
     order = sorted(a.bands, key=lambda b: b.cx)
@@ -797,6 +806,24 @@ def auto_assign_lanes(a: Analysis) -> bool:
         for b in a.bands:
             b.lane = new_lane[id(b)]
         a.lane_labels = labels
+        a.bands.sort(key=lambda b: (b.row, b.lane))
+    return changed
+
+
+def _assign_to_lane_lines(a: Analysis) -> bool:
+    """Lane-first results: each box belongs to the nearest lane line at its height
+    (lanes may be slanted, so x alone would split them)."""
+    geom = a.lane_geom
+    changed = False
+    for b in a.bands:
+        xs = [g["x0"] + g["slope"] * (b.cy - g.get("ymid", 0.0)) for g in geom]
+        lane = int(np.argmin([abs(x - b.cx) for x in xs]))
+        if lane != b.lane:
+            b.lane = lane
+            changed = True
+    while len(a.lane_labels) < len(geom):
+        a.lane_labels.append(unique_name(f"L{len(a.lane_labels) + 1}", a.lane_labels))
+    if changed:
         a.bands.sort(key=lambda b: (b.row, b.lane))
     return changed
 
