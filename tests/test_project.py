@@ -126,3 +126,28 @@ def test_old_json_project_still_opens(app, tmp_path):
     assert w.doc.image_path == str(blot)
     assert len(w.analysis.bands) == len(a.bands)
     assert w.sens.value() == pytest.approx(1.2)
+
+
+def test_two_projects_together(app, tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    w = gui.MainWindow()
+    _make_session(w, str(src))
+    p1 = str(tmp_path / "a.blotproj")
+    w.write_project(p1, embed=True)
+    w.write_project(str(tmp_path / "b.blotproj"), embed=True)
+    w2 = gui.MainWindow()
+    w2.open_projects([p1, str(tmp_path / "b.blotproj")], ask_save=False)
+    assert len(w2.docs) == 4
+    assert [d.project for d in w2.docs] == ["a", "a", "b", "b"]
+    # the second project's formula now points at its own images (I3, I4) and has its own name
+    names = [f["name"] for f in w2.multi_formulas]
+    assert len(names) == 2 and len(set(names)) == 2
+    assert w2.multi_formulas[1]["expr"] == "I3.Vinculin / I4.P1"
+    assert [m[0] for m in w2.big_groups[1]["members"]] == [2, 3]
+    assert w2.big_groups[1]["name"] != w2.big_groups[0]["name"]
+    assert w2.project_path is None
+    # a formula across the two projects
+    w2.multi_formulas.append({"name": "ab", "expr": "I1.Vinculin / I3.Vinculin", "normalize": "1"})
+    w2.recompute_multi()
+    assert "ab" in w2.multi_results
