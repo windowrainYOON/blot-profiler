@@ -1525,7 +1525,10 @@ def orient(img: np.ndarray, tf: Optional[dict]) -> np.ndarray:
     return np.ascontiguousarray(out)
 
 
-def _aspect_ok(shape, target, tol=0.02) -> bool:
+MARKER_ASPECT_TOL = 0.05  # marker photos may be cropped a little differently from the blot
+
+
+def _aspect_ok(shape, target, tol=MARKER_ASPECT_TOL) -> bool:
     a, b = shape[1] / shape[0], target[1] / target[0]
     return abs(a - b) <= tol * b
 
@@ -1544,6 +1547,12 @@ def marker_orientations(marker_shape, blot_shape) -> list:
         if _aspect_ok(shape, blot_shape):
             out.append({"rot90": k, "flip": flip, "label": label})
     return out
+
+
+def aspect_error(shape, target) -> float:
+    """Relative difference of the width/height ratios."""
+    a, b = shape[1] / shape[0], target[1] / target[0]
+    return abs(a - b) / b
 
 
 def orientation_label(tf: Optional[dict]) -> str:
