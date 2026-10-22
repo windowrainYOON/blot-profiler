@@ -881,6 +881,15 @@ class MarkerStepDialog(QtWidgets.QDialog):
         self.state = QtWidgets.QLabel()
         self.state.setWordWrap(True)
         lay.addWidget(self.state)
+        # orientation of the marker photo: one button per orientation that fits the blot
+        self.orient_box = QtWidgets.QGroupBox("마커 방향 (블롯과 같은 방향을 고르세요)")
+        self.orient_row = QtWidgets.QHBoxLayout(self.orient_box)
+        self.orient_group = QtWidgets.QButtonGroup(self)
+        self.orient_group.setExclusive(True)
+        self.orient_box.setVisible(False)
+        lay.addWidget(self.orient_box)
+        self.marker_tf = {"rot90": 0, "flip": False}
+        self._marker_raw = None
         self.add_btn = QtWidgets.QPushButton("마커 이미지 추가하기…")
         self.add_btn.setStyleSheet("font-size: 15px; font-weight: bold; padding: 10px;")
         self.add_btn.clicked.connect(self.choose)
@@ -914,6 +923,38 @@ class MarkerStepDialog(QtWidgets.QDialog):
         if p:
             self.set_path(p)
 
+    def _marker_display(self, m):
+        x = figure._stretch(m, 1, 99.5, 1.0)
+        return 1.0 - x if not core.needs_inversion(m) else x
+
+    def _fill_orientations(self, cands):
+        while self.orient_row.count():
+            it = self.orient_row.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        for b in self.orient_group.buttons():
+            self.orient_group.removeButton(b)
+        disp = self._marker_display(self._marker_raw)
+        for i, c in enumerate(cands):
+            btn = QtWidgets.QToolButton()
+            btn.setCheckable(True)
+            btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            pm = QtGui.QPixmap.fromImage(to_qimage(core.orient(disp, c), 0.0, 1.0)).scaledToHeight(80, Qt.SmoothTransformation)
+            btn.setIcon(QtGui.QIcon(pm))
+            btn.setIconSize(pm.size())
+            btn.setText(c["label"])
+            btn.clicked.connect(lambda _=None, c=c: self.choose_orientation(c))
+            self.orient_group.addButton(btn, i)
+            self.orient_row.addWidget(btn)
+            if i == 0:
+                btn.setChecked(True)
+        self.orient_row.addStretch(1)
+        self.orient_box.setVisible(len(cands) > 1)
+
+    def choose_orientation(self, c):
+        self.marker_tf = {"rot90": c["rot90"], "flip": c["flip"]}
+        self.marker_thumb.setPixmap(self._thumb(core.orient(self._marker_display(self._marker_raw), self.marker_tf)))
+
     def set_path(self, p: str, found: bool = False):
         try:
             m = core.load_image(p)
@@ -921,13 +962,22 @@ class MarkerStepDialog(QtWidgets.QDialog):
             self.state.setText(f"<span style='color:#c62828'>열 수 없는 이미지입니다: {e}</span>")
             return
         H, W = self.doc.raw.shape
-        mh, mw = m.shape
-        x = figure._stretch(m, 1, 99.5, 1.0)
-        if not core.needs_inversion(m):
-            x = 1.0 - x
-        self.marker_thumb.setPixmap(self._thumb(x))
+        self._marker_raw = m
+        cands = core.marker_orientations(m.shape, (H, W))
         self.marker_thumb.setStyleSheet("border: 2px solid #1e88ff; background: white;")
         name = os.path.basename(p)
+        turned = ""
+        if cands:
+            self.choose_orientation(cands[0])
+            self._fill_orientations(cands)
+            if cands[0]["rot90"] % 2:
+                turned = (f"<br><span style='color:#1565c0'>⟳ 마커의 가로·세로가 블롯과 바뀌어 있어 '{cands[0]['label']}'로 돌려 맞췄습니다. "
+                          "아래 '마커 방향'에서 블롯과 같은 방향인지 확인하고, 아니면 다른 방향을 고르세요.</span>")
+            m = core.orient(m, self.marker_tf)
+        else:
+            self.marker_thumb.setPixmap(self._thumb(self._marker_display(m)))
+            self.orient_box.setVisible(False)
+        mh, mw = m.shape
         if (mh, mw) == (H, W):
             msg = f"<span style='color:#2e7d32'>✓ {'자동으로 찾은 마커' if found else '선택한 마커'}: <b>{name}</b> — 크기가 블롯과 같습니다 ({mw}×{mh}).</span>"
         elif abs(mw / mh - W / H) <= 0.01 * (W / H):
@@ -939,7 +989,7 @@ class MarkerStepDialog(QtWidgets.QDialog):
             self.path = None
             self.ok.setEnabled(False)
             return
-        self.state.setText(msg + ("<br>맞으면 '이 마커 사용', 다른 파일이면 '마커 이미지 추가하기…'로 바꾸세요." if found else ""))
+        self.state.setText(msg + turned + ("<br>맞으면 '이 마커 사용', 다른 파일이면 '마커 이미지 추가하기…'로 바꾸세요." if found else ""))
         self.path = p
         self.ok.setEnabled(True)
         self.add_btn.setText("다른 마커 이미지 고르기…")
@@ -972,6 +1022,7 @@ class ImageDoc:
         self.marker: Optional[np.ndarray] = None  # ladder/marker image (not saved, path is)
         self.mode = core.MODE_WESTERN  # or core.MODE_GEL
         self.transform = core.default_transform()  # rotation / crop applied to the file's pixels
+        self.marker_tf = {"rot90": 0, "flip": False}  # how the marker photo is turned to match the blot
         self.raw_orig: Optional[np.ndarray] = None  # the file as loaded (before rotation/crop)
         self.marker_orig: Optional[np.ndarray] = None
 
@@ -1261,6 +1312,17 @@ class MainWindow(QtWidgets.QMainWindow):
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #1565c0; font-size: 11px;")
         f.addRow(hint)
+        hb = QtWidgets.QHBoxLayout()
+        self.marker_orient = QtWidgets.QComboBox()
+        for k, flip, label in core.MARKER_ORIENTATIONS:
+            self.marker_orient.addItem(label, f"{k},{int(flip)}")
+        self.marker_orient.setToolTip("마커 사진을 돌리거나 뒤집어 블롯과 같은 방향으로 맞춥니다")
+        self.marker_orient.currentIndexChanged.connect(self.on_marker_orient)
+        hb.addWidget(self.marker_orient, 1)
+        self.auto_orient_marker = QtWidgets.QCheckBox("가로·세로가 바뀐 마커는 자동으로 90° 돌리기")
+        self.auto_orient_marker.setChecked(True)
+        hb.addWidget(self.auto_orient_marker)
+        f.addRow("마커 방향", hb)
         self.ask_marker = QtWidgets.QCheckBox("블롯 TIF를 열면 짝이 되는 마커 이미지도 받기")
         self.ask_marker.setToolTip("같은 폴더에 '…Marker…' 파일이 있으면 자동으로 붙이고, 없으면 마커 파일을 고르는 창을 띄웁니다 (취소 = 건너뛰기)")
         self.ask_marker.setChecked(True)
@@ -1693,11 +1755,15 @@ class MainWindow(QtWidgets.QMainWindow):
         path = self.find_marker_for(d.image_path, candidates)
         if path and path in candidates:
             if self.set_marker(d, path):
-                self.statusBar().showMessage(f"함께 연 마커 이미지를 붙였습니다: {os.path.basename(path)}")
+                turned = int(d.marker_tf.get("rot90", 0)) % 2 == 1
+                self.statusBar().showMessage(
+                    f"함께 연 마커 이미지를 붙였습니다: {os.path.basename(path)}" +
+                    (f" — 가로·세로가 바뀌어 있어 '{core.orientation_label(d.marker_tf)}'로 돌려 맞췄습니다. "
+                     "방향이 다르면 1번 탭 '마커 방향'에서 고르세요." if turned else ""))
             return
         dlg = MarkerStepDialog(self, d, path)
         if dlg.exec() == QtWidgets.QDialog.Accepted and dlg.path:
-            if self.set_marker(d, dlg.path):
+            if self.set_marker(d, dlg.path, marker_tf=dlg.marker_tf):
                 self.statusBar().showMessage(f"마커 이미지를 붙였습니다: {os.path.basename(dlg.path)} — 왼쪽 마커 위 파란 상자로 띠 영역을 고칠 수 있습니다")
 
     def open_marker(self):
@@ -1709,11 +1775,26 @@ class MainWindow(QtWidgets.QMainWindow):
         if p:
             self.set_marker(self.doc, p)
 
-    def set_marker(self, d: ImageDoc, path: str, quiet: bool = False) -> bool:
-        """Attach a marker image (same geometry as the blot) to image ``d``."""
+    def set_marker(self, d: ImageDoc, path: str, quiet: bool = False, marker_tf: Optional[dict] = None) -> bool:
+        """Attach a marker image (same geometry as the blot) to image ``d``.
+
+        ``marker_tf`` turns/mirrors the photo first; None = keep it as is, or, when
+        its width and height are swapped relative to the blot and the option is on,
+        turn it 90° so they fit (the step window lets the user confirm the direction).
+        """
         try:
             m = core.load_image(path)
             base = d.raw_orig if d.raw_orig is not None else d.raw
+            turned = False
+            if marker_tf is None:
+                marker_tf = {"rot90": 0, "flip": False}
+                if self.auto_orient_marker.isChecked() and not core._aspect_ok(m.shape, base.shape):
+                    cands = core.marker_orientations(m.shape, base.shape)
+                    if cands:
+                        marker_tf = {"rot90": cands[0]["rot90"], "flip": cands[0]["flip"]}
+                        turned = True
+            marker_tf = {"rot90": int(marker_tf.get("rot90", 0)) % 4, "flip": bool(marker_tf.get("flip", False))}
+            m = core.orient(m, marker_tf)
             resized = m.shape != base.shape
             if resized:
                 m = figure.match_marker(m, base.shape)
@@ -1726,7 +1807,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if resized and not quiet:
             QtWidgets.QMessageBox.information(self, "마커 이미지 크기", "마커 이미지의 크기가 블롯과 달라 같은 비율로 맞췄습니다. "
                                               "두 이미지가 같은 위치에서 찍힌 것인지 확인하세요.")
+        d.marker_tf = marker_tf
         d.marker = m
+        if turned:
+            self.statusBar().showMessage(f"마커의 가로·세로가 블롯과 바뀌어 있어 '{core.orientation_label(marker_tf)}'로 돌려 맞췄습니다. "
+                                         "방향이 다르면 1번 탭 '마커 방향'에서 고르세요.")
         if d.figure is None:
             d.figure = figure.default_settings()
         s = d.figure
@@ -1741,6 +1826,35 @@ class MainWindow(QtWidgets.QMainWindow):
             self.view.fit()
             self._figure_changed(d)
         return True
+
+    def on_marker_orient(self, *_):
+        d = self.doc
+        if self._updating or d.marker is None or not (d.figure or {}).get("marker_path"):
+            return
+        k, flip = (int(x) for x in self.marker_orient.currentData().split(","))
+        flip = bool(flip)
+        base = d.raw_orig if d.raw_orig is not None else d.raw
+        try:
+            raw_m = core.load_image(d.figure["marker_path"])
+        except Exception:
+            raw_m = None
+        if raw_m is not None and not core._aspect_ok(core.orient(raw_m, {"rot90": k, "flip": flip}).shape, base.shape):
+            QtWidgets.QMessageBox.information(self, "마커 방향", "이 방향으로는 마커의 가로·세로가 블롯과 맞지 않습니다.")
+            self.sync_marker_orient()
+            return
+        self.set_marker(d, d.figure["marker_path"], marker_tf={"rot90": k, "flip": flip})
+        self.statusBar().showMessage(f"마커 방향: {core.orientation_label(d.marker_tf)}")
+
+    def sync_marker_orient(self):
+        d = self.doc
+        self._updating = True
+        try:
+            tf = d.marker_tf or {}
+            i = self.marker_orient.findData(f"{int(tf.get('rot90', 0)) % 4},{int(bool(tf.get('flip', False)))}")
+            self.marker_orient.setCurrentIndex(max(0, i))
+            self.marker_orient.setEnabled(d.marker is not None)
+        finally:
+            self._updating = False
 
     def clear_marker(self):
         d = self.doc
@@ -1760,6 +1874,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.set_marker(d, d.figure["marker_path"], quiet=True)
             return
         self.marker_label.setText(os.path.basename(d.figure["marker_path"]) if m is not None and d.figure else "없음")
+        self.sync_marker_orient()
         if m is None or not self.show_marker.isChecked():
             self.view.set_marker(None)
             return
@@ -2976,7 +3091,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "image": projfile.file_ref(d.image_path, pp, arc.get(d.image_path)),
                 "marker": projfile.file_ref(marker, pp, arc.get(marker)) if marker else None,
                 "invert": d.invert, "background": vars(d.bg), "reference_lane": d.ref_lane,
-                "mode": d.mode, "transform": d.transform,
+                "mode": d.mode, "transform": d.transform, "marker_tf": d.marker_tf,
                 "analysis": d.analysis.to_dict(), "figure": d.figure,
             })
         return {
@@ -3168,7 +3283,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if mref:
                     mpath = self._relocate("마커 이미지", mref, p, embedded, optional=True)
                     if mpath:
-                        self.set_marker(doc, mpath, quiet=True)
+                        self.set_marker(doc, mpath, quiet=True, marker_tf=im.get("marker_tf"))
                     elif doc.figure:
                         doc.figure["marker_path"] = None
                 index[i] = len(docs)

@@ -356,3 +356,21 @@ def test_gel_mode_detects_ladders_and_samples():
     # a western blot is not mistaken for a gel
     w = core.to_signal(core.load_image(os.path.join(DATA, "example_blot.tif")))
     assert not core.looks_like_gel(core.corrected_signal(w, core.BackgroundSettings()))
+
+
+def test_marker_orientation_candidates():
+    blot = (1024, 1408)
+    # same aspect: unchanged first
+    c = core.marker_orientations((1024, 1408), blot)
+    assert c[0] == {"rot90": 0, "flip": False, "label": "원래대로"}
+    # swapped: only quarter turns fit
+    c = core.marker_orientations((1408, 1024), blot)
+    assert {x["rot90"] for x in c} == {1, 3}
+    img = np.arange(12.0).reshape(3, 4)
+    assert core.orient(core.orient(img, {"rot90": 1}), {"rot90": 3}).tolist() == img.tolist()
+    assert core.orient(img, {"rot90": 0, "flip": True})[0, 0] == img[0, -1]
+    # a marker turned by 90 degrees fits the blot again after one of the candidates
+    m = np.random.default_rng(0).random((40, 60))
+    turned = np.rot90(m, 1)
+    fits = [core.orient(turned, tf) for tf in core.marker_orientations(turned.shape, m.shape)]
+    assert any(f.shape == m.shape and np.allclose(f, m) for f in fits)
