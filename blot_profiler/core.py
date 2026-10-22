@@ -475,6 +475,40 @@ def _split_rows(sub: np.ndarray):
     return [(a, b) for a, b in zip(cuts[:-1], cuts[1:]) if b > a]
 
 
+def merge_bands(a: Analysis, bands: Sequence[Band]) -> int:
+    """Merge the selected boxes. Several boxes in one lane (e.g. one band split in two rows,
+    selected across lanes) merge lane by lane; one box per lane merges into a single box.
+    The merged box covers all of them; its row grows to that size (rows keep one box size).
+    Returns the number of boxes made."""
+    bands = list(bands)
+    if len(bands) < 2:
+        return 0
+    by_lane: Dict[int, List[Band]] = {}
+    for b in bands:
+        by_lane.setdefault(b.lane, []).append(b)
+    groups = [g for g in by_lane.values() if len(g) > 1] or [bands]
+    rows_used = [b.row for g in groups for b in g]
+    target = max(set(rows_used), key=lambda r: (rows_used.count(r), -r))
+    made = []
+    need_w, need_h = a.rows[target].width, a.rows[target].height
+    for g in groups:
+        boxes = [b.box(a.rows) for b in g]
+        x0 = min(x for x, _, _, _ in boxes)
+        y0 = min(y for _, y, _, _ in boxes)
+        x1 = max(x + w for x, _, w, _ in boxes)
+        y1 = max(y + h for _, y, _, h in boxes)
+        need_w, need_h = max(need_w, x1 - x0), max(need_h, y1 - y0)
+        lanes = [b.lane for b in g]
+        made.append(Band(row=target, lane=min(set(lanes), key=lambda l: (-lanes.count(l), l)),
+                         cx=(x0 + x1) / 2.0, cy=(y0 + y1) / 2.0, user=True))
+    gone = {id(b) for g in groups for b in g}
+    a.bands = [b for b in a.bands if id(b) not in gone] + made
+    a.rows[target].width, a.rows[target].height = int(need_w), int(need_h)
+    a.bands.sort(key=lambda b: (b.row, b.lane))
+    remove_empty(a)
+    return len(made)
+
+
 def _cluster_1d(values: Sequence[float], gap: float) -> List[List[int]]:
     order = np.argsort(values)
     clusters: List[List[int]] = []

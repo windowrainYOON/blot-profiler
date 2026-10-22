@@ -247,33 +247,10 @@ class BandItem(QtWidgets.QGraphicsRectItem):
                     painter.drawRect(QtCore.QRectF(hx - s, hy - s, 2 * s, 2 * s))
 
 
-class SuggestionItem(QtWidgets.QGraphicsRectItem):
-    """A dashed box the detection was not sure about: click to turn it into a band box."""
-
-    def __init__(self, view: "BlotView", cand: dict):
-        super().__init__(cand["x"] - cand["w"] / 2, cand["y"] - cand["h"] / 2, cand["w"], cand["h"])
-        self.view = view
-        self.cand = cand
-        pen = QtGui.QPen(QtGui.QColor("#d500f9"), 1.3, Qt.DashLine)
-        pen.setCosmetic(True)
-        self.setPen(pen)
-        self.setBrush(QtGui.QColor(213, 0, 249, 25))
-        self.setZValue(3)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setToolTip(f"검출 후보 (점수 {cand.get('score', 0):.2f}) — 클릭하면 밴드 박스로 받습니다")
-
-    def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            self.view.suggestionAccepted.emit(self.cand)
-            e.accept()
-            return
-        super().mousePressEvent(e)
-
-
 class BlotView(QtWidgets.QGraphicsView):
     filesDropped = QtCore.Signal(list)  # image/analysis files dropped on the view
     drawn = QtCore.Signal(str, float, float, float, float)  # "line"/"crop", x0, y0, x1, y1 (image px)
-    suggestionAccepted = QtCore.Signal(dict)
+    editRequested = QtCore.Signal(object)  # BandItem double-clicked: resize it
     changed = QtCore.Signal()  # boxes moved/added/removed
     selectionChangedBands = QtCore.Signal()
     contextRequested = QtCore.Signal(QtCore.QPoint, object)  # global pos, BandItem | None
@@ -298,8 +275,8 @@ class BlotView(QtWidgets.QGraphicsView):
         self.show_labels = True
         self.resize_mode = False
         self.draw_mode: Optional[str] = None  # "line" (straighten) / "crop": the next drag draws
-        self.extra_items = []  # suggestions and lane lines
-        self.suggest_min = 0.6  # show suggestions scoring at least this (fraction of the threshold)
+        self.extra_items = []  # lane lines
+        self.auto_fit = True  # keep the image fitted to the view until the user zooms
         self.show_lanes = True
         self._draw = None
         self._move_timer = QtCore.QTimer(self)
@@ -361,7 +338,17 @@ class BlotView(QtWidgets.QGraphicsView):
     def fit(self):
         r = self.content_rect()
         if not r.isEmpty():
-            self.fitInView(r, Qt.KeepAspectRatio)
+            self.fitInView(r.adjusted(-10, -26, 10, 10), Qt.KeepAspectRatio)
+        self.auto_fit = True
+
+    def zoom(self, factor: float):
+        self.auto_fit = False
+        self.scale(factor, factor)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self.auto_fit:  # the image follows the size of the window until the user zooms
+            self.fit()
 
     def set_analysis(self, a: core.Analysis):
         self.analysis = a
@@ -385,17 +372,12 @@ class BlotView(QtWidgets.QGraphicsView):
         self.rebuild_extras()
 
     def rebuild_extras(self):
-        """Dashed suggestion boxes and the (slanted) lane centre lines of lane-first detection."""
+        """The (slanted) lane centre lines of lane-first detection."""
         sc = self.scene()
         for it in self.extra_items:
             sc.removeItem(it)
         self.extra_items = []
         a = self.analysis
-        for c in getattr(a, "candidates", []):
-            if c.get("score", 0) >= self.suggest_min:
-                it = SuggestionItem(self, c)
-                sc.addItem(it)
-                self.extra_items.append(it)
         if self.show_lanes and self.pix_item is not None and getattr(a, "lane_geom", None):
             H = self.pix_item.pixmap().height()
             pen = QtGui.QPen(QtGui.QColor(0, 151, 167, 150), 1, Qt.DashLine)
@@ -476,8 +458,7 @@ class BlotView(QtWidgets.QGraphicsView):
 
     def wheelEvent(self, e: QtGui.QWheelEvent):
         if e.modifiers() & (Qt.ControlModifier | Qt.MetaModifier) or not e.pixelDelta().y():
-            factor = 1.0015 ** e.angleDelta().y()
-            self.scale(factor, factor)
+            self.zoom(1.0015 ** e.angleDelta().y())
         else:
             super().wheelEvent(e)
 
@@ -496,6 +477,12 @@ class BlotView(QtWidgets.QGraphicsView):
             item.setZValue(20)
             self._draw = (p, item)
             return
+        if self.resize_mode and e.button() == Qt.LeftButton:
+            item = self.itemAt(e.position().toPoint())
+            if isinstance(item, QtWidgets.QGraphicsSimpleTextItem):
+                item = item.parentItem()
+            if not isinstance(item, BandItem):  # a click outside the boxes ends the size editing
+                self.resizeModeExited.emit()
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
@@ -530,11 +517,11 @@ class BlotView(QtWidgets.QGraphicsView):
         item = self.itemAt(e.position().toPoint())
         if isinstance(item, QtWidgets.QGraphicsSimpleTextItem):
             item = item.parentItem()
-        if not isinstance(item, BandItem) and self.pix_item is not None:
-            if self.pix_item.sceneBoundingRect().contains(p):  # not on the marker beside the blot
-                self.addRequested.emit(p.x(), p.y())
+        if isinstance(item, BandItem):
+            self.editRequested.emit(item)
             return
-        super().mouseDoubleClickEvent(e)
+        if self.pix_item is not None and self.pix_item.sceneBoundingRect().contains(p):  # not on the marker beside the blot
+            self.addRequested.emit(p.x(), p.y())
 
     def contextMenuEvent(self, e):
         item = self.itemAt(e.pos())
@@ -1128,14 +1115,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.contextRequested.connect(self.show_band_menu)
         self.view.addRequested.connect(self.add_band_at)
         self.view.filesDropped.connect(self.open_paths)
-        self.view.suggestionAccepted.connect(self.accept_suggestion)
+        self.view.editRequested.connect(self.edit_band_size)
         self.view.drawn.connect(lambda k, *xy: self.set_draw_mode(None) if k == "cancel" else self.on_drawn(k, *xy))
         self.view.resizeModeExited.connect(lambda: self.resize_mode.setChecked(False))
 
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.addTab(self._build_detect_tab(), "1. 검출")
-        self.tabs.addTab(self._build_rows_tab(), "2. 단백질 / 레인")
-        self.tabs.addTab(self._build_bands_tab(), "3. 밴드")
+        self.tabs.setUsesScrollButtons(True)
+        self.tabs.addTab(self._scroll(self._build_detect_tab()), "1. 검출")
+        self.tabs.addTab(self._scroll(self._build_rows_tab()), "2. 단백질 / 레인")
+        self.tabs.addTab(self._scroll(self._build_bands_tab()), "3. 밴드")
         self.tabs.addTab(self._build_results_tab(), "4. 정량 / 그래프")
         self.tabs.addTab(self._build_multi_tab(), "5. 여러 이미지")
         from .figure_window import FigureEditor
@@ -1145,7 +1133,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.tabBar().setTabTextColor(self.FIG_TAB, QtGui.QColor("#1565c0"))
         self.tabs.currentChanged.connect(self.on_tab_changed)
         self._split_sizes = None
-        self.tabs.setMinimumWidth(520)
+        self.tabs.setMinimumWidth(380)
 
         left = QtWidgets.QWidget()
         ll = QtWidgets.QVBoxLayout(left)
@@ -1186,10 +1174,19 @@ class MainWindow(QtWidgets.QMainWindow):
             "우클릭 메뉴에서도 켜고 끌 수 있고, Esc로 끝냅니다."
         )
         self.resize_mode.toggled.connect(self.on_resize_mode)
+        zl = QtWidgets.QHBoxLayout()
+        zl.addWidget(QtWidgets.QLabel("표시 대비"))
+        zl.addWidget(self.contrast_lo, 1)
+        zl.addWidget(self.contrast_hi, 1)
+        for text, tip, fn in (("−", "축소", lambda: self.view.zoom(0.8)), ("+", "확대", lambda: self.view.zoom(1.25)),
+                              ("창에 맞춤", "이미지를 창 크기에 맞춥니다 (창 크기를 바꾸면 계속 따라갑니다)", self.view.fit)):
+            b = QtWidgets.QToolButton()
+            b.setText(text)
+            b.setToolTip(tip)
+            b.clicked.connect(fn)
+            zl.addWidget(b)
+        ll.addLayout(zl)
         cl = QtWidgets.QHBoxLayout()
-        cl.addWidget(QtWidgets.QLabel("표시 대비"))
-        cl.addWidget(self.contrast_lo)
-        cl.addWidget(self.contrast_hi)
         cl.addWidget(self.show_corrected)
         cl.addWidget(self.show_labels)
         cl.addWidget(self.show_marker)
@@ -1197,11 +1194,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_lane_lines.setChecked(True)
         self.show_lane_lines.toggled.connect(lambda on: (setattr(self.view, "show_lanes", on), self.view.rebuild_extras()))
         cl.addWidget(self.show_lane_lines)
-        cl.addWidget(self.resize_mode)
+        cl.addStretch(1)
         ll.addLayout(cl)
         hint = QtWidgets.QLabel(
-            "밴드를 드래그로 선택 → 우클릭: 새 단백질(행) 그룹 / 새 레인(열) 그룹 만들기 · 더블클릭: 밴드 추가 · "
-            "방향키: 미세 이동 · Delete: 삭제 · ⌘/Ctrl+휠: 확대"
+            "클릭·드래그: 박스 선택(여러 개) · 박스를 잡고 끌기: 이동 · Backspace: 삭제 · 우클릭: 그룹·역할·병합 · "
+            "박스 더블클릭: 크기 수정(Esc나 빈 곳 클릭으로 끝) · 빈 곳 더블클릭: 박스 추가 · ⌘/Ctrl+휠: 확대"
         )
         hint.setStyleSheet("color: #888; font-size: 11px;")
         hint.setWordWrap(True)
@@ -1213,6 +1210,8 @@ class MainWindow(QtWidgets.QMainWindow):
         split.addWidget(self.tabs)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 2)
+        left.setMinimumWidth(300)
+        self._split_init = False
         self.setCentralWidget(split)
         self._build_menu()
         self.statusBar().showMessage("TIF 파일을 열어 시작하세요 (파일 → 열기 또는 창에 끌어다 놓기)")
@@ -1305,12 +1304,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_doc_tabs()
         self.switch_doc(self.cur)
 
+    def showEvent(self, e):
+        super().showEvent(e)
+        if not self._split_init:  # first show: image about 60 %, controls 40 % of the window
+            self._split_init = True
+            total = max(self.split.width(), 800)
+            right = min(max(int(total * 0.4), 420), total - 320)
+            self.split.setSizes([total - right, right])
+            QtCore.QTimer.singleShot(0, self.view.fit)
+
+    def edit_band_size(self, item):
+        """Double-click on a box: select it and drag its edges to resize (its whole row follows)."""
+        if not item.isSelected():
+            self.view.select_bands([item.band])
+        self.resize_mode.setChecked(True)
+
+    def export_figure(self):
+        ed = self.figure_editor
+        if ed.doc is not self.doc or ed.dirty:
+            ed.set_doc(self.doc)
+        ed.export()
+
+    def merge_selected(self):
+        sel = self.view.selected_bands()
+        if len(sel) < 2:
+            return
+        n = core.merge_bands(self.analysis, sel)
+        if self.auto_lanes.isChecked():
+            core.auto_assign_lanes(self.analysis)
+        self.structure_changed()
+        self.statusBar().showMessage(f"선택한 박스 {len(sel)}개를 {n}개로 합쳤습니다 (같은 행의 박스 크기가 함께 맞춰집니다)")
+
     def on_resize_mode(self, on):
         self.view.set_resize_mode(on)
         self.view.setDragMode(QtWidgets.QGraphicsView.RubberBandDrag)
         self.statusBar().showMessage(
-            "박스 크기 조절 모드: 박스 가장자리/모서리를 드래그하세요 (같은 단백질 그룹이 함께 바뀜). Esc 또는 우클릭 메뉴로 종료"
-            if on else "박스 크기 조절 모드를 끝냈습니다"
+            "크기 수정: 박스 가장자리/모서리를 드래그하세요 (같은 단백질 행이 함께 바뀜). Esc 또는 빈 곳 클릭으로 끝"
+            if on else "크기 수정을 끝냈습니다"
         )
 
     # ---------------------------------------------------------------- menus
@@ -1327,14 +1357,17 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction("밴드 ROI·그룹 불러오기 (현재 이미지에 적용)…", self.load_roi)
         m.addSeparator()
         m.addAction("결과 CSV 내보내기…", self.export_csv)
-        m.addAction("그래프 저장 (PNG/PDF/SVG)…", lambda: self.export_plot())
+        m.addAction("그래프 저장 — 현재 이미지 (PNG/PDF/SVG)…", lambda: self.export_plot(self.plot))
+        m.addAction("그래프 저장 — 여러 이미지 (PNG/PDF/SVG)…", lambda: self.export_plot(self.multi_plot))
         m.addAction("박스 표시 이미지 저장…", self.export_overlay)
+        m.addSeparator()
+        m.addAction("Figure 그림 저장 (PNG/TIFF/PDF/SVG)…", self.export_figure).setShortcut("Ctrl+E")
         fm = self.menuBar().addMenu("Figure")
         fm.addAction("Figure 만들기 탭으로 (논문용 그림)", self.open_figure_window).setShortcut("Ctrl+Shift+F")
         v = self.menuBar().addMenu("보기")
         v.addAction("창에 맞추기", self.view.fit).setShortcut("Ctrl+0")
-        v.addAction("확대", lambda: self.view.scale(1.25, 1.25)).setShortcut(QtGui.QKeySequence.ZoomIn)
-        v.addAction("축소", lambda: self.view.scale(0.8, 0.8)).setShortcut(QtGui.QKeySequence.ZoomOut)
+        v.addAction("확대", lambda: self.view.zoom(1.25)).setShortcut(QtGui.QKeySequence.ZoomIn)
+        v.addAction("축소", lambda: self.view.zoom(0.8)).setShortcut(QtGui.QKeySequence.ZoomOut)
         h = self.menuBar().addMenu("도움말")
         h.addAction("사용법", self.show_help)
 
@@ -1422,17 +1455,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.method_combo.addItem("레인 먼저 찾기 (새 방식: 레인 → 레인 안 밴드 → 줄 맞추기)", "lane")
         self.method_combo.addItem("이전 검출 방식", "legacy")
         self.method_combo.setToolTip("새 방식은 레인을 먼저 찾고(기울어진 레인 ±10°, 좌우 ±10% 어긋남 허용), 레인마다 밴드를 찾은 뒤\n"
-                                     "같은 높이의 밴드를 줄로 묶습니다. 애매한 후보는 점선 '제안' 상자로 보여 줍니다.")
+                                     "같은 높이의 밴드를 줄로 묶습니다.")
         f.addRow("검출 방식", self.method_combo)
-        hb = QtWidgets.QHBoxLayout()
-        self.suggest_spin = _spin(0.3, 1.0, 0.6, 0.05, decimals=2)
-        self.suggest_spin.setToolTip("점선 제안 상자를 보여 줄 기준 (검출 기준 대비). 낮추면 더 많은 후보가 보입니다 — 다시 검출하지 않습니다")
-        self.suggest_spin.valueChanged.connect(self.on_suggest_level)
-        hb.addWidget(self.suggest_spin)
-        b = QtWidgets.QPushButton("제안 모두 받기")
-        b.clicked.connect(self.accept_all_suggestions)
-        hb.addWidget(b)
-        f.addRow("제안 상자 기준", hb)
         self.auto_tilt = QtWidgets.QCheckBox("검출 후 기울기 자동 보정 (이미지 전체 회전 · 마커도 같이)")
         self.auto_tilt.setChecked(True)
         self.auto_tilt.setToolTip("밴드 줄의 기울기를 재서 0.3° 이상이면 이미지 전체를 그만큼 돌리고 다시 검출합니다.\n"
@@ -1467,17 +1491,6 @@ class MainWindow(QtWidgets.QMainWindow):
         f.addRow(b3)
         lay.addWidget(g_det)
 
-        g_roi = QtWidgets.QGroupBox("밴드 ROI · 그룹")
-        gl = QtWidgets.QHBoxLayout(g_roi)
-        b = QtWidgets.QPushButton("ROI·그룹 저장…")
-        b.setToolTip("현재 이미지의 박스 위치·크기, 단백질/레인 그룹 이름과 역할을 파일로 저장합니다")
-        b.clicked.connect(self.save_roi)
-        gl.addWidget(b)
-        b = QtWidgets.QPushButton("ROI·그룹 불러오기…")
-        b.setToolTip("저장한 ROI·그룹을 현재 이미지에 적용합니다 (다른 이미지에도 쓸 수 있습니다)")
-        b.clicked.connect(self.load_roi)
-        gl.addWidget(b)
-        lay.addWidget(g_roi)
         lay.addStretch(1)
         self.on_bg_changed(recompute=False)
         return w
@@ -1636,15 +1649,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.results_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.results_table.setMinimumHeight(220)
         lay.addWidget(self.results_table, 1)
-        hb = QtWidgets.QHBoxLayout()
-        b = QtWidgets.QPushButton("CSV 내보내기…")
-        b.clicked.connect(self.export_csv)
-        hb.addWidget(b)
-        b = QtWidgets.QPushButton("그래프 저장…")
-        b.clicked.connect(lambda: self.export_plot(self.plot))
-        hb.addWidget(b)
-        hb.addStretch(1)
-        lay.addLayout(hb)
         return self._scroll(w)
 
     # ---------------------------------------------------------------- figure window
@@ -1748,15 +1752,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.multi_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.multi_table.setMinimumHeight(200)
         lay.addWidget(self.multi_table, 1)
-        hb = QtWidgets.QHBoxLayout()
-        b = QtWidgets.QPushButton("CSV 내보내기…")
-        b.clicked.connect(self.export_csv)
-        hb.addWidget(b)
-        b = QtWidgets.QPushButton("그래프 저장…")
-        b.clicked.connect(lambda: self.export_plot(self.multi_plot))
-        hb.addWidget(b)
-        hb.addStretch(1)
-        lay.addLayout(hb)
         return self._scroll(w)
 
     # ---------------------------------------------------------------- image
@@ -2367,37 +2362,10 @@ class MainWindow(QtWidgets.QMainWindow):
         lad = core.ladder_lanes(a)
         msg = (f"레인 {a.n_lanes}개, 박스 {len(a.bands)}개, 줄 {len(a.rows)}개"
                + (f", ladder 레인 {', '.join(a.lane_labels[l] for l in lad)}" if lad else "")
-               + f", 제안(점선) {sum(1 for c in a.candidates if c['score'] >= self.view.suggest_min)}개. "
-               "점선 상자를 클릭하면 받고, 박스는 드래그로 고칩니다.")
+               + ". 박스는 끌어서 옮기고, 더블클릭하면 크기를 고칩니다.")
         if kept:
             msg += f" 직접 고친 박스 {kept}개는 그대로 두었습니다."
         self.statusBar().showMessage(msg)
-
-    def on_suggest_level(self, v):
-        self.view.suggest_min = float(v)
-        self.view.rebuild_extras()
-
-    def accept_suggestion(self, cand):
-        a = self.analysis
-        if cand in a.candidates:
-            a.candidates.remove(cand)
-        nb = core.add_band(a, cand["x"], cand["y"])
-        nb.user = True
-        if self.auto_lanes.isChecked():
-            core.auto_assign_lanes(a)
-        self.structure_changed()
-
-    def accept_all_suggestions(self):
-        a = self.analysis
-        cands = [c for c in a.candidates if c.get("score", 0) >= self.view.suggest_min]
-        for c in cands:
-            a.candidates.remove(c)
-            nb = core.add_band(a, c["x"], c["y"])
-            nb.user = True
-        if cands and self.auto_lanes.isChecked():
-            core.auto_assign_lanes(a)
-        self.structure_changed()
-        self.statusBar().showMessage(f"제안 상자 {len(cands)}개를 받았습니다")
 
     def set_analysis(self, a: core.Analysis):
         self.analysis = a
@@ -2478,25 +2446,27 @@ class MainWindow(QtWidgets.QMainWindow):
         sel = self.view.selected_bands()
         menu = QtWidgets.QMenu(self)
         if sel:
-            menu.addAction(f"새 단백질(행) 그룹 만들기… ({len(sel)}개 밴드)", self.make_protein_group)
-            menu.addAction(f"새 레인(열) 그룹 만들기… ({len(sel)}개 밴드)", self.make_lane_group)
+            gm = menu.addMenu(f"그룹 설정 ({len(sel)}개 박스)")
+            gm.addAction("단백질(행) 그룹으로 묶기…", self.make_protein_group)
+            gm.addAction("레인(열) 그룹으로 묶기…", self.make_lane_group)
             if self.doc.mode == core.MODE_GEL:
-                menu.addAction("선택한 밴드의 레인을 ladder로 지정", lambda: self.set_ladder_selected(True))
-                menu.addAction("선택한 밴드의 레인을 ladder에서 빼기", lambda: self.set_ladder_selected(False))
+                gm.addAction("선택한 박스의 레인을 ladder로 지정", lambda: self.set_ladder_selected(True))
+                gm.addAction("선택한 박스의 레인을 ladder에서 빼기", lambda: self.set_ladder_selected(False))
             rows = sorted({b.row for b in sel})
             if len(rows) == 1:
-                ro = menu.addMenu(f"'{self.analysis.rows[rows[0]].name}' 역할")
+                ro = gm.addMenu(f"'{self.analysis.rows[rows[0]].name}' 역할")
                 for role in core.ROLES:
                     ro.addAction(ROLE_LABELS[role], lambda role=role, r=rows[0]: self.set_row_role(r, role))
             menu.addSeparator()
-            menu.addAction("삭제", self.delete_selected)
+            if len(sel) >= 2:
+                menu.addAction(f"병합 (선택한 {len(sel)}개 박스를 하나로)", self.merge_selected)
+            if self.resize_mode.isChecked():
+                menu.addAction("크기 수정 끝내기 (Esc)", lambda: self.resize_mode.setChecked(False))
+            else:
+                menu.addAction("크기 수정 (더블클릭)", lambda: self.resize_mode.setChecked(True))
+            menu.addAction("삭제 (Backspace)", self.delete_selected)
         else:
-            menu.addAction("여기에 밴드 추가", lambda: self.add_band_at(*self._scene_pos(gpos)))
-        menu.addSeparator()
-        act = menu.addAction("박스 크기 조절 모드 (가장자리 드래그)")
-        act.setCheckable(True)
-        act.setChecked(self.resize_mode.isChecked())
-        act.toggled.connect(self.resize_mode.setChecked)
+            menu.addAction("여기에 박스 추가 (빈 곳 더블클릭)", lambda: self.add_band_at(*self._scene_pos(gpos)))
         menu.exec(gpos)
 
     def _scene_pos(self, gpos):
@@ -3258,7 +3228,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "sensitivity": self.sens.value(), "smooth": self.smooth.value(), "min_area": self.min_area.value(),
                 "pad": self.pad.value(), "edge": self.edge.value(), "lut_gamma": self.lut_gamma.value(),
                 "fill_lanes": self.fill_lanes.isChecked(), "snap_lanes": self.snap_lanes.isChecked(),
-                "method": self.method_combo.currentData(), "suggest_min": self.suggest_spin.value(),
+                "method": self.method_combo.currentData(),
                 "auto_tilt": self.auto_tilt.isChecked(),
             },
             "images": images,
@@ -3420,7 +3390,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.fill_lanes.setChecked(det.get("fill_lanes", True))
             self.snap_lanes.setChecked(det.get("snap_lanes", True))
             self.method_combo.setCurrentIndex(max(0, self.method_combo.findData(det.get("method", "legacy"))))
-            self.suggest_spin.setValue(float(det.get("suggest_min", 0.6)))
             self.auto_tilt.setChecked(bool(det.get("auto_tilt", True)))
             docs, index = [], {}
             for i, im in enumerate(images):
