@@ -111,8 +111,8 @@ class BandItem(QtWidgets.QGraphicsRectItem):
             pen.setStyle(Qt.DotLine)
         self.setPen(pen)
         self.setBrush(Qt.NoBrush)
-        self.label.setText(self.view.ids.get(id(self.band), "") + (" ◆" if self.band.pin else ""))
-        self.setToolTip(f"직접 지정한 레인 '{self.band.pin}' — 박스를 옮겨도 이 레인에 남습니다" if self.band.pin else "")
+        self.label.setText(self.view.ids.get(id(self.band), ""))
+        self.setToolTip("측정 묶음: " + ", ".join(f"{k} › {v}" for k, v in self.band.tags.items()) if self.band.tags else "")
         self.label.setBrush(color)
         self.label.setPos(0, 0)
         self.label.setY(-1)
@@ -276,7 +276,8 @@ class BlotView(QtWidgets.QGraphicsView):
         self.show_labels = True
         self.resize_mode = False
         self.draw_mode: Optional[str] = None  # "line" (straighten) / "crop": the next drag draws
-        self.extra_items = []  # lane lines
+        self.extra_items = []  # lane lines, measurement groups
+        self.show_set: Optional[str] = None  # grouping set drawn on the image
         self.auto_fit = True  # keep the image fitted to the view until the user zooms
         self.show_lanes = True
         self._draw = None
@@ -373,30 +374,46 @@ class BlotView(QtWidgets.QGraphicsView):
         self.rebuild_extras()
 
     def rebuild_extras(self):
-        """The (slanted) lane centre lines of lane-first detection and the lanes the user
-        assembled by hand (a line through all boxes of the lane, with its name)."""
+        """The (slanted) lane centre lines of lane-first detection and the groups of the
+        measurement grouping set being shown (coloured frames joined by a line, with the name)."""
         sc = self.scene()
         for it in self.extra_items:
             sc.removeItem(it)
         self.extra_items = []
         a = self.analysis
-        pen = QtGui.QPen(QtGui.QColor("#ff6d00"), 2, Qt.DashLine)
-        pen.setCosmetic(True)
-        for lane in sorted({b.lane for b in a.bands if b.pin}):
-            pts = sorted(((b.cx, b.cy) for b in a.bands if b.lane == lane), key=lambda p: p[1])
-            path = QtGui.QPainterPath(QtCore.QPointF(*pts[0]))
-            for x, y in pts[1:]:
-                path.lineTo(x, y)
-            it = sc.addPath(path, pen)
-            it.setZValue(4)
-            self.extra_items.append(it)
-            name = a.lane_labels[lane] if lane < len(a.lane_labels) else ""
-            t = sc.addSimpleText(f"레인 {name} (직접 지정)")
-            t.setBrush(QtGui.QColor("#e65100"))
+        g = core.grouping(a, self.show_set) if self.show_set else None
+        for gi, gname in enumerate(g["groups"] if g else []):
+            mem = core.group_members(a, self.show_set, gname)
+            if not mem:
+                continue
+            color = QtGui.QColor(GROUP_COLORS[gi % len(GROUP_COLORS)])
+            pen = QtGui.QPen(color, 3)
+            pen.setCosmetic(True)
+            for b in mem:
+                x, y, w_, h_ = b.box(a.rows)
+                it = sc.addRect(QtCore.QRectF(x - 3, y - 3, w_ + 6, h_ + 6), pen)
+                it.setZValue(4)
+                self.extra_items.append(it)
+            pts = sorted(((b.cx, b.cy) for b in mem), key=lambda p: (p[1], p[0]))
+            if len(pts) > 1:
+                lp = QtGui.QPen(color, 2, Qt.DashLine)
+                lp.setCosmetic(True)
+                path = QtGui.QPainterPath(QtCore.QPointF(*pts[0]))
+                for x, y in pts[1:]:
+                    path.lineTo(x, y)
+                it = sc.addPath(path, lp)
+                it.setZValue(4)
+                self.extra_items.append(it)
+            t = sc.addSimpleText(f"{gname}")
+            f = t.font()
+            f.setBold(True)
+            f.setPointSizeF(11)
+            t.setFont(f)
+            t.setBrush(color)
             t.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations)
-            mid = pts[len(pts) // 2 - 1] if len(pts) > 1 else pts[0]
-            nxt = pts[len(pts) // 2] if len(pts) > 1 else pts[0]
-            t.setPos((mid[0] + nxt[0]) / 2 + 4, (mid[1] + nxt[1]) / 2)  # middle of the line, clear of the box IDs
+            top = min(mem, key=lambda b: b.cy)
+            x, y, w_, h_ = top.box(a.rows)
+            t.setPos(x + w_ + 4, y - 4)  # right of the top box, clear of the box ID
             t.setZValue(5)
             self.extra_items.append(t)
         if self.show_lanes and self.pix_item is not None and getattr(a, "lane_geom", None):
@@ -883,6 +900,60 @@ def raw_note() -> QtWidgets.QLabel:
     return lab
 
 
+GROUP_COLORS = ["#e53935", "#1e88e5", "#43a047", "#fb8c00", "#8e24aa", "#00897b", "#c0ca33", "#6d4c41", "#d81b60", "#3949ab"]
+LANES_BASIS = ""  # results per lane (no grouping set)
+ROLE_SHORT = {core.ROLE_CONTROL: "Control", core.ROLE_TARGET: "Target", core.ROLE_IGNORE: "제외"}
+
+
+class GroupAssignDialog(QtWidgets.QDialog):
+    """Put the selected boxes in a group of a grouping set (one dialog, sensible defaults)."""
+
+    def __init__(self, parent, a: core.Analysis, bands, default_set: Optional[str]):
+        super().__init__(parent)
+        self.setWindowTitle("측정 묶음에 넣기")
+        self.a = a
+        lay = QtWidgets.QVBoxLayout(self)
+        roles = [a.rows[b.row].role for b in bands]
+        info = QtWidgets.QLabel(
+            f"선택한 박스 {len(bands)}개 (Control {roles.count(core.ROLE_CONTROL)} · Target {roles.count(core.ROLE_TARGET)})를 "
+            "한 그룹으로 묶습니다.<br>레인은 그대로 두고, 정량 탭에서 이 묶음 세트를 고르면 그룹마다 Target ÷ Control 을 계산합니다.<br>"
+            "<span style='color:#666'>한 박스는 세트마다 한 그룹에만 들어가고, 여러 세트에 동시에 들어갈 수 있습니다.</span>")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        f = QtWidgets.QFormLayout()
+        self.set_combo = QtWidgets.QComboBox()
+        self.set_combo.setEditable(True)
+        names = [g["name"] for g in a.groupings]
+        self.set_combo.addItems(names or ["묶음 1"])
+        if default_set in names:
+            self.set_combo.setCurrentText(default_set)
+        self.set_combo.setToolTip("새 이름을 쓰면 새 묶음 세트가 됩니다 (예: '샘플 짝', '시간별')")
+        f.addRow("묶음 세트", self.set_combo)
+        self.group_combo = QtWidgets.QComboBox()
+        self.group_combo.setEditable(True)
+        self.group_combo.setToolTip("새 이름을 쓰면 새 그룹, 있는 그룹을 고르면 그 그룹에 더합니다")
+        f.addRow("그룹", self.group_combo)
+        lay.addLayout(f)
+        self.set_combo.currentTextChanged.connect(self._fill_groups)
+        self._fill_groups()
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _fill_groups(self, *_):
+        sname = self.set_combo.currentText().strip()
+        g = core.grouping(self.a, sname)
+        self.group_combo.clear()
+        self.group_combo.addItem(core.next_group_name(self.a, sname))  # a new group first
+        for x in (g["groups"] if g else []):
+            self.group_combo.addItem(x)
+        self.group_combo.setCurrentIndex(0)
+
+    def values(self):
+        return self.set_combo.currentText().strip(), self.group_combo.currentText().strip()
+
+
 def _spin(lo, hi, val, step=1, decimals=None, suffix=""):
     if decimals is None:
         w = QtWidgets.QSpinBox()
@@ -1095,6 +1166,8 @@ class ImageDoc:
         self.invert = invert  # index of the "밴드 색" combo
         self.bg = core.BackgroundSettings(**vars(bg)) if bg else core.BackgroundSettings()
         self.ref_lane: Optional[int] = 0
+        self.basis: str = LANES_BASIS  # grouping set used to pair control and target ("" = lanes)
+        self.basis_ref: Dict[str, Optional[int]] = {}  # reference group (=1.0) per grouping set
         self.figure: Optional[dict] = None  # Figure 만들기 settings (saved with the analysis)
         self.marker: Optional[np.ndarray] = None  # ladder/marker image (not saved, path is)
         self.mode = core.MODE_WESTERN  # or core.MODE_GEL
@@ -1143,7 +1216,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.multi_results: Dict[str, Dict[str, object]] = {}  # name -> {mean, sd, points}
         self._updating = False
         self._tilt_done = False
-        self._pins = []  # lanes assembled by hand, carried over when detecting again
+        self._tagged = ([], [])  # measurement groups of the boxes, carried over when detecting again
         self.project_path: Optional[str] = None  # where the project was last saved/opened
         self._saved_fp: Optional[str] = None  # state at that moment (unsaved-change mark)
 
@@ -1594,7 +1667,51 @@ class MainWindow(QtWidgets.QMainWindow):
         hb.addWidget(b)
         hb.addStretch(1)
         lay.addLayout(hb)
+        lay.addWidget(self._build_groupings())
         return w
+
+    def _build_groupings(self):
+        g = QtWidgets.QGroupBox("측정 묶음 (Control · Target 짝짓기, 레인은 그대로)")
+        l = QtWidgets.QVBoxLayout(g)
+        info = QtWidgets.QLabel(
+            "떨어져 있는 박스도 그룹으로 묶어 Control 과 짝지을 수 있습니다. 묶음 세트를 여러 개 만들어 두고(예: '샘플 짝', '시간별'), "
+            "4번 정량 탭의 'Control 짝짓기 기준'에서 어떤 세트로 계산할지 고릅니다. 한 박스는 여러 세트에 동시에 들어갈 수 있습니다.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #555;")
+        l.addWidget(info)
+        hb = QtWidgets.QHBoxLayout()
+        hb.addWidget(QtWidgets.QLabel("세트"))
+        self.set_list = QtWidgets.QComboBox()
+        self.set_list.setToolTip("고른 세트의 그룹이 이미지에 색깔 테두리·이름으로 표시됩니다")
+        self.set_list.currentIndexChanged.connect(self.on_set_chosen)
+        hb.addWidget(self.set_list, 1)
+        for text, fn in (("새 세트…", self.new_set), ("이름 바꾸기…", self.rename_set), ("세트 삭제", self.delete_set)):
+            b = QtWidgets.QPushButton(text)
+            b.clicked.connect(fn)
+            hb.addWidget(b)
+        l.addLayout(hb)
+        self.group_table = QtWidgets.QTableWidget(0, 3)
+        self.group_table.setHorizontalHeaderLabels(["그룹", "박스", "상태"])
+        self.group_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        self.group_table.verticalHeader().setVisible(False)
+        self.group_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.group_table.setMinimumHeight(140)
+        self.group_table.itemSelectionChanged.connect(self.on_group_row_selected)
+        self.group_table.itemChanged.connect(self.on_group_renamed)
+        l.addWidget(self.group_table)
+        hb = QtWidgets.QHBoxLayout()
+        for text, fn in (("선택한 박스를 묶음에 넣기…", self.assign_group), ("▲", lambda: self.move_group(-1)),
+                         ("▼", lambda: self.move_group(1)), ("선택한 그룹 지우기", self.delete_groups)):
+            b = QtWidgets.QPushButton(text)
+            b.clicked.connect(fn)
+            hb.addWidget(b)
+        hb.addStretch(1)
+        l.addLayout(hb)
+        self.group_hint = QtWidgets.QLabel()
+        self.group_hint.setWordWrap(True)
+        self.group_hint.setStyleSheet("color: #888; font-size: 11px;")
+        l.addWidget(self.group_hint)
+        return g
 
     # ---------------------------------------------------------------- tab 3
     def _build_bands_tab(self):
@@ -1653,13 +1770,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
         g = QtWidgets.QGroupBox("Internal control 정규화")
         f = QtWidgets.QFormLayout(g)
-        self.auto_norm = QtWidgets.QCheckBox("측정(Target) 단백질 ÷ Control 단백질 (레인별) 자동 계산")
+        self.auto_norm = QtWidgets.QCheckBox("측정(Target) 단백질 ÷ Control 단백질 자동 계산 (아래 기준의 레인/그룹마다)")
         self.auto_norm.setChecked(True)
         self.auto_norm.toggled.connect(self.recompute_results)
         f.addRow(self.auto_norm)
+        self.basis_combo = QtWidgets.QComboBox()
+        self.basis_combo.setToolTip("어떤 Control 박스로 어떤 Target 박스를 나눌지: 같은 레인끼리(기본), 또는 2번 탭에서 만든\n"
+                                    "측정 묶음 세트의 그룹끼리. 결과·그래프·CSV·Figure 숫자가 이 기준을 따릅니다.")
+        self.basis_combo.currentIndexChanged.connect(self.on_basis)
+        f.addRow("Control 짝짓기 기준", self.basis_combo)
+        self.basis_msg = QtWidgets.QLabel()
+        self.basis_msg.setWordWrap(True)
+        f.addRow(self.basis_msg)
         self.ref_lane = QtWidgets.QComboBox()
         self.ref_lane.currentIndexChanged.connect(self.on_ref_lane)
-        f.addRow("기준 레인 (=1.0)", self.ref_lane)
+        self.ref_label = QtWidgets.QLabel("기준 레인 (=1.0)")
+        f.addRow(self.ref_label, self.ref_lane)
         lay.addWidget(g)
 
         g, self.formula_table, hb, self.formula_msg = self._formula_box(
@@ -2345,7 +2471,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         old = self.analysis
         user_bands = [(b.cx, b.cy, old.rows[b.row].name) for b in old.bands if getattr(b, "user", False)]
-        self._pins = [(b.cx, b.cy, b.pin) for b in old.bands if b.pin]  # lanes assembled by hand
+        self._tagged = ([(b.cx, b.cy, dict(b.tags)) for b in old.bands if b.tags],
+                        [dict(g, groups=list(g["groups"])) for g in old.groupings])
         if self.method_combo.currentData() == "lane":
             self._detect_lane_first(corr, settings, old, user_bands)
             return
@@ -2354,7 +2481,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if old.lane_labels and len(old.lane_labels) == a.n_lanes:
                 a.lane_labels = list(old.lane_labels)
             a.formulas = list(old.formulas)
-            core.restore_pins(a, self._pins)
+            self._restore_groups(a)
             self.set_analysis(a)
             if self.doc.figure is not None:
                 figure.apply_mode_defaults(self.doc.figure, a, core.MODE_GEL)
@@ -2374,7 +2501,7 @@ class MainWindow(QtWidgets.QMainWindow):
         a.formulas = list(old.formulas)
         if a.rows and not any(r.role == core.ROLE_CONTROL for r in a.rows):
             a.rows[0].role = core.ROLE_CONTROL  # loading control is usually the top row; user can change
-        core.restore_pins(a, self._pins)
+        self._restore_groups(a)
         self.set_analysis(a)
         self.statusBar().showMessage(
             f"자동 그룹 제안: 단백질 {len(a.rows)}개({', '.join(r.name for r in a.rows)}), 레인 {a.n_lanes}개, 박스 {len(a.bands)}개. "
@@ -2405,7 +2532,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 kept += 1
         if kept and a.method == "lane":
             core.auto_assign_lanes(a)
-        core.restore_pins(a, getattr(self, "_pins", []))
+        self._restore_groups(a)
         # tilt: corrected only by turning the whole image (and the marker with it)
         ang = lanes.tilt_angle(a)
         if self.auto_tilt.isChecked() and not self._tilt_done and 0.3 <= abs(ang) <= 10:
@@ -2459,7 +2586,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_boxes_changed(self):
         # every position change (also while dragging) re-derives the lanes
         if self.apply_auto_lanes():
-            self.statusBar().showMessage("박스 위치에 맞춰 레인을 다시 지정했습니다 (이름 붙인 레인 그룹·직접 지정한 레인은 유지)")
+            self.statusBar().showMessage("박스 위치에 맞춰 레인을 다시 지정했습니다 (이름 붙인 레인 그룹과 측정 묶음은 유지)")
         self.view.rebuild_extras()
         # box sizes may have been changed by dragging in resize mode
         for i, r in enumerate(self.analysis.rows):
@@ -2510,9 +2637,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if sel:
             gm = menu.addMenu(f"그룹 설정 ({len(sel)}개 박스)")
             gm.addAction("단백질(행) 그룹으로 묶기…", self.make_protein_group)
-            gm.addAction("레인(열) 그룹으로 묶기… (떨어져 있어도 하나의 레인으로)", self.make_lane_group)
-            if any(b.pin for b in sel):
-                gm.addAction("직접 지정한 레인 풀기 (위치대로 따라가기)", self.unpin_selected)
+            gm.addAction("레인(열) 그룹으로 묶기…", self.make_lane_group)
+            mm = menu.addMenu(f"측정 묶음에 넣기 ({len(sel)}개 박스) — Control·Target 짝짓기")
+            mm.addAction("새 그룹… (세트·그룹 고르기)", self.assign_group)
+            for g in self.analysis.groupings:
+                sm = mm.addMenu(f"'{g['name']}'에 넣기")
+                for gname in g["groups"]:
+                    sm.addAction(f"그룹 {gname}", lambda s_=g["name"], g_=gname: self.put_in_group(sel, s_, g_))
+                sm.addAction(f"새 그룹 {core.next_group_name(self.analysis, g['name'])}",
+                             lambda s_=g["name"]: self.put_in_group(sel, s_, core.next_group_name(self.analysis, s_)))
+            in_sets = sorted({k for b in sel for k in b.tags})
+            for sname in in_sets:
+                mm.addAction(f"'{sname}'에서 빼기", lambda s_=sname: self.remove_from_group(s_))
             if self.doc.mode == core.MODE_GEL:
                 gm.addAction("선택한 박스의 레인을 ladder로 지정", lambda: self.set_ladder_selected(True))
                 gm.addAction("선택한 박스의 레인을 ladder에서 빼기", lambda: self.set_ladder_selected(False))
@@ -2558,13 +2694,238 @@ class MainWindow(QtWidgets.QMainWindow):
         note = f" ('{name}'이(가) 이미 있어 '{final}'(으)로 붙였습니다)" if final != name else ""
         self.statusBar().showMessage(f"단백질 그룹 '{final}': 밴드 {len(sel)}개{note}")
 
-    def unpin_selected(self):
-        sel = [b for b in self.view.selected_bands() if b.pin]
-        for b in sel:
-            b.pin = ""
-        core.auto_assign_lanes(self.analysis)
-        self.structure_changed()
-        self.statusBar().showMessage(f"박스 {len(sel)}개의 레인 지정을 풀었습니다 — 이제 위치대로 레인이 정해집니다")
+    def _restore_groups(self, a):
+        tagged, sets = self._tagged
+        a.groupings = [dict(g, groups=list(g["groups"])) for g in sets]
+        core.restore_tags(a, tagged)
+
+    # ---------------------------------------------------------------- measurement groups (grouping sets)
+    def assign_group(self):
+        sel = self.view.selected_bands()
+        if not sel:
+            self.statusBar().showMessage("이미지에서 박스를 먼저 고르세요 (클릭, Shift/⌘-클릭, 드래그)")
+            return
+        dlg = GroupAssignDialog(self, self.analysis, sel, self.current_set())
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        sname, gname = dlg.values()
+        if sname and gname:
+            self.put_in_group(sel, sname, gname)
+
+    def put_in_group(self, bands, sname, gname):
+        a = self.analysis
+        core.set_group(a, bands, sname, gname)
+        self.groups_changed(show=sname)
+        st = next((x for x in core.group_status(a, sname) if x["group"] == gname), None)
+        warn = f" — 아직: {', '.join(st['problems'])}" if st and st["problems"] else ""
+        self.statusBar().showMessage(f"'{sname}' › 그룹 '{gname}'에 박스 {len(bands)}개를 넣었습니다{warn}. "
+                                     "정량 탭의 'Control 짝짓기 기준'에서 이 세트를 고르면 그룹별로 계산합니다")
+
+    def remove_from_group(self, sname):
+        sel = self.view.selected_bands()
+        core.clear_group(self.analysis, sel, sname)
+        self.groups_changed(show=sname)
+        self.statusBar().showMessage(f"박스 {len(sel)}개를 '{sname}'에서 뺐습니다")
+
+    def current_set(self) -> Optional[str]:
+        return self.set_list.currentData() if hasattr(self, "set_list") else None
+
+    def groups_changed(self, show: Optional[str] = None):
+        """Grouping sets or their members changed: tables, image, results."""
+        self.fill_groupings(select=show)
+        self.view.refresh_items()
+        self.view.rebuild_extras()
+        self.fill_basis_combo()
+        self.recompute_results()
+        self.recompute_multi()
+        self._figure_changed(self.doc)
+
+    def fill_groupings(self, select: Optional[str] = None):
+        a = self.analysis
+        core.sync_groupings(a)  # boxes may have been deleted
+        cur = select or self.current_set()
+        self.set_list.blockSignals(True)
+        self.set_list.clear()
+        self.set_list.addItem("(표시 안 함)", None)
+        for g in a.groupings:
+            self.set_list.addItem(g["name"], g["name"])
+        i = self.set_list.findData(cur) if cur else 0
+        self.set_list.setCurrentIndex(i if i >= 0 else (1 if a.groupings else 0))
+        self.set_list.blockSignals(False)
+        self.view.show_set = self.set_list.currentData()
+        self.fill_group_table()
+
+    def on_set_chosen(self, *_):
+        self.view.show_set = self.set_list.currentData()
+        self.view.refresh_items()
+        self.view.rebuild_extras()
+        self.fill_group_table()
+
+    def fill_group_table(self):
+        a = self.analysis
+        sname = self.current_set()
+        t = self.group_table
+        t.blockSignals(True)
+        rows = core.group_status(a, sname) if sname else []
+        t.setRowCount(len(rows))
+        ids = a.band_ids()
+        for i, st in enumerate(rows):
+            it = QtWidgets.QTableWidgetItem(st["group"])
+            it.setForeground(QtGui.QColor(GROUP_COLORS[i % len(GROUP_COLORS)]))
+            f = it.font()
+            f.setBold(True)
+            it.setFont(f)
+            t.setItem(i, 0, it)
+            boxes = ", ".join(f"{ids[id(b)]} ({ROLE_SHORT.get(a.rows[b.row].role, '')})" for b in st["bands"])
+            t.setItem(i, 1, QtWidgets.QTableWidgetItem(boxes))
+            ok = QtWidgets.QTableWidgetItem("✓" if not st["problems"] else "⚠ " + ", ".join(st["problems"]))
+            ok.setForeground(QtGui.QColor("#2e7d32" if not st["problems"] else "#c62828"))
+            t.setItem(i, 2, ok)
+            for c in (1, 2):
+                t.item(i, c).setFlags(t.item(i, c).flags() & ~Qt.ItemIsEditable)
+        t.blockSignals(False)
+        t.resizeColumnToContents(2)
+        self.group_hint.setText(
+            "박스를 고르고 우클릭 → '측정 묶음에 넣기'로 그룹을 만드세요. 그룹마다 Control 1개 + Target 박스를 넣습니다."
+            if not rows else f"그룹 {len(rows)}개 · 그룹 이름은 표에서 더블클릭해 바꿉니다 · 줄을 고르면 그 박스들이 선택됩니다")
+
+    def on_group_row_selected(self):
+        sname = self.current_set()
+        rows = sorted({i.row() for i in self.group_table.selectedIndexes()})
+        if not sname or not rows:
+            return
+        g = core.grouping(self.analysis, sname)
+        mem = [b for r in rows if r < len(g["groups"]) for b in core.group_members(self.analysis, sname, g["groups"][r])]
+        self.view.select_bands(mem)
+
+    def on_group_renamed(self, item):
+        sname = self.current_set()
+        g = core.grouping(self.analysis, sname) if sname else None
+        if g is None or item.column() != 0 or item.row() >= len(g["groups"]):
+            return
+        old = g["groups"][item.row()]
+        new = core.rename_group(self.analysis, sname, old, item.text().strip())
+        self.groups_changed(show=sname)
+        if new != item.text().strip():
+            self.statusBar().showMessage(f"이미 있는 이름이라 '{new}'(으)로 붙였습니다")
+
+    def new_set(self):
+        name = self._ask_name("새 묶음 세트", "묶음 세트 이름 (예: 샘플 짝, 시간별):", f"묶음 {len(self.analysis.groupings) + 1}")
+        if name:
+            self.groups_changed(show=core.add_grouping(self.analysis, name))
+
+    def rename_set(self):
+        sname = self.current_set()
+        if not sname:
+            return
+        name = self._ask_name("묶음 세트 이름 바꾸기", "새 이름:", sname)
+        if name:
+            new = core.rename_grouping(self.analysis, sname, name)
+            for d in self.docs:
+                if d.basis == sname:
+                    d.basis = new
+                    d.basis_ref[new] = d.basis_ref.pop(sname, 0)
+            self.groups_changed(show=new)
+
+    def delete_set(self):
+        sname = self.current_set()
+        if not sname:
+            return
+        if QtWidgets.QMessageBox.question(self, "묶음 세트 삭제", f"'{sname}' 세트와 그 그룹을 모두 지울까요? (박스와 레인은 그대로입니다)") \
+                != QtWidgets.QMessageBox.Yes:
+            return
+        core.delete_grouping(self.analysis, sname)
+        if self.doc.basis == sname:
+            self.doc.basis = LANES_BASIS
+        self.groups_changed()
+
+    def delete_groups(self):
+        sname = self.current_set()
+        g = core.grouping(self.analysis, sname) if sname else None
+        rows = sorted({i.row() for i in self.group_table.selectedIndexes()})
+        if g is None or not rows:
+            self.statusBar().showMessage("지울 그룹을 표에서 고르세요")
+            return
+        names = [g["groups"][r] for r in rows if r < len(g["groups"])]
+        core.clear_group(self.analysis, [b for n in names for b in core.group_members(self.analysis, sname, n)], sname)
+        self.groups_changed(show=sname)
+
+    def move_group(self, d):
+        sname = self.current_set()
+        g = core.grouping(self.analysis, sname) if sname else None
+        rows = sorted({i.row() for i in self.group_table.selectedIndexes()})
+        if g is None or len(rows) != 1:
+            return
+        i, j = rows[0], rows[0] + d
+        if 0 <= j < len(g["groups"]):
+            g["groups"][i], g["groups"][j] = g["groups"][j], g["groups"][i]
+            self.groups_changed(show=sname)
+            self.group_table.selectRow(j)
+
+    # ---------------------------------------------------------------- results basis (lanes or a grouping set)
+    def basis_of(self, d):
+        """(analysis, measurements) as results see them: per lane, or per group of the chosen set."""
+        if d.basis and core.grouping(d.analysis, d.basis) is None:
+            d.basis = LANES_BASIS
+        return core.basis_view(d.analysis, d.measurements, d.basis or None)
+
+    def ref_of(self, d):
+        return d.basis_ref.get(d.basis, 0) if d.basis else d.ref_lane
+
+    def fill_basis_combo(self):
+        d = self.doc
+        cb = self.basis_combo
+        cb.blockSignals(True)
+        cb.clear()
+        cb.addItem("레인 (기본: 같은 레인의 Control로 나눔)", LANES_BASIS)
+        for g in d.analysis.groupings:
+            cb.addItem(f"묶음 세트 '{g['name']}' ({len(g['groups'])}개 그룹)", g["name"])
+        i = cb.findData(d.basis)
+        cb.setCurrentIndex(i if i >= 0 else 0)
+        cb.blockSignals(False)
+        d.basis = cb.currentData()
+        self.fill_ref_combo()
+
+    def on_basis(self, *_):
+        self.doc.basis = self.basis_combo.currentData()
+        if self.doc.basis:  # show the grouping set being used
+            self.fill_groupings(select=self.doc.basis)
+            self.view.refresh_items()
+            self.view.rebuild_extras()
+        self.fill_ref_combo()
+        self.recompute_results()
+        self.recompute_multi()
+        self._figure_changed(self.doc)
+
+    def fill_ref_combo(self):
+        d = self.doc
+        a, _ = self.basis_of(d)
+        unit = "그룹" if d.basis else "레인"
+        self.ref_label.setText(f"기준 {unit} (=1.0)")
+        cb = self.ref_lane
+        cb.blockSignals(True)
+        cb.clear()
+        cb.addItem("정규화 안 함 (비율 그대로)", None)
+        for i in range(a.n_lanes):
+            cb.addItem(f"{i + 1}: {a.lane_labels[i]}", i)
+        ref = self.ref_of(d)
+        idx = 0 if ref is None else cb.findData(ref)
+        cb.setCurrentIndex(idx if idx >= 0 else min(1, cb.count() - 1))
+        cb.blockSignals(False)
+        self._set_ref(cb.currentData())
+        st = core.group_status(d.analysis, d.basis) if d.basis else []
+        bad = [f"{x['group']}: {', '.join(x['problems'])}" for x in st if x["problems"]]
+        self.basis_msg.setText(("⚠ " + " · ".join(bad)) if bad else
+                               (f"그룹 {len(st)}개: 그룹마다 Target ÷ 같은 그룹의 Control" if d.basis else
+                                "레인마다 Target ÷ 같은 레인의 Control"))
+        self.basis_msg.setStyleSheet("color: #c62828;" if bad else "color: #666;")
+
+    def _set_ref(self, v):
+        d = self.doc
+        if d.basis:
+            d.basis_ref[d.basis] = v
+        else:
+            d.ref_lane = v
 
     def make_lane_group(self):
         sel = self.view.selected_bands()
@@ -2582,11 +2943,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.select_bands(sel)
         n = a.lane_labels.count(final)
         note = f" ('{name}'이(가) 이미 있어 '{final}'(으)로 붙였습니다)" if final != name else ""
-        pinned = any(b.pin for b in sel)
-        self.statusBar().showMessage(
-            f"레인 그룹 '{final}': {n}개 열{' (반복)' if n > 1 else ''}{note}"
-            + (" — 고른 박스는 위치와 상관없이 이 레인으로 고정됩니다(◆, 주황 점선). Control 정규화도 이 레인 안에서 합니다. "
-               "같은 이름으로 다시 묶으면 박스가 이 레인에 더해집니다." if pinned else ""))
+        self.statusBar().showMessage(f"레인 그룹 '{final}': {n}개 열{' (반복)' if n > 1 else ''}{note}")
 
     # ---------------------------------------------------------------- tables: proteins / lanes
     def fill_rows_table(self):
@@ -2678,18 +3035,11 @@ class MainWindow(QtWidgets.QMainWindow):
         for i in range(a.n_lanes):
             t.setItem(i, 0, QtWidgets.QTableWidgetItem(str(i + 1)))
             t.setItem(i, 1, QtWidgets.QTableWidgetItem(a.lane_labels[i]))
-        self.ref_lane.blockSignals(True)
-        self.ref_lane.clear()
-        self.ref_lane.addItem("정규화 안 함 (비율 그대로)", None)
-        for i in range(a.n_lanes):
-            self.ref_lane.addItem(f"{i + 1}: {a.lane_labels[i]}", i)
-        idx = 0 if self.doc.ref_lane is None else self.ref_lane.findData(self.doc.ref_lane)
-        self.ref_lane.setCurrentIndex(idx if idx >= 0 else min(1, self.ref_lane.count() - 1))
-        self.ref_lane.blockSignals(False)
-        self.doc.ref_lane = self.ref_lane.currentData()
+        self.fill_groupings()
+        self.fill_basis_combo()
 
     def on_ref_lane(self, *_):
-        self.doc.ref_lane = self.ref_lane.currentData()
+        self._set_ref(self.ref_lane.currentData())
         self.recompute_results()
         self.recompute_multi()
 
@@ -2849,25 +3199,30 @@ class MainWindow(QtWidgets.QMainWindow):
         return [d for d in self.docs if d.raw is not None]
 
     def image_results(self, d: ImageDoc):
-        """Results of one image: Target/Control ratios and its own formulas. Returns (results, messages)."""
-        a = d.analysis
+        """Results of one image: Target/Control ratios and its own formulas, per lane or per group
+        of the chosen grouping set. Returns (results, messages)."""
         res: Dict[str, np.ndarray] = {}
         msgs = []
         if not d.measurements:
             return res, msgs
+        a, meas = self.basis_of(d)
+        ref = self.ref_of(d)
         if self.auto_norm.isChecked():
             controls = [i for i, r in enumerate(a.rows) if r.role == core.ROLE_CONTROL]
             if controls:
                 c = controls[0]
                 for i, r in enumerate(a.rows):
                     if r.role == core.ROLE_TARGET:
-                        res[f"{r.name}/{a.rows[c].name}"] = core.normalize_to_control(a, d.measurements, i, c, d.ref_lane)
+                        v = core.normalize_to_control(a, meas, i, c, ref)
+                        if d.basis and not np.isfinite(v).any():
+                            continue  # this protein has no box in the grouping set
+                        res[f"{r.name}/{a.rows[c].name}"] = v
             else:
                 # no internal control: plain band intensities (raw Net per lane)
                 for i, r in enumerate(a.rows):
                     if r.role != core.ROLE_IGNORE:
-                        res[f"{r.name} (Net)"] = core.row_vector(a, d.measurements, i)
-        variables = core.formula_variables(a, d.measurements)
+                        res[f"{r.name} (Net)"] = core.row_vector(a, meas, i)
+        variables = core.formula_variables(a, meas)
         for f in a.formulas:
             name = f.get("name") or f.get("expr")
             expr = str(f.get("expr", "")).strip()
@@ -2876,7 +3231,7 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 val = core.evaluate(expr, variables)
                 if f.get("normalize", "1") == "1" and np.ndim(val) == 1:
-                    val = core.scale_to_reference(val, d.ref_lane)
+                    val = core.scale_to_reference(val, ref)
                 res[name] = np.atleast_1d(np.asarray(val, float))
             except Exception as e:
                 msgs.append(f"{name}: {e}")
@@ -2910,13 +3265,13 @@ class MainWindow(QtWidgets.QMainWindow):
         return [lst.item(i).text() for i in range(lst.count()) if lst.item(i).checkState() == Qt.Checked]
 
     def fill_results_table(self):
-        a = self.analysis
+        a, _ = self.basis_of(self.doc)
         names = list(self.results)
         t = self.results_table
         n = a.n_lanes
         t.clear()
         t.setColumnCount(len(names) + 1)
-        t.setHorizontalHeaderLabels(["레인 그룹"] + names)
+        t.setHorizontalHeaderLabels(["그룹" if self.doc.basis else "레인 그룹"] + names)
         t.setRowCount(max(n, 1 if names else 0))
         for i in range(n):
             t.setItem(i, 0, QtWidgets.QTableWidgetItem(a.lane_labels[i] if i < len(a.lane_labels) else str(i + 1)))
@@ -2932,7 +3287,7 @@ class MainWindow(QtWidgets.QMainWindow):
         t.resizeColumnsToContents()
 
     def replot(self, *_):
-        a = self.analysis
+        a, _ = self.basis_of(self.doc)
         series = {k: self.results[k] for k in self._checked(self.series_list) if k in self.results}
         # don't mix scalars and lane vectors in one chart
         if any(np.size(v) > 1 for v in series.values()):
@@ -2940,7 +3295,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if series and all(k.endswith(" (Net)") for k in series):
             ylabel = "Net intensity (raw)"
         else:
-            ylabel = "상대 intensity" if self.doc.ref_lane is not None else "정량값"
+            ylabel = "상대 intensity" if self.ref_of(self.doc) is not None else "정량값"
         labels = list(a.lane_labels)
         self.plot.plot(series, labels, labels, self.by_condition.isChecked(), ylabel, self.show_points.isChecked())
 
@@ -2956,7 +3311,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def image_lane_keys(self) -> Dict[int, List[str]]:
         m = self.lane_key_map()
-        return {k: [m.get((k, lab), lab) for lab in d.analysis.lane_labels]
+        return {k: [m.get((k, lab), lab) for lab in self.basis_of(d)[0].lane_labels]
                 for k, d in enumerate(self.docs) if d.raw is not None}
 
     def refresh_multi(self):
@@ -3112,9 +3467,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for k, d in enumerate(self.docs):
             v: Dict[str, object] = {}
             if k in keys and d.measurements:
-                a = d.analysis
+                a, meas = self.basis_of(d)
                 for ri, r in enumerate(a.rows):
-                    v[core._safe_name(r.name)] = core.to_common(core.row_vector(a, d.measurements, ri), keys[k], common)
+                    v[core._safe_name(r.name)] = core.to_common(core.row_vector(a, meas, ri), keys[k], common)
                 for m in d.measurements:
                     v.setdefault(m.band_id, m.net)
             image_vars.append(v)
@@ -3129,7 +3484,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 d = self.docs[k] if k < len(self.docs) else None
                 if d is None or k not in keys or not d.measurements:
                     continue
-                a = d.analysis
+                a, meas = self.basis_of(d)
                 ri = next((i for i, r in enumerate(a.rows) if r.name == name), None)
                 if ri is None:
                     msgs.append(f"{g['name']}: {self.doc_key(k)}에 '{name}' 단백질 그룹이 없습니다")
@@ -3139,9 +3494,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     if ctrl is None or ctrl == ri:
                         msgs.append(f"{g['name']}: {self.doc_key(k)}에 Control 단백질이 없어 비율을 계산할 수 없습니다")
                         continue
-                    vec = core.normalize_to_control(a, d.measurements, ri, ctrl, None)
+                    vec = core.normalize_to_control(a, meas, ri, ctrl, None)
                 else:
-                    vec = core.row_vector(a, d.measurements, ri)
+                    vec = core.row_vector(a, meas, ri)
                 vecs.append(core.to_common(vec, keys[k], common))
                 labels.append(f"{self.doc_key(k)}:{name}")
             if not vecs:
@@ -3294,6 +3649,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "image": projfile.file_ref(d.image_path, pp, arc.get(d.image_path)),
                 "marker": projfile.file_ref(marker, pp, arc.get(marker)) if marker else None,
                 "invert": d.invert, "background": vars(d.bg), "reference_lane": d.ref_lane,
+                "basis": d.basis, "basis_reference": d.basis_ref,
                 "mode": d.mode, "transform": d.transform, "marker_tf": d.marker_tf,
                 "analysis": d.analysis.to_dict(), "figure": d.figure,
             })
@@ -3588,6 +3944,8 @@ class MainWindow(QtWidgets.QMainWindow):
             doc.mode = im.get("mode", core.MODE_WESTERN)
             doc.image_path = path
             doc.ref_lane = im.get("reference_lane", 0)
+            doc.basis = im.get("basis", LANES_BASIS) or LANES_BASIS
+            doc.basis_ref = dict(im.get("basis_reference") or {})
             doc.analysis = core.Analysis.from_dict(im.get("analysis") or {})
             doc.analysis.ensure_lane_labels()
             doc.figure = im.get("figure") or figure.default_settings()
@@ -3629,7 +3987,7 @@ class MainWindow(QtWidgets.QMainWindow):
             w.writerow([])
             w.writerow(["[Bands]"])
             w.writerow(["image", "band_id", "protein", "role", "lane", "lane_group", "x", "y", "width", "height",
-                        "raw_intensity", "background", "net_intensity", "mean_per_px"])
+                        "raw_intensity", "background", "net_intensity", "mean_per_px", "measurement_groups"])
             for d in docs:
                 a = d.analysis
                 k = self.doc_key(self.docs.index(d))
@@ -3639,23 +3997,26 @@ class MainWindow(QtWidgets.QMainWindow):
                     x, y, wd, ht = by_id[m.band_id].box(a.rows)
                     r = a.rows[m.row]
                     w.writerow([k, m.band_id, r.name, r.role, m.lane + 1, a.lane_labels[m.lane],
-                                x, y, wd, ht, f"{m.raw:.3f}", f"{m.background:.3f}", f"{m.net:.3f}", f"{m.mean:.4f}"])
+                                x, y, wd, ht, f"{m.raw:.3f}", f"{m.background:.3f}", f"{m.net:.3f}", f"{m.mean:.4f}",
+                                "; ".join(f"{s_}: {g_}" for s_, g_ in by_id[m.band_id].tags.items())])
             w.writerow([])
             w.writerow(["[Results per image]"])
-            w.writerow(["image", "series", "reference_lane", "lane", "lane_group", "value"])
+            w.writerow(["image", "series", "reference", "lane_or_group", "lane_group_or_group_name", "value", "pairing"])
             cond_rows = []
             for d in docs:
-                a = d.analysis
+                a, _ = self.basis_of(d)
                 k = self.doc_key(self.docs.index(d))
-                ref = "" if d.ref_lane is None else d.ref_lane + 1
+                r_ = self.ref_of(d)
+                ref = "" if r_ is None else r_ + 1
+                pairing = f"grouping set: {d.basis}" if d.basis else "lanes"
                 res, _ = self.image_results(d)
                 for n, v in res.items():
                     if v.size == 1:
-                        w.writerow([k, n, ref, "", "", f"{v[0]:.6g}"])
+                        w.writerow([k, n, ref, "", "", f"{v[0]:.6g}", pairing])
                         continue
                     for i in range(v.size):
                         w.writerow([k, n, ref, i + 1, a.lane_labels[i] if i < len(a.lane_labels) else "",
-                                    f"{v[i]:.6g}" if np.isfinite(v[i]) else ""])
+                                    f"{v[i]:.6g}" if np.isfinite(v[i]) else "", pairing])
                     if len(set(a.lane_labels)) < len(a.lane_labels):
                         cn, means, sds, ns = core.condition_stats(v, a.lane_labels, a.lane_labels)
                         cond_rows += [[k, n, c_, f"{m_:.6g}", f"{s_:.6g}", k_] for c_, m_, s_, k_ in zip(cn, means, sds, ns)]

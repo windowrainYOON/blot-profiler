@@ -1757,7 +1757,10 @@ class FigureEditor(QtWidgets.QWidget):
         res, _ = self.main.image_results(d)
         for name, v in res.items():
             if np.size(v) > 1:
-                out.append((f"res:{name}", name, np.asarray(v, float)))
+                v = np.asarray(v, float)
+                if d.basis:  # per group of a grouping set: under the lanes of each group's target boxes
+                    v = core.group_values_on_lanes(a, d.basis, v)
+                out.append((f"res:{name}", name + (f" [{d.basis}]" if d.basis else ""), v))
         for ri, r in enumerate(a.rows):
             out.append((f"net:{r.name}", f"{r.name} (Net, raw)", core.row_vector(a, d.measurements, ri)))
         out += self.multi_sources()
