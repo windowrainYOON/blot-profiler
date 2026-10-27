@@ -390,48 +390,54 @@ def test_merge_bands_lane_by_lane():
     assert len(a.bands) == 2 and a.rows[0].width == 60
 
 
-def test_far_apart_bands_pinned_to_one_lane():
-    """Bands far apart chosen by hand as one lane stay one lane (moves, re-derived lanes,
-    lane-first lines, save/open, re-detection) and the control of that lane is used."""
+
+def test_grouping_sets_pair_far_apart_boxes_without_moving_lanes():
+    """Boxes far apart are paired by a grouping set; lanes stay as detected and the
+    control of each group is used for its target."""
     a = grid(rows=2, lanes=4)  # lanes at x = 20, 50, 80, 110; row 0 = control, row 1 = target
     a.rows[0].role = core.ROLE_CONTROL
-    c0 = next(b for b in a.bands if b.row == 0 and b.lane == 0)
-    t3 = next(b for b in a.bands if b.row == 1 and b.lane == 3)
-    assert core.make_lane_group(a, [c0, t3], "X") == "X"
-    assert c0.lane == t3.lane and c0.pin == t3.pin == "X"
-
-    def lane_of(b):
-        return a.lane_labels[b.lane]
-
-    def check():
-        assert lane_of(c0) == lane_of(t3) == "X"
-        assert sum(1 for b in a.bands if b.lane == c0.lane and b.row == 1) == 1  # one target box in X
-        # measurement: X's target value is divided by X's control value
-        sig = np.zeros((80, 160))
-        for b in a.bands:
-            x, y, w, h = b.box(a.rows)
-            sig[y:y + h, x:x + w] = 1.0 + b.cx / 10.0 + 5 * b.row
-        meas = core.measure(sig, a, core.BackgroundSettings(method="none"))
-        ratio = core.normalize_to_control(a, meas, 1, 0, None)
-        area = a.rows[0].width * a.rows[0].height
-        assert ratio[c0.lane] == pytest.approx((1 + t3.cx / 10 + 5) * area / ((1 + c0.cx / 10) * area))
-
-    check()
-    t3.cx += 4  # the user drags the far box a little
-    core.auto_assign_lanes(a)
-    check()
-    assert not core.auto_assign_lanes(a)  # stable
-    # lane-first results re-derive lanes from slanted lane lines
-    a.method = "lane"
-    a.lane_geom = [{"x0": 20.0 + 30 * i, "slope": 0.0, "half": 12, "ymid": 30.0} for i in range(4)]
-    core.auto_assign_lanes(a)
-    check()
-    # save / open
+    lanes_before = [(b.row, b.lane) for b in a.bands]
+    by = {(b.row, b.lane): b for b in a.bands}
+    core.set_group(a, [by[0, 0], by[1, 3]], "Pairs", "A")  # control of L1 with target of L4
+    core.set_group(a, [by[0, 1], by[1, 2]], "Pairs", "B")
+    core.set_group(a, [by[0, 0], by[1, 0]], "Other", "x")  # a box can be in several sets
+    assert [(b.row, b.lane) for b in a.bands] == lanes_before
+    assert [g["name"] for g in a.groupings] == ["Pairs", "Other"]
+    assert by[0, 0].tags == {"Pairs": "A", "Other": "x"}
+    sig = np.zeros((80, 160))
+    for b in a.bands:
+        x, y, w, h = b.box(a.rows)
+        sig[y:y + h, x:x + w] = 1.0 + b.cx / 10.0 + 5 * b.row
+    meas = core.measure(sig, a, core.BackgroundSettings(method="none"))
+    v, vm = core.basis_view(a, meas, "Pairs")
+    assert v.lane_labels == ["A", "B"]
+    ratio = core.normalize_to_control(v, vm, 1, 0, None)
+    np.testing.assert_allclose(ratio, [(1 + 11 + 5) / (1 + 2), (1 + 8 + 5) / (1 + 5)])
+    # lanes as they are when no set is chosen
+    assert core.basis_view(a, meas, None)[0] is a
+    # status: a group without a control is reported
+    core.set_group(a, [by[1, 1]], "Pairs", "C")
+    st = {s_["group"]: s_["problems"] for s_ in core.group_status(a, "Pairs")}
+    assert st["A"] == [] and "Control 박스 없음" in st["C"]
+    # values go under the lanes of the target boxes (figure numbers)
+    np.testing.assert_allclose(core.group_values_on_lanes(a, "Pairs", [1.0, 2.0, 3.0]), [np.nan, 3.0, 2.0, 1.0])
+    # rename, remove, save/open
+    core.rename_group(a, "Pairs", "A", "Sample A")
+    core.clear_group(a, [by[1, 1]], "Pairs")
+    assert core.grouping(a, "Pairs")["groups"] == ["Sample A", "B"]
     b2 = core.Analysis.from_dict(a.to_dict())
-    assert sorted(b.pin for b in b2.bands if b.pin) == ["X", "X"]
-    # detecting again: new boxes at the same places get the pins back
+    assert b2.groupings == a.groupings and [b.tags for b in b2.bands] == [b.tags for b in a.bands]
+    # detecting again: new boxes at the same places get the groups back
     new = grid(rows=2, lanes=4)
-    pins = [(b.cx, b.cy, b.pin) for b in a.bands if b.pin]
-    assert core.restore_pins(new, pins) == 2
-    pinned = [b for b in new.bands if b.pin]
-    assert len({b.lane for b in pinned}) == 1 and new.lane_labels[pinned[0].lane] == "X"
+    assert core.restore_tags(new, [(b.cx, b.cy, dict(b.tags)) for b in a.bands if b.tags]) == 5
+    assert core.grouping(new, "Pairs")["groups"] == ["Sample A", "B"]
+
+
+def test_old_pinned_lanes_become_a_grouping_set():
+    a = grid(rows=2, lanes=3)
+    d = a.to_dict()
+    d["bands"][0]["pin"] = "X"
+    d["bands"][5]["pin"] = "X"
+    b = core.Analysis.from_dict(d)
+    assert [x.tags for x in b.bands if x.tags] == [{core.OLD_PIN_SET: "X"}] * 2
+    assert [x.lane for x in b.bands] == [x.lane for x in a.bands]
