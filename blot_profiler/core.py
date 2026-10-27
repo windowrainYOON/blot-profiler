@@ -165,6 +165,7 @@ class Band:
     cx: float  # box centre x
     cy: float  # box centre y
     user: bool = False  # placed or moved by the user: kept when detecting again
+    pin: str = ""  # lane group the user put this band in by hand: it stays there wherever the box is
 
     def box(self, rows: Sequence[Row]):
         r = rows[self.row]
@@ -247,7 +248,7 @@ class Analysis:
     def from_dict(cls, d: dict) -> "Analysis":
         a = cls()
         a.rows = [Row(**r) for r in d.get("rows", [])]
-        a.bands = [Band(**{k: b[k] for k in ("row", "lane", "cx", "cy", "user") if k in b}) for b in d.get("bands", [])]
+        a.bands = [Band(**{k: b[k] for k in ("row", "lane", "cx", "cy", "user", "pin") if k in b}) for b in d.get("bands", [])]
         a.lane_labels = list(d.get("lane_labels", []))
         a.named_lanes = list(d.get("named_lanes", []))
         a.ladder_row = d.get("ladder_row")
@@ -761,7 +762,9 @@ def make_row_group(a: Analysis, bands: Sequence[Band], name: str) -> str:
 def make_lane_group(a: Analysis, bands: Sequence[Band], name: str) -> str:
     """Name the lane(s) of ``bands`` as one lane group.
 
-    * One band per protein (a single column): the bands become one lane.
+    * One band per protein: exactly these bands become one lane, however far apart they
+      are (they are pinned to it: moving boxes or re-deriving lanes keeps them there).
+      Using the name of such a lane again adds the bands to it.
     * Several bands of the same protein (several columns): every lane they are
       in gets the name; those lanes are replicates of the group.
     If another lane group already uses the name it gets a numeric suffix.
@@ -774,28 +777,39 @@ def make_lane_group(a: Analysis, bands: Sequence[Band], name: str) -> str:
     ids = {id(b) for b in bands}
     rows = [b.row for b in bands]
     multi = len(rows) != len(set(rows))
+    join = None
     if multi:
         lanes = {b.lane for b in bands}
+        for b in bands:  # replicate lanes follow the box positions
+            b.pin = ""
     else:
-        lanes = {min(b.lane for b in bands)}
-        # move the selected bands into one lane; bands of the same protein that
-        # were there already (not selected) move to a new lane of their own
-        target = next(iter(lanes))
-        spare = a.n_lanes
+        # a name that is already a lane group: the bands join that lane
+        join = next((i for i, lab in enumerate(a.lane_labels) if name and lab == name
+                     and any(x.pin == name and x.lane == i for x in a.bands)), None)
+        if join is None:
+            target = len(a.lane_labels)
+            a.lane_labels.append("")
+        else:
+            target = join
+        lanes = {target}
+        # a band of the same protein already in that lane (not selected) gets a lane of its own
+        spare = None
         for b in a.bands:
             if b.lane == target and id(b) not in ids and b.row in set(rows):
+                if spare is None:
+                    a.lane_labels.append(unique_name(f"L{len(a.lane_labels) + 1}", a.lane_labels))
+                    spare = len(a.lane_labels) - 1
                 b.lane = spare
-        if any(b.lane == spare for b in a.bands):
-            k = 1
-            while f"L{k}" in a.lane_labels:
-                k += 1
-            a.lane_labels.append(f"L{k}")
+                b.pin = ""
         for b in bands:
             b.lane = target
     others = [lab for i, lab in enumerate(a.lane_labels) if i not in lanes]
-    final = unique_name(name or "Lane", others)
+    final = name if join is not None else unique_name(name or "Lane", others)
     for l in lanes:
         a.lane_labels[l] = final
+    if not multi:
+        for b in bands:  # kept in this lane group when boxes move or lanes are re-derived
+            b.pin = final
     if final not in a.named_lanes:
         a.named_lanes.append(final)
     remove_empty(a)
@@ -817,8 +831,14 @@ def auto_assign_lanes(a: Analysis) -> bool:
     if a.method == "lane" and a.lane_geom:
         return _assign_to_lane_lines(a)
     named = set(a.named_lanes)
+    free = [b for b in a.bands if not b.pin]
+    if not free:
+        before = (list(a.lane_labels), [b.lane for b in a.bands])
+        _apply_pins(a)
+        _drop_empty_lanes(a, named)
+        return before != (list(a.lane_labels), [b.lane for b in a.bands])
     gap = 0.5 * float(np.median([a.rows[b.row].width for b in a.bands]))
-    order = sorted(a.bands, key=lambda b: b.cx)
+    order = sorted(free, key=lambda b: b.cx)
     clusters: List[List[Band]] = [[order[0]]]
     for b in order[1:]:
         if b.cx - clusters[-1][-1].cx > gap:
@@ -835,31 +855,111 @@ def auto_assign_lanes(a: Analysis) -> bool:
             labels[k] = unique_name(f"L{k + 1}", used)
             used.add(labels[k])
     new_lane = {id(b): k for k, c in enumerate(clusters) for b in c}
-    changed = labels != a.lane_labels or any(b.lane != new_lane[id(b)] for b in a.bands)
-    if changed:
-        for b in a.bands:
-            b.lane = new_lane[id(b)]
-        a.lane_labels = labels
-        a.bands.sort(key=lambda b: (b.row, b.lane))
+    before = (list(a.lane_labels), [b.lane for b in a.bands])
+    for b in free:
+        b.lane = new_lane[id(b)]
+    a.lane_labels = labels
+    _apply_pins(a)
+    _drop_empty_lanes(a, named)
+    return before != (list(a.lane_labels), [b.lane for b in a.bands])
+
+
+def _drop_empty_lanes(a: Analysis, named) -> None:
+    """Lanes left to right by their boxes' x, empty ones dropped; lanes without a
+    user-given name are numbered L1, L2 … by position."""
+    used = {b.lane for b in a.bands}
+    xs = {l: float(np.median([b.cx for b in a.bands if b.lane == l])) for l in used}
+    order = sorted(used, key=lambda l: xs[l])
+    remap = {old: new for new, old in enumerate(order)}
+    labels = [a.lane_labels[l] for l in order]
+    named = set(named) | set(a.named_lanes) | {b.pin for b in a.bands if b.pin}
+    keep = {lab for lab in labels if lab in named}
+    for i, lab in enumerate(labels):
+        if lab not in keep:
+            labels[i] = unique_name(f"L{i + 1}", keep | set(labels[:i]))
+    a.lane_labels = labels
+    for b in a.bands:
+        b.lane = remap[b.lane]
+    a.bands.sort(key=lambda b: (b.row, b.lane))
+
+
+def _apply_pins(a: Analysis) -> bool:
+    """Put every pinned band into the lane named by its pin (made if missing). A band of the
+    same protein that is not pinned but sits in that lane moves to a lane of its own."""
+    pinned = [b for b in a.bands if b.pin]
+    if not pinned:
+        return False
+    changed = False
+    home = {}
+    for name in {b.pin for b in pinned}:
+        cands = [i for i, lab in enumerate(a.lane_labels) if lab == name]
+        if not cands:
+            a.lane_labels.append(name)
+            cands = [len(a.lane_labels) - 1]
+        # the lane of that name holding most of the unpinned boxes (the column itself)
+        home[name] = max(cands, key=lambda i: (sum(1 for b in a.bands if b.lane == i and not b.pin), -i))
+    for b in pinned:
+        lane = home[b.pin]
+        if b.lane != lane:
+            b.lane = lane
+            changed = True
+        if b.pin not in a.named_lanes:
+            a.named_lanes.append(b.pin)
+    taken = {(b.row, b.lane) for b in pinned}
+    for b in a.bands:
+        if not b.pin and (b.row, b.lane) in taken:
+            a.lane_labels.append(unique_name(f"L{len(a.lane_labels) + 1}", a.lane_labels))
+            b.lane = len(a.lane_labels) - 1
+            changed = True
+    a.bands.sort(key=lambda b: (b.row, b.lane))
     return changed
+
+
+def restore_pins(a: Analysis, pins) -> int:
+    """After detecting again: pins = [(cx, cy, lane group)] of the old analysis. The new box at
+    that place (or a new box there) gets the pin back. Returns the number restored."""
+    n = 0
+    for cx, cy, name in pins:
+        hit = next((b for b in a.bands if not b.pin
+                    and abs(b.cx - cx) <= a.rows[b.row].width / 2 and abs(b.cy - cy) <= a.rows[b.row].height / 2), None)
+        if hit is None:
+            if not a.rows:
+                continue
+            hit = add_band(a, cx, cy)
+            hit.user = True
+        hit.pin = name
+        n += 1
+    if n:
+        auto_assign_lanes(a)
+    return n
 
 
 def _assign_to_lane_lines(a: Analysis) -> bool:
     """Lane-first results: each box belongs to the nearest lane line at its height
     (lanes may be slanted, so x alone would split them)."""
     geom = a.lane_geom
-    changed = False
-    for b in a.bands:
+    before = (list(a.lane_labels), [b.lane for b in a.bands])
+    old_labels = list(a.lane_labels)
+    named = set(a.named_lanes)
+    free = [b for b in a.bands if not b.pin]
+    near = {}
+    for b in free:
         xs = [g["x0"] + g["slope"] * (b.cy - g.get("ymid", 0.0)) for g in geom]
-        lane = int(np.argmin([abs(x - b.cx) for x in xs]))
-        if lane != b.lane:
-            b.lane = lane
-            changed = True
-    while len(a.lane_labels) < len(geom):
-        a.lane_labels.append(unique_name(f"L{len(a.lane_labels) + 1}", a.lane_labels))
-    if changed:
-        a.bands.sort(key=lambda b: (b.row, b.lane))
-    return changed
+        near[id(b)] = int(np.argmin([abs(x - b.cx) for x in xs]))
+    # each lane line keeps the name most of its boxes had
+    labels: List[str] = []
+    for gi in range(len(geom)):
+        votes = [old_labels[b.lane] for b in free if near[id(b)] == gi and b.lane < len(old_labels)]
+        lab = max(set(votes), key=votes.count) if votes else (old_labels[gi] if gi < len(old_labels) else "")
+        if not lab or (lab in labels and lab not in named):  # replicate names may repeat, numbers may not
+            lab = unique_name(f"L{gi + 1}", labels + old_labels)
+        labels.append(lab)
+    for b in free:
+        b.lane = near[id(b)]
+    a.lane_labels = labels
+    _apply_pins(a)
+    a.bands.sort(key=lambda b: (b.row, b.lane))
+    return before != (list(a.lane_labels), [b.lane for b in a.bands])
 
 
 def lane_centers(a: Analysis) -> List[float]:
