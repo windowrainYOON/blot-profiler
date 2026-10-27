@@ -111,7 +111,8 @@ class BandItem(QtWidgets.QGraphicsRectItem):
             pen.setStyle(Qt.DotLine)
         self.setPen(pen)
         self.setBrush(Qt.NoBrush)
-        self.label.setText(self.view.ids.get(id(self.band), ""))
+        self.label.setText(self.view.ids.get(id(self.band), "") + (" ◆" if self.band.pin else ""))
+        self.setToolTip(f"직접 지정한 레인 '{self.band.pin}' — 박스를 옮겨도 이 레인에 남습니다" if self.band.pin else "")
         self.label.setBrush(color)
         self.label.setPos(0, 0)
         self.label.setY(-1)
@@ -372,12 +373,32 @@ class BlotView(QtWidgets.QGraphicsView):
         self.rebuild_extras()
 
     def rebuild_extras(self):
-        """The (slanted) lane centre lines of lane-first detection."""
+        """The (slanted) lane centre lines of lane-first detection and the lanes the user
+        assembled by hand (a line through all boxes of the lane, with its name)."""
         sc = self.scene()
         for it in self.extra_items:
             sc.removeItem(it)
         self.extra_items = []
         a = self.analysis
+        pen = QtGui.QPen(QtGui.QColor("#ff6d00"), 2, Qt.DashLine)
+        pen.setCosmetic(True)
+        for lane in sorted({b.lane for b in a.bands if b.pin}):
+            pts = sorted(((b.cx, b.cy) for b in a.bands if b.lane == lane), key=lambda p: p[1])
+            path = QtGui.QPainterPath(QtCore.QPointF(*pts[0]))
+            for x, y in pts[1:]:
+                path.lineTo(x, y)
+            it = sc.addPath(path, pen)
+            it.setZValue(4)
+            self.extra_items.append(it)
+            name = a.lane_labels[lane] if lane < len(a.lane_labels) else ""
+            t = sc.addSimpleText(f"레인 {name} (직접 지정)")
+            t.setBrush(QtGui.QColor("#e65100"))
+            t.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations)
+            mid = pts[len(pts) // 2 - 1] if len(pts) > 1 else pts[0]
+            nxt = pts[len(pts) // 2] if len(pts) > 1 else pts[0]
+            t.setPos((mid[0] + nxt[0]) / 2 + 4, (mid[1] + nxt[1]) / 2)  # middle of the line, clear of the box IDs
+            t.setZValue(5)
+            self.extra_items.append(t)
         if self.show_lanes and self.pix_item is not None and getattr(a, "lane_geom", None):
             H = self.pix_item.pixmap().height()
             pen = QtGui.QPen(QtGui.QColor(0, 151, 167, 150), 1, Qt.DashLine)
@@ -1122,6 +1143,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.multi_results: Dict[str, Dict[str, object]] = {}  # name -> {mean, sd, points}
         self._updating = False
         self._tilt_done = False
+        self._pins = []  # lanes assembled by hand, carried over when detecting again
         self.project_path: Optional[str] = None  # where the project was last saved/opened
         self._saved_fp: Optional[str] = None  # state at that moment (unsaved-change mark)
 
@@ -2323,6 +2345,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         old = self.analysis
         user_bands = [(b.cx, b.cy, old.rows[b.row].name) for b in old.bands if getattr(b, "user", False)]
+        self._pins = [(b.cx, b.cy, b.pin) for b in old.bands if b.pin]  # lanes assembled by hand
         if self.method_combo.currentData() == "lane":
             self._detect_lane_first(corr, settings, old, user_bands)
             return
@@ -2331,6 +2354,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if old.lane_labels and len(old.lane_labels) == a.n_lanes:
                 a.lane_labels = list(old.lane_labels)
             a.formulas = list(old.formulas)
+            core.restore_pins(a, self._pins)
             self.set_analysis(a)
             if self.doc.figure is not None:
                 figure.apply_mode_defaults(self.doc.figure, a, core.MODE_GEL)
@@ -2350,6 +2374,7 @@ class MainWindow(QtWidgets.QMainWindow):
         a.formulas = list(old.formulas)
         if a.rows and not any(r.role == core.ROLE_CONTROL for r in a.rows):
             a.rows[0].role = core.ROLE_CONTROL  # loading control is usually the top row; user can change
+        core.restore_pins(a, self._pins)
         self.set_analysis(a)
         self.statusBar().showMessage(
             f"자동 그룹 제안: 단백질 {len(a.rows)}개({', '.join(r.name for r in a.rows)}), 레인 {a.n_lanes}개, 박스 {len(a.bands)}개. "
@@ -2380,6 +2405,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 kept += 1
         if kept and a.method == "lane":
             core.auto_assign_lanes(a)
+        core.restore_pins(a, getattr(self, "_pins", []))
         # tilt: corrected only by turning the whole image (and the marker with it)
         ang = lanes.tilt_angle(a)
         if self.auto_tilt.isChecked() and not self._tilt_done and 0.3 <= abs(ang) <= 10:
@@ -2433,7 +2459,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_boxes_changed(self):
         # every position change (also while dragging) re-derives the lanes
         if self.apply_auto_lanes():
-            self.statusBar().showMessage("박스 위치에 맞춰 레인을 다시 지정했습니다 (이름 붙인 레인 그룹은 유지)")
+            self.statusBar().showMessage("박스 위치에 맞춰 레인을 다시 지정했습니다 (이름 붙인 레인 그룹·직접 지정한 레인은 유지)")
+        self.view.rebuild_extras()
         # box sizes may have been changed by dragging in resize mode
         for i, r in enumerate(self.analysis.rows):
             for col, attr in ((2, "width"), (3, "height")):
@@ -2483,7 +2510,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if sel:
             gm = menu.addMenu(f"그룹 설정 ({len(sel)}개 박스)")
             gm.addAction("단백질(행) 그룹으로 묶기…", self.make_protein_group)
-            gm.addAction("레인(열) 그룹으로 묶기…", self.make_lane_group)
+            gm.addAction("레인(열) 그룹으로 묶기… (떨어져 있어도 하나의 레인으로)", self.make_lane_group)
+            if any(b.pin for b in sel):
+                gm.addAction("직접 지정한 레인 풀기 (위치대로 따라가기)", self.unpin_selected)
             if self.doc.mode == core.MODE_GEL:
                 gm.addAction("선택한 박스의 레인을 ladder로 지정", lambda: self.set_ladder_selected(True))
                 gm.addAction("선택한 박스의 레인을 ladder에서 빼기", lambda: self.set_ladder_selected(False))
@@ -2529,6 +2558,14 @@ class MainWindow(QtWidgets.QMainWindow):
         note = f" ('{name}'이(가) 이미 있어 '{final}'(으)로 붙였습니다)" if final != name else ""
         self.statusBar().showMessage(f"단백질 그룹 '{final}': 밴드 {len(sel)}개{note}")
 
+    def unpin_selected(self):
+        sel = [b for b in self.view.selected_bands() if b.pin]
+        for b in sel:
+            b.pin = ""
+        core.auto_assign_lanes(self.analysis)
+        self.structure_changed()
+        self.statusBar().showMessage(f"박스 {len(sel)}개의 레인 지정을 풀었습니다 — 이제 위치대로 레인이 정해집니다")
+
     def make_lane_group(self):
         sel = self.view.selected_bands()
         if not sel:
@@ -2545,7 +2582,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.select_bands(sel)
         n = a.lane_labels.count(final)
         note = f" ('{name}'이(가) 이미 있어 '{final}'(으)로 붙였습니다)" if final != name else ""
-        self.statusBar().showMessage(f"레인 그룹 '{final}': {n}개 열{' (반복)' if n > 1 else ''}{note}")
+        pinned = any(b.pin for b in sel)
+        self.statusBar().showMessage(
+            f"레인 그룹 '{final}': {n}개 열{' (반복)' if n > 1 else ''}{note}"
+            + (" — 고른 박스는 위치와 상관없이 이 레인으로 고정됩니다(◆, 주황 점선). Control 정규화도 이 레인 안에서 합니다. "
+               "같은 이름으로 다시 묶으면 박스가 이 레인에 더해집니다." if pinned else ""))
 
     # ---------------------------------------------------------------- tables: proteins / lanes
     def fill_rows_table(self):

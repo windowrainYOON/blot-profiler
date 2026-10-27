@@ -388,3 +388,50 @@ def test_merge_bands_lane_by_lane():
     # two neighbouring boxes of one row -> one wide box
     assert core.merge_bands(a, a.bands[:2]) == 1
     assert len(a.bands) == 2 and a.rows[0].width == 60
+
+
+def test_far_apart_bands_pinned_to_one_lane():
+    """Bands far apart chosen by hand as one lane stay one lane (moves, re-derived lanes,
+    lane-first lines, save/open, re-detection) and the control of that lane is used."""
+    a = grid(rows=2, lanes=4)  # lanes at x = 20, 50, 80, 110; row 0 = control, row 1 = target
+    a.rows[0].role = core.ROLE_CONTROL
+    c0 = next(b for b in a.bands if b.row == 0 and b.lane == 0)
+    t3 = next(b for b in a.bands if b.row == 1 and b.lane == 3)
+    assert core.make_lane_group(a, [c0, t3], "X") == "X"
+    assert c0.lane == t3.lane and c0.pin == t3.pin == "X"
+
+    def lane_of(b):
+        return a.lane_labels[b.lane]
+
+    def check():
+        assert lane_of(c0) == lane_of(t3) == "X"
+        assert sum(1 for b in a.bands if b.lane == c0.lane and b.row == 1) == 1  # one target box in X
+        # measurement: X's target value is divided by X's control value
+        sig = np.zeros((80, 160))
+        for b in a.bands:
+            x, y, w, h = b.box(a.rows)
+            sig[y:y + h, x:x + w] = 1.0 + b.cx / 10.0 + 5 * b.row
+        meas = core.measure(sig, a, core.BackgroundSettings(method="none"))
+        ratio = core.normalize_to_control(a, meas, 1, 0, None)
+        area = a.rows[0].width * a.rows[0].height
+        assert ratio[c0.lane] == pytest.approx((1 + t3.cx / 10 + 5) * area / ((1 + c0.cx / 10) * area))
+
+    check()
+    t3.cx += 4  # the user drags the far box a little
+    core.auto_assign_lanes(a)
+    check()
+    assert not core.auto_assign_lanes(a)  # stable
+    # lane-first results re-derive lanes from slanted lane lines
+    a.method = "lane"
+    a.lane_geom = [{"x0": 20.0 + 30 * i, "slope": 0.0, "half": 12, "ymid": 30.0} for i in range(4)]
+    core.auto_assign_lanes(a)
+    check()
+    # save / open
+    b2 = core.Analysis.from_dict(a.to_dict())
+    assert sorted(b.pin for b in b2.bands if b.pin) == ["X", "X"]
+    # detecting again: new boxes at the same places get the pins back
+    new = grid(rows=2, lanes=4)
+    pins = [(b.cx, b.cy, b.pin) for b in a.bands if b.pin]
+    assert core.restore_pins(new, pins) == 2
+    pinned = [b for b in new.bands if b.pin]
+    assert len({b.lane for b in pinned}) == 1 and new.lane_labels[pinned[0].lane] == "X"
