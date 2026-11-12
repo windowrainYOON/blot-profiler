@@ -25,6 +25,7 @@ from . import figure  # noqa: E402
 from . import project as projfile  # noqa: E402
 from . import lanes  # noqa: E402
 from . import graph, prefs  # noqa: E402
+from .ui import theme  # noqa: E402,F401  (1.0 UI: applied once the new windows land)
 from . import __version__  # noqa: E402
 
 

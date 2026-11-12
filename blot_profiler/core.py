@@ -188,6 +188,9 @@ class Analysis:
     candidates: List[dict] = field(default_factory=list)  # lane-first: suggested boxes {x, y, w, h, score}
     formulas: List[Dict[str, str]] = field(default_factory=list)  # {name, expr, normalize}
     groupings: List[Dict[str, object]] = field(default_factory=list)  # [{name, groups: [group names in order]}]
+    lane_lines: List[List[List[float]]] = field(default_factory=list)  # blue lane lines: polylines [[x, y], …]
+    protein_lines: List[Dict[str, object]] = field(default_factory=list)  # red lines {row, x0, y0, x1, y1}
+    lane_roles: List[str] = field(default_factory=list)  # per lane: sample · marker · exclude
 
     @property
     def n_lanes(self) -> int:
@@ -265,6 +268,9 @@ class Analysis:
         a.lane_geom = [dict(x) for x in d.get("lane_geom", [])]
         a.candidates = [dict(x) for x in d.get("candidates", [])]
         a.formulas = [dict(f) for f in d.get("formulas", [])]
+        a.lane_lines = [[[float(x), float(y)] for x, y in ln] for ln in d.get("lane_lines", [])]
+        a.protein_lines = [dict(p) for p in d.get("protein_lines", [])]
+        a.lane_roles = list(d.get("lane_roles", []))
         sync_groupings(a)
         return a
 
@@ -1042,6 +1048,150 @@ def restore_tags(a: Analysis, tagged) -> int:
         n += 1
     sync_groupings(a)
     return n
+
+
+# --------------------------------------------------------------------------
+# Lane lines (blue, editable polylines), protein lines (red), lane roles
+# --------------------------------------------------------------------------
+
+LANE_SAMPLE, LANE_MARKER, LANE_EXCLUDE = "sample", "marker", "exclude"
+LANE_ROLES = (LANE_SAMPLE, LANE_MARKER, LANE_EXCLUDE)
+LANE_ROLE_LABELS = {LANE_SAMPLE: "시료", LANE_MARKER: "마커", LANE_EXCLUDE: "제외"}
+
+
+def poly_x(points, y):
+    """x of a polyline [[x, y], …] at height y (linear between points, straight beyond the ends)."""
+    pts = sorted(points, key=lambda p: p[1])
+    ys = np.array([p[1] for p in pts], float)
+    xs = np.array([p[0] for p in pts], float)
+    y = np.asarray(y, float)
+    if len(pts) == 1:
+        return np.full_like(y, xs[0])
+    out = np.interp(y, ys, xs)
+    lo, hi = y < ys[0], y > ys[-1]
+    if np.any(lo):
+        s0 = (xs[1] - xs[0]) / max(ys[1] - ys[0], 1e-9)
+        out = np.where(lo, xs[0] + s0 * (y - ys[0]), out)
+    if np.any(hi):
+        s1 = (xs[-1] - xs[-2]) / max(ys[-1] - ys[-2], 1e-9)
+        out = np.where(hi, xs[-1] + s1 * (y - ys[-1]), out)
+    return out
+
+
+def protein_line_y(p: dict, x) -> float:
+    """y of a red protein line at x (straight through its two ends)."""
+    x0, y0, x1, y1 = float(p["x0"]), float(p["y0"]), float(p["x1"]), float(p["y1"])
+    if abs(x1 - x0) < 1e-9:
+        return (y0 + y1) / 2.0
+    return float(y0 + (y1 - y0) * (float(x) - x0) / (x1 - x0))
+
+
+def lines_from_analysis(a: Analysis, shape) -> None:
+    """Blue lane lines and red protein lines that match the current boxes (after detecting)."""
+    H, W = shape
+    lines = []
+    if a.lane_geom and len(a.lane_geom) == a.n_lanes:
+        from . import lanes as _lanes  # noqa: PLC0415
+
+        for g in a.lane_geom:
+            if g.get("points"):
+                lines.append([[float(x), float(y)] for x, y in g["points"]])
+            else:
+                lines.append([[float(_lanes.lane_line_x(g, 0.0)), 0.0], [float(_lanes.lane_line_x(g, H - 1.0)), float(H - 1)]])
+    else:
+        for lane in range(a.n_lanes):
+            pts = [(b.cx, b.cy) for b in a.bands if b.lane == lane]
+            if not pts:
+                continue
+            x = float(np.median([p[0] for p in pts]))
+            lines.append([[x, 0.0], [x, float(H - 1)]])
+    a.lane_lines = lines
+    a.protein_lines = []
+    for ri, r in enumerate(a.rows):
+        pts = [(b.cx, b.cy) for b in a.bands if b.row == ri]
+        if not pts:
+            continue
+        xs = np.array([p[0] for p in pts], float)
+        ys = np.array([p[1] for p in pts], float)
+        s_, c_ = (np.polyfit(xs, ys, 1) if len(pts) >= 2 and np.ptp(xs) > 0 else (0.0, float(np.mean(ys))))
+        x0 = float(max(0.0, xs.min() - r.width))
+        x1 = float(min(W - 1.0, xs.max() + r.width))
+        a.protein_lines.append({"row": r.name, "x0": x0, "y0": float(s_ * x0 + c_), "x1": x1, "y1": float(s_ * x1 + c_)})
+    sync_lane_roles(a)
+
+
+def sync_lane_roles(a: Analysis) -> None:
+    n = a.n_lanes
+    roles = list(a.lane_roles[:n]) + [LANE_SAMPLE] * max(0, n - len(a.lane_roles))
+    for lane in ladder_lanes(a) if a.ladder_row else []:
+        if lane < n:
+            roles[lane] = LANE_MARKER
+    a.lane_roles = roles
+
+
+def lane_x_at(a: Analysis, lane: int, y: float) -> float:
+    """Centre x of a lane at height y: its blue lane line, else the median of its boxes."""
+    if 0 <= lane < len(a.lane_lines):
+        return float(poly_x(a.lane_lines[lane], y))
+    xs = [b.cx for b in a.bands if b.lane == lane]
+    return float(np.median(xs)) if xs else float("nan")
+
+
+def fill_row(a: Analysis, row: int) -> int:
+    """ROI 박스 채우기: boxes of protein ``row`` (same size) in every lane that has none, at the
+    same height as its box(es), following the red line of that protein or the lanes' slant."""
+    have = [b for b in a.bands if b.row == row]
+    if not have:
+        return 0
+    name = a.rows[row].name
+    pline = next((p for p in a.protein_lines if p.get("row") == name), None)
+    lanes_with = {b.lane for b in have}
+    ref = have[0]
+    n = 0
+    for lane in range(a.n_lanes):
+        if lane in lanes_with or (a.lane_roles and lane < len(a.lane_roles) and a.lane_roles[lane] == LANE_MARKER):
+            continue
+        y = ref.cy
+        x = lane_x_at(a, lane, y)
+        if not np.isfinite(x):
+            continue
+        if pline is not None:
+            y = protein_line_y(pline, x)
+            x = lane_x_at(a, lane, y)
+        elif len(have) >= 2:  # follow the slant of the boxes already there
+            xs = np.array([b.cx for b in have], float)
+            ys = np.array([b.cy for b in have], float)
+            if np.ptp(xs) > 0:
+                k, c = np.polyfit(xs, ys, 1)
+                y = float(k * x + c)
+        a.bands.append(Band(row=row, lane=lane, cx=float(x), cy=float(y), user=True))
+        n += 1
+    a.bands.sort(key=lambda b: (b.row, b.lane))
+    return n
+
+
+DEFAULT_LADDER = [180, 130, 100, 70, 55, 40, 35, 25, 15, 10]  # kDa, top to bottom (spec 1.0)
+LADDER_PRESETS_KDA = {
+    "내 래더 (180–10 kDa)": DEFAULT_LADDER,
+    "PageRuler Plus (250–10 kDa)": [250, 130, 100, 70, 55, 35, 25, 15, 10],
+    "PageRuler (180–10 kDa)": [180, 130, 100, 70, 55, 40, 35, 25, 15, 10],
+    "Precision Plus (250–10 kDa)": [250, 150, 100, 75, 50, 37, 25, 20, 15, 10],
+}
+
+
+def fill_ladder(n_marks: int, anchor: int, anchor_size: float, ladder: Sequence[float]) -> List[Optional[float]]:
+    """Sizes of ``n_marks`` marker bands (top to bottom) when band ``anchor`` is ``anchor_size``:
+    the others follow the ladder's order. Bands beyond the ladder's ends get None."""
+    lad = sorted((float(v) for v in ladder), reverse=True)
+    if not lad:
+        return [None] * n_marks
+    pos = int(np.argmin([abs(v - float(anchor_size)) for v in lad]))
+    out: List[Optional[float]] = []
+    for i in range(n_marks):
+        j = pos + (i - anchor)
+        out.append(float(lad[j]) if 0 <= j < len(lad) else None)
+    out[anchor] = float(anchor_size)
+    return out
 
 
 def lane_centers(a: Analysis) -> List[float]:
