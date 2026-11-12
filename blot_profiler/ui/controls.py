@@ -120,7 +120,7 @@ class ChipRow(QtWidgets.QWidget):
             b = QtWidgets.QPushButton(t)
             b.setCheckable(True)
             b.setChecked(i == current)
-            b.setStyleSheet("min-height: 22px; padding: 0 8px; font-size: 12px;")
+            b.setStyleSheet("min-height: 22px; padding: 0 9px; font-size: 12px; border-radius: 11px;")
             b.clicked.connect(lambda _=False, i=i: self.clicked.emit(i))
             self.flow.addWidget(b)
         self.updateGeometry()
@@ -203,8 +203,9 @@ class ZoomChip(QtWidgets.QFrame):
         self.setAttribute(Qt.WA_StyledBackground, True)
         self._fit = fit
         lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(10, 4, 11, 4)
+        lay.setContentsMargins(10, 0, 11, 0)
         lay.setSpacing(5)
+        self.setFixedHeight(26)  # a capsule: the radius (12) stays under half the height, else Qt draws it square
         ic = QtWidgets.QLabel()
         ic.setPixmap(icon("magnifyingglass").pixmap(13, 13))
         lay.addWidget(ic)

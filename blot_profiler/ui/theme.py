@@ -76,7 +76,7 @@ TOKENS = {
         'status-neutral-tint': '#8e8e9329',
     },
     'dark': {
-        'red': '#ff4245', 'orange': '#ff9230', 'green': '#30d158', 'blue': '#2997ff',
+        'red': '#ff4245', 'orange': '#ff9230', 'green': '#30d158', 'blue': '#0a84ff',
         'gray': '#8e8e93', 'gray-3': '#48484a', 'gray-5': '#2c2c2e',
         'background': '#000000', 'background-secondary': '#1c1c1e',
         'region-base': '#1e1e1e', 'region-canvas': '#2c2c2c', 'region-box': '#393939', 'region-inspector': '#393939',
@@ -898,6 +898,14 @@ class _Polisher(QObject):
     the FormRow rule for narrow containers."""
 
     def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.Show:
+            from PySide6.QtWidgets import QScrollArea  # noqa: PLC0415
+
+            if isinstance(obj, QScrollArea) and obj.widget() is not None:
+                # QScrollArea.setWidget turns the page's autoFillBackground on: an opaque square
+                # sheet (the window colour) over the rounded box it sits in
+                obj.widget().setAutoFillBackground(False)
+                obj.viewport().setAutoFillBackground(False)
         if ev.type() == QEvent.Type.Polish and isinstance(obj, QAbstractSpinBox) \
                 and not obj.property('hig_num'):
             # stepper: the value starts at the leading edge (owner rule

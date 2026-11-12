@@ -53,6 +53,8 @@ class QuantWindow(QtWidgets.QMainWindow):
         tb.addWidget(self.export_btn)
 
         self.stack = QtWidgets.QStackedWidget()
+        self.stack.setObjectName("hig_floor")  # the window floor around the boxes (no black/white strips)
+        self.stack.setAttribute(Qt.WA_StyledBackground, True)
         self.pages = {
             "bands": self._boxed(main._scroll(main._build_bands_tab())),
             "quant": main._build_results_tab(),

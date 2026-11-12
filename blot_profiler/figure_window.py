@@ -2338,7 +2338,7 @@ class FigureWindow(QtWidgets.QMainWindow):
         m.addAction("여러 개 골라서 내보내기…", main.open_export_dialog).setShortcut("Ctrl+E")
         b.setMenu(m)
         tb.addWidget(b)
-        editor.setObjectName("hig_sidebar")  # the window's base around the preview and properties boxes
+        editor.setObjectName("hig_floor")  # the window's base around the preview and properties boxes
         editor.setAttribute(Qt.WA_StyledBackground, True)
         self.setCentralWidget(editor)
 

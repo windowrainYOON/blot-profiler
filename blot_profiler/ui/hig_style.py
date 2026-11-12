@@ -243,20 +243,21 @@ QMainWindow, QSplitter, QStatusBar { background: transparent; }
 QMainWindow, QDialog {{ background: {c('background-secondary')}; }}
 QMainWindow, QMainWindow > QSplitter {{ background: {region('sidebar')}; }}
 QWidget#hig_sidebar {{ background: {region('sidebar')}; border: none; }}
+QWidget#hig_floor {{ background: {region('sidebar')}; border: none; }}
 QWidget#hig_content {{ background: {region('canvas')}; border-radius: {theme.BOX_RADIUS}px;
     border: 1px solid {edge}; }}
 QWidget#hig_inspector {{ background: {region('inspector')}; border-radius: {theme.BOX_RADIUS}px;
     border: 1px solid {edge}; }}
 QToolBar {{ background: {region('sidebar')}; border: none; spacing: 6px; padding: 4px 8px; }}
 /* segmented control (macOS tahoe): one capsule track, the chosen segment a raised pill */
-QWidget#hig_segment {{ background: {tint('label', 0.08 if s == 'light' else 0.14)}; border-radius: {R_CAPSULE}px; }}
-QWidget#hig_segment QPushButton {{ background: transparent; border: none; border-radius: {R_CAPSULE - 2}px;
+QWidget#hig_segment {{ background: {tint('label', 0.07 if s == 'light' else 0.14)}; border-radius: 8px; }}
+QWidget#hig_segment QPushButton {{ background: transparent; border: 1px solid transparent; border-radius: 6px;
     min-height: {CTL - 6}px; padding: 0 12px; font-weight: 500; color: {c('label')}; }}
 QWidget#hig_segment QPushButton:hover {{ background: {tint('label', 0.05)}; }}
 QWidget#hig_segment QPushButton:checked {{ background: {seg_on}; color: {c('label')}; font-weight: 600;
     border: 1px solid {edge}; }}
 /* zoom chip over a canvas: magnifier + percent and its buttons on one capsule */
-QFrame#zoom_chip {{ background: {card}; border: 1px solid {edge}; border-radius: 13px; }}
+QFrame#zoom_chip {{ background: {card}; border: 1px solid {edge}; border-radius: 12px; }}
 QFrame#zoom_chip QLabel {{ background: transparent; color: {c('label')}; padding: 0; }}
 QScrollArea, QScrollArea > QWidget > QWidget#qt_scrollarea_viewport,
 QScrollArea > QWidget#qt_scrollarea_viewport {{ background: transparent; border: none; }}
@@ -540,6 +541,7 @@ QScrollBar::handle {{ background: {c('fill')}; border-radius: 3px; min-height: 2
     min-width: 24px; }}
 QScrollBar::handle:hover {{ background: {c('gray')}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 
 /* ---- materials ---- */

@@ -2349,12 +2349,13 @@ class MainWindow(QtWidgets.QMainWindow):
         w = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
+        v.setSpacing(2)
         v.addWidget(QtWidgets.QLabel(title))
         d = QtWidgets.QLabel(desc)
         d.setWordWrap(True)
         theme.hint(d)
         v.addWidget(d)
+        w.setMinimumHeight(52)  # title + two lines of description; a form row would squeeze them together
         return w
 
     def refresh_lines_card(self):
@@ -3194,8 +3195,8 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addStretch(1)
         lay.addWidget(controls.hint("저장: 창 위 '내보내기' 또는 파일 › 내보내기… (⌘E)"))
         side_scroll = self._scroll(side)
-        side_scroll.setMinimumWidth(260)  # mockup: a narrow sidebar on the window floor
-        side_scroll.setMaximumWidth(300)
+        side_scroll.setMinimumWidth(330)  # narrow sidebar on the window floor, wide enough that no row is cut off
+        side_scroll.setMaximumWidth(340)
 
         # graph + editor
         gp = self.prefs["graph"]
@@ -3266,6 +3267,7 @@ class MainWindow(QtWidgets.QMainWindow):
         root.setStretchFactor(0, 0)
         root.setStretchFactor(1, 1)
         root.setStretchFactor(2, 0)
+        root.setSizes([330, 100000, theme.INSPECTOR_W])  # the graph box takes the rest: no strip right of the editor
         self.results_title = QtWidgets.QLabel()  # (kept for older code paths)
         self.by_condition = QtWidgets.QCheckBox()
         self.by_condition.setChecked(True)
