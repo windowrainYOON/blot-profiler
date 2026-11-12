@@ -1996,16 +1996,47 @@ class FigureEditor(QtWidgets.QWidget):
     def export(self):
         if not self.ready():
             return
-        base = os.path.splitext(self.doc.image_path or "figure")[0] + "_figure.png"
-        p, flt = QtWidgets.QFileDialog.getSaveFileName(self, "그림 저장", base,
-                                                       "PNG (*.png);;TIFF (*.tif *.tiff);;PDF (*.pdf);;SVG (*.svg)")
-        if not p:
-            return
-        if not os.path.splitext(p)[1]:
-            p += {"PNG": ".png", "TIFF": ".tif", "PDF": ".pdf", "SVG": ".svg"}[flt.split()[0]]
+        m = self.main
+        p = m._save_path("그림 저장", f"figure.{m.prefs['export'].get('image_format', 'png')}", m._image_filter())
+        if p:
+            self.write_figure(p)
+            self.status(f"저장했습니다: {p}")
+
+    def write_figure(self, p: str, dpi: Optional[int] = None):
         self.render()
-        kw = {}
-        if p.lower().endswith((".tif", ".tiff")):
-            kw["pil_kwargs"] = {"compression": "tiff_lzw"}
-        self.fig.savefig(p, dpi=self.w_dpi.value(), facecolor="white", **kw)
-        self.status(f"저장했습니다: {p}")
+        self.main.save_figure_file(self.fig, p, int(dpi or self.w_dpi.value()), tight=False)
+
+    def numbers_table(self):
+        """The numbers rows of the figure as they are shown: (header, rows) per lane."""
+        values = {key: v for key, _, v in self.number_sources()}
+        lanes = self.s.get("lanes", [])
+        header = ["레인", "레인 이름"]
+        cols = []
+        for n in self.s.get("numbers", []):
+            v = values.get(n.get("source"))
+            if v is None:
+                continue
+            v = np.concatenate([v, np.full(max(0, len(lanes) - v.size), np.nan)])[: len(lanes)]
+            texts, suffix = figure.format_numbers(v, int(n.get("decimals", 2)), n.get("rel_lane"))
+            label = (n.get("label") or n.get("source", "")) + suffix
+            header += [f"{label} (표시)", f"{label} (값)"]
+            cols.append((texts, v))
+        rows = []
+        for i, ln in enumerate(lanes):
+            row = [str(i + 1), str(ln.get("text", ln.get("label", ""))).replace("|", " ")]
+            for texts, v in cols:
+                row += [texts[i] if i < len(texts) else "", f"{v[i]:.6g}" if i < v.size and np.isfinite(v[i]) else ""]
+            rows.append(row)
+        return header, rows
+
+    def write_numbers_csv(self, p: str):
+        import csv
+
+        header, rows = self.numbers_table()
+        with open(p, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow([f"# Figure 숫자 줄 · {self.doc.name if self.doc else ''}"])
+            if len(header) == 2:
+                w.writerow(["# Figure에 숫자 줄이 없습니다 (Figure 만들기 → 정량 숫자 넣기)"])
+            w.writerow(header)
+            w.writerows(rows)
