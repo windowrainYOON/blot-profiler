@@ -39,6 +39,8 @@ FIGURE_DEFAULTS = {
     "per_panel": True,  # contrast per panel (else one for the whole image)
     "use_corrected": False,  # show the background-corrected image
     "frame_lw": 0.8,
+    "group_bar_lw": 2.2,  # line under a group of lanes
+    "export_dpi": 600,
     "lane_rotation": 0,
     "panels": [],  # {row, show, label, pad_top, pad_bottom}
     "lanes": [],  # {label, text}   ("|" in text = line break)
@@ -64,8 +66,27 @@ FIGURE_DEFAULTS = {
 }
 
 
+# look of new figures chosen in File → 설정 (font, sizes, line widths, …); set by the app
+LOOK_KEYS = ("font", "fonts", "label_bold", "frame_lw", "group_bar_lw", "width_in", "panel_gap_in", "export_dpi")
+USER_DEFAULTS: dict = {}
+
+
+def set_user_defaults(look: Optional[dict]) -> None:
+    USER_DEFAULTS.clear()
+    USER_DEFAULTS.update({k: copy.deepcopy(v) for k, v in (look or {}).items() if k in LOOK_KEYS})
+
+
+def apply_look(s: dict, look: Optional[dict] = None) -> dict:
+    """Give an existing figure the default look (File → 설정 → 'Figure에도 지금 적용')."""
+    for k, v in (USER_DEFAULTS if look is None else look).items():
+        if k in LOOK_KEYS:
+            s[k] = copy.deepcopy(v)
+    return s
+
+
 def default_settings() -> dict:
-    return copy.deepcopy(FIGURE_DEFAULTS)
+    s = copy.deepcopy(FIGURE_DEFAULTS)
+    return apply_look(s)
 
 
 def _row_extent(a: core.Analysis, ri: int):
@@ -357,7 +378,7 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
     gap = float(s["panel_gap_in"])
 
     # header tier heights
-    bar_gap, bar_lw = 0.035, 2.2
+    bar_gap, bar_lw = 0.035, float(s.get("group_bar_lw", 2.2))
     tier_h = []
     for ti, t in enumerate(tiers):
         rot = float(t.get("rotation", 0))
