@@ -19,7 +19,17 @@ PALETTES = {
     "gray": ["#F2F2F2", "#BDBDBD", "#7A7A7A", "#424242", "#DADADA"],
     "color": ["#E64B35", "#4DBBD5", "#00A087", "#3C5488", "#F39B7F", "#8491B4"],
 }
-FALLBACK_FONTS = ["AppleGothic", "Apple SD Gothic Neo", "Malgun Gothic", "NanumGothic", "DejaVu Sans"]
+_FALLBACKS = ["AppleGothic", "Apple SD Gothic Neo", "Malgun Gothic", "NanumGothic", "DejaVu Sans"]
+
+
+def _installed(names):
+    from matplotlib import font_manager
+
+    have = {f.name for f in font_manager.fontManager.ttflist}
+    return [n for n in names if n in have] or ["DejaVu Sans"]
+
+
+FALLBACK_FONTS = _installed(_FALLBACKS)  # only fonts this computer has (no findfont warnings)
 
 
 def style(graph_prefs: Optional[dict] = None, **over) -> dict:
@@ -151,7 +161,8 @@ def _draw(fig, xlabels: List[str], data: List[Tuple[str, List[np.ndarray]]], yla
         for i, tb in enumerate(st.get("texts") or []):
             ax.text(float(tb.get("x", 0.5)), float(tb.get("y", 0.9)), tb.get("text", ""), transform=ax.transAxes,
                     fontsize=float(tb.get("size", st["legend_size"])), gid=f"text:{i}", zorder=6)
-        fig.tight_layout()
+        # margins are worked out again at every draw: the graph follows the window and nothing is cut
+        fig.set_layout_engine("tight", pad=0.6)
         return ax
 
 

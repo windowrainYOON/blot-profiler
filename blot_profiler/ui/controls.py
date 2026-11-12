@@ -20,8 +20,9 @@ class Segmented(QtWidgets.QWidget):
     def __init__(self, items: Iterable[Tuple[str, str]], parent=None, small: bool = False):
         super().__init__(parent)
         self.setObjectName("hig_segment")
+        self.setAttribute(Qt.WA_StyledBackground, True)  # the capsule track
         lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setContentsMargins(2, 2, 2, 2)
         lay.setSpacing(2)
         self.group = QtWidgets.QButtonGroup(self)
         self.group.setExclusive(True)
@@ -31,7 +32,7 @@ class Segmented(QtWidgets.QWidget):
             b.setCheckable(True)
             b.setFocusPolicy(Qt.TabFocus)
             if small:
-                b.setStyleSheet("font-size: 12px; padding: 0 10px;")
+                b.setStyleSheet("font-size: 12px; padding: 0 9px;")
             self.group.addButton(b)
             self.buttons[key] = b
             lay.addWidget(b)
@@ -89,7 +90,12 @@ def hint(text: str) -> QtWidgets.QLabel:
 def section(text: str) -> QtWidgets.QLabel:
     """Small grey header above a group of sidebar rows."""
     lab = QtWidgets.QLabel(text)
-    lab.setStyleSheet("color: rgba(60,60,67,0.6); font-size: 11px; font-weight: 600; padding: 10px 10px 2px 10px;")
+    theme.secondary(lab)
+    f = lab.font()
+    f.setPixelSize(11)
+    f.setBold(True)
+    lab.setFont(f)
+    lab.setContentsMargins(10, 10, 10, 2)
     return lab
 
 
@@ -181,3 +187,57 @@ def icon(name: str) -> QtGui.QIcon:
     from .hig_widgets import icon as _icon  # noqa: PLC0415
 
     return _icon(name, 16)
+
+
+class ZoomChip(QtWidgets.QFrame):
+    """The zoom of a canvas as a chip at its top right (magnifier + percent, −, +, fit)."""
+
+    def __init__(self, host: QtWidgets.QWidget, minus, plus, fit=None, corner: str = "top"):
+        super().__init__(host)
+        self.corner = corner  # "top" right, or "bottom" right (graphs: the legend is at the top)
+        self.setObjectName("zoom_chip")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(8, 3, 4, 3)
+        lay.setSpacing(2)
+        ic = QtWidgets.QLabel()
+        ic.setPixmap(icon("magnifyingglass").pixmap(14, 14))
+        lay.addWidget(ic)
+        self.label = QtWidgets.QLabel("100%")
+        self.label.setMinimumWidth(40)
+        self.label.setAlignment(Qt.AlignCenter)
+        f = self.label.font()
+        f.setPixelSize(12)
+        self.label.setFont(f)
+        lay.addWidget(self.label)
+        for text, tip, fn in (("−", "축소 ( ] )", minus), ("+", "확대 ( [ )", plus)):
+            b = QtWidgets.QToolButton()
+            b.setText(text)
+            b.setToolTip(tip)
+            b.clicked.connect(fn)
+            lay.addWidget(b)
+        if fit is not None:
+            b = QtWidgets.QToolButton()
+            b.setIcon(icon("fit"))
+            b.setToolTip("화면 맞춤 (⌘0)")
+            b.clicked.connect(fit)
+            lay.addWidget(b)
+        self.host = host
+        host.installEventFilter(self)
+        self.place()
+
+    def set_zoom(self, k: float):
+        self.label.setText(f"{k * 100:.0f}%")
+        self.adjustSize()
+        self.place()
+
+    def place(self):
+        self.adjustSize()
+        y = 10 if self.corner == "top" else max(0, self.host.height() - self.height() - 10)
+        self.move(max(0, self.host.width() - self.width() - 12), y)
+        self.raise_()
+
+    def eventFilter(self, obj, e):
+        if obj is self.host and e.type() in (QtCore.QEvent.Resize, QtCore.QEvent.Show):
+            self.place()
+        return False

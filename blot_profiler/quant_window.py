@@ -9,7 +9,7 @@ from typing import Optional
 from PySide6 import QtWidgets
 from PySide6.QtCore import Qt
 
-from .ui import controls
+from .ui import controls, theme
 
 
 class QuantWindow(QtWidgets.QMainWindow):
@@ -25,7 +25,7 @@ class QuantWindow(QtWidgets.QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, tb)
         self.setUnifiedTitleAndToolBarOnMac(True)
         self.sub = QtWidgets.QLabel()
-        self.sub.setStyleSheet("color: rgba(60,60,67,0.6); padding-left: 6px;")
+        theme.hint(self.sub)
         tb.addWidget(self.sub)
         sp = QtWidgets.QWidget()
         sp.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
@@ -36,13 +36,6 @@ class QuantWindow(QtWidgets.QMainWindow):
         sp = QtWidgets.QWidget()
         sp.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         tb.addWidget(sp)
-        tb.addAction("−", lambda: self.zoom(0.8)).setToolTip("축소 ( ] )")
-        self.zoom_label = QtWidgets.QLabel("100%")
-        self.zoom_label.setFixedWidth(46)
-        self.zoom_label.setAlignment(Qt.AlignCenter)
-        tb.addWidget(self.zoom_label)
-        tb.addAction("+", lambda: self.zoom(1.25)).setToolTip("확대 ( [ )")
-        tb.addSeparator()
         tb.addAction("측정 다시 하기", self.remeasure).setToolTip("열린 모든 이미지의 박스를 다시 측정합니다")
         self.export_btn = QtWidgets.QToolButton()
         self.export_btn.setText("내보내기")
@@ -61,20 +54,37 @@ class QuantWindow(QtWidgets.QMainWindow):
 
         self.stack = QtWidgets.QStackedWidget()
         self.pages = {
-            "bands": main._scroll(main._build_bands_tab()),
+            "bands": self._boxed(main._scroll(main._build_bands_tab())),
             "quant": main._build_results_tab(),
-            "multi": main._scroll(main._build_multi_tab()),
+            "multi": self._boxed(main._scroll(main._build_multi_tab())),
         }
         for key, _ in self.PAGES:
             self.stack.addWidget(self.pages[key])
         self.setCentralWidget(self.stack)
         self._zoom = 1.0
+        self.chip = controls.ZoomChip(main.plot_scroll, lambda: self.zoom(0.8), lambda: self.zoom(1.25),
+                                      lambda: self.zoom(1.0 / self._zoom), corner="bottom")
         self.seg.set_value("quant")
         self.stack.setCurrentWidget(self.pages["quant"])
         main.plot.canvas.mpl_connect("button_press_event", self._press)
         main.plot.canvas.mpl_connect("motion_notify_event", self._motion)
         main.plot.canvas.mpl_connect("button_release_event", self._release)
         self._drag = None
+
+    @staticmethod
+    def _boxed(page):
+        """A page on the window's base inside one rounded box (canvas region)."""
+        holder = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(holder)
+        lay.setContentsMargins(10, 0, 10, 10)
+        box = QtWidgets.QWidget()
+        box.setObjectName("hig_content")
+        box.setAttribute(Qt.WA_StyledBackground, True)
+        bl = QtWidgets.QVBoxLayout(box)
+        bl.setContentsMargins(12, 10, 12, 10)
+        bl.addWidget(page)
+        lay.addWidget(box)
+        return holder
 
     def page(self) -> str:
         return self.seg.value()
@@ -105,7 +115,7 @@ class QuantWindow(QtWidgets.QMainWindow):
     # ---- zoom of the graph ([ ] and the toolbar)
     def zoom(self, k: float):
         self._zoom = max(0.4, min(4.0, self._zoom * k))
-        self.zoom_label.setText(f"{self._zoom * 100:.0f}%")
+        self.chip.set_zoom(self._zoom)
         sc = self.main.plot_scroll
         if abs(self._zoom - 1.0) < 1e-3:
             sc.setWidgetResizable(True)

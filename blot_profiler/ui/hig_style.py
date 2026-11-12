@@ -226,6 +226,8 @@ def stylesheet(scheme: str | None = None, glass: bool | None = None) -> str:
     url = lambda n: f'url("{d}/{n}.svg")'  # noqa: E731
     accent = c('blue')
     line = tint('label', 0.12)  # hig-glass-line
+    edge = tint('label', 0.07 if s == 'light' else 0.10)
+    seg_on = '#ffffff' if s == 'light' else '#636366'
     region = lambda r: _qrgba(theme.region_color(r, s, glass))  # noqa: E731
     if glass:  # the regions are see-through over the window's glass
         surfaces = """
@@ -239,8 +241,21 @@ QMainWindow, QSplitter, QStatusBar { background: transparent; }
 QMainWindow, QDialog {{ background: {c('background-secondary')}; }}
 QMainWindow, QMainWindow > QSplitter {{ background: {region('sidebar')}; }}
 QWidget#hig_sidebar {{ background: {region('sidebar')}; border: none; }}
-QWidget#hig_content {{ background: {region('canvas')}; border: none; }}
-QWidget#hig_inspector {{ background: {region('inspector')}; border: none; }}
+QWidget#hig_content {{ background: {region('canvas')}; border-radius: {theme.BOX_RADIUS}px;
+    border: 1px solid {edge}; }}
+QWidget#hig_inspector {{ background: {region('inspector')}; border-radius: {theme.BOX_RADIUS}px;
+    border: 1px solid {edge}; }}
+QToolBar {{ background: {region('sidebar')}; border: none; spacing: 6px; padding: 4px 8px; }}
+/* segmented control (macOS tahoe): one capsule track, the chosen segment a raised pill */
+QWidget#hig_segment {{ background: {tint('label', 0.08 if s == 'light' else 0.14)}; border-radius: {R_CAPSULE}px; }}
+QWidget#hig_segment QPushButton {{ background: transparent; border: none; border-radius: {R_CAPSULE - 2}px;
+    min-height: {CTL - 6}px; padding: 0 12px; font-weight: 500; color: {c('label')}; }}
+QWidget#hig_segment QPushButton:hover {{ background: {tint('label', 0.05)}; }}
+QWidget#hig_segment QPushButton:checked {{ background: {seg_on}; color: {c('label')}; font-weight: 600;
+    border: 1px solid {edge}; }}
+/* zoom chip over a canvas: magnifier + percent and its buttons on one capsule */
+QFrame#zoom_chip {{ background: {tint('background', 0.85)}; border: 1px solid {line}; border-radius: 15px; }}
+QFrame#zoom_chip QToolButton {{ min-height: 22px; min-width: 22px; border-radius: 11px; }}
 QScrollArea, QScrollArea > QWidget > QWidget#qt_scrollarea_viewport,
 QScrollArea > QWidget#qt_scrollarea_viewport {{ background: transparent; border: none; }}
 QSplitter::handle {{ background: transparent; }}
