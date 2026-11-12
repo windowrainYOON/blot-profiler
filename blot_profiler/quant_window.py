@@ -62,8 +62,10 @@ class QuantWindow(QtWidgets.QMainWindow):
             self.stack.addWidget(self.pages[key])
         self.setCentralWidget(self.stack)
         self._zoom = 1.0
-        self.chip = controls.ZoomChip(main.plot_scroll, lambda: self.zoom(0.8), lambda: self.zoom(1.25),
-                                      lambda: self.zoom(1.0 / self._zoom), corner="bottom")
+        # mockup: the chip sits at the top right of the canvas, on the title row (never over the plot)
+        self.chip = controls.ZoomChip(None, lambda: self.zoom(0.8), lambda: self.zoom(1.25),
+                                      lambda: self.zoom(1.0 / self._zoom))
+        main.graph_head.addWidget(self.chip, 0, Qt.AlignVCenter)
         self.seg.set_value("quant")
         self.stack.setCurrentWidget(self.pages["quant"])
         main.plot.canvas.mpl_connect("button_press_event", self._press)

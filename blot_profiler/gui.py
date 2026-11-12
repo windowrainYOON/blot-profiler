@@ -26,6 +26,13 @@ from . import project as projfile  # noqa: E402
 from . import lanes  # noqa: E402
 from . import graph, prefs  # noqa: E402
 from .ui import controls, theme  # noqa: E402
+
+
+def _tok(name: str) -> str:
+    """A colour token of the design system for a widget style sheet (light or dark)."""
+    from .ui import hig_style  # noqa: PLC0415
+
+    return hig_style.rgba(name, theme.scheme())
 from . import __version__  # noqa: E402
 
 
@@ -1140,7 +1147,7 @@ class FormulaEditor(QtWidgets.QWidget):
 
         if self.terms:  # proteins as buttons: one click puts the name in
             cap = QtWidgets.QLabel(f"{self.terms[0][0]} — 눌러서 넣기")
-            cap.setStyleSheet("color: #555; font-size: 11px;")
+            cap.setStyleSheet(f"color: {_tok('label-secondary')}; font-size: 11px;")
             lay.addWidget(cap)
             grid = QtWidgets.QGridLayout()
             cols = 3 if compact else 6
@@ -1280,11 +1287,11 @@ class FormulaEditor(QtWidgets.QWidget):
             vals = np.atleast_1d(np.asarray(val, float))
             shown = ", ".join("—" if not np.isfinite(v) else f"{v:.4g}" for v in vals[:10]) + (" …" if vals.size > 10 else "")
             self.preview.setText(self.preview_fn(vals) if self.preview_fn else f"미리보기: {shown}")
-            self.preview.setStyleSheet("color: #2e7d32;")
+            self.preview.setStyleSheet(f"color: {_tok('green')};")
             self._set_valid(True)
         except Exception as e:
             self.preview.setText(f"미완성/오류: {e}")
-            self.preview.setStyleSheet("color: #c0392b;")
+            self.preview.setStyleSheet(f"color: {_tok('red')};")
             self._set_valid(False)
 
     def _set_valid(self, ok: bool):
@@ -1329,7 +1336,7 @@ RAW_NOTE = ("※ 정량은 항상 원본 TIF의 raw intensity로 합니다. 표�
 def raw_note() -> QtWidgets.QLabel:
     lab = QtWidgets.QLabel(RAW_NOTE)
     lab.setWordWrap(True)
-    lab.setStyleSheet("color: #1565c0; font-size: 11px;")
+    lab.setStyleSheet(f"color: {_tok('blue')}; font-size: 11px;")
     return lab
 
 
@@ -1420,7 +1427,7 @@ class MarkerStepDialog(QtWidgets.QDialog):
         title.setFont(f)
         lay.addWidget(title)
         steps = QtWidgets.QLabel("1단계 블롯 열기 ✓  →  <b>2단계 마커 이미지</b>  →  3단계 밴드 확인 · 그룹 이름  →  정량 / Figure")
-        steps.setStyleSheet("color: #555;")
+        steps.setStyleSheet(f"color: {_tok('label-secondary')};")
         lay.addWidget(steps)
         info = QtWidgets.QLabel(
             "방금 연 블롯과 <b>같은 막(membrane)을 같은 자리에서 찍은 마커 사진</b>(white-light / marker 채널)을 넣어 주세요.<br>"
@@ -1434,7 +1441,8 @@ class MarkerStepDialog(QtWidgets.QDialog):
         for lab in (self.blot_thumb, self.marker_thumb):
             lab.setAlignment(Qt.AlignCenter)
             lab.setMinimumSize(300, self.THUMB_H)
-        self.marker_thumb.setStyleSheet("border: 2px dashed #90a4ae; color: #607d8b; background: #fafafa;")
+        self.marker_thumb.setStyleSheet(f"border: 2px dashed {_tok('gray-2')}; color: {_tok('label-secondary')}; "
+                                        f"background: {_tok('fill-quaternary')}; border-radius: 8px;")
         for caption, lab in ((f"블롯 (1단계): {doc.name}", self.blot_thumb), ("마커 (2단계)", self.marker_thumb)):
             col = QtWidgets.QVBoxLayout()
             c = QtWidgets.QLabel(caption)
@@ -1532,7 +1540,7 @@ class MarkerStepDialog(QtWidgets.QDialog):
         H, W = base.shape
         self._marker_raw = m
         cands = core.marker_orientations(m.shape, (H, W))
-        self.marker_thumb.setStyleSheet("border: 2px solid #1e88ff; background: white;")
+        self.marker_thumb.setStyleSheet(f"border: 2px solid {_tok('blue')}; background: white; border-radius: 8px;")
         name = os.path.basename(p)
         turned = ""
         if cands:
@@ -1740,7 +1748,7 @@ class ExportDialog(QtWidgets.QDialog):
             for c, x in enumerate(row):
                 it = QtWidgets.QTableWidgetItem(str(x))
                 if summary:
-                    it.setBackground(QtGui.QColor("#f1f8e9"))
+                    it.setBackground(theme._hex(theme.TOKENS[theme.scheme()]["status-success-tint"]))
                 t.setItem(r, c, it)
         t.resizeColumnsToContents()
 
@@ -1806,7 +1814,7 @@ class SettingsDialog(QtWidgets.QDialog):
         info = QtWidgets.QLabel("여기 값은 새로 만드는 그래프·Figure의 초기값입니다(이 컴퓨터에 저장). 이미 만든 Figure는 그대로이고, "
                                 "'지금 열린 그림에도 적용'으로 열린 그림도 바꿀 수 있습니다.")
         info.setWordWrap(True)
-        info.setStyleSheet("color: #777;")
+        info.setStyleSheet(f"color: {_tok('label-secondary')};")
         left.addWidget(info)
         bb = QtWidgets.QHBoxLayout()
         b = QtWidgets.QPushButton("PRISM 기본값으로 되돌리기")
@@ -2093,9 +2101,9 @@ class MainWindow(QtWidgets.QMainWindow):
         insp.setObjectName("hig_inspector")
         insp.setAttribute(Qt.WA_StyledBackground, True)
         il = QtWidgets.QVBoxLayout(insp)
-        il.setContentsMargins(0, 0, 0, 0)
+        il.setContentsMargins(*theme.INSPECTOR_BOX_MARGINS)  # cards keep 12 px from the box edge
         il.addWidget(self.inspector)
-        insp.setFixedWidth(372)
+        insp.setFixedWidth(theme.INSPECTOR_W)
 
         from .ui.hig_widgets import PaneSplitter
 
@@ -2165,13 +2173,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.step_list = controls.SideList()
         self.step_list.currentRowChanged.connect(self.set_step)
         lay.addWidget(self.step_list)
-        lay.addWidget(controls.section("결과 창"))
-        self.win_list = controls.SideList()
-        self.win_list.set_rows([("정량·그래프", "새 창"), ("Figure", "새 창")])
-        self.win_list.itemClicked.connect(lambda it: (self.open_quant_window() if self.win_list.row(it) == 0
-                                                       else self.open_figure_window(), self.win_list.clearSelection()))
-        lay.addWidget(self.win_list)
-        lay.addStretch(1)
+        lay.addStretch(1)  # 정량·그래프 and Figure open from the menus next to 파일 (mockup 1.0.1)
         lay.addWidget(controls.hint("저장·불러오기는 모두 위쪽 메뉴 막대의 파일 메뉴에 있습니다."))
         return side
 
@@ -2244,6 +2246,8 @@ class MainWindow(QtWidgets.QMainWindow):
         f.addRow(self._row_title("기울기 자동 보정", "블롯과 마커를 같은 각도로 통째로 돌립니다"), self.auto_tilt)
         hb = QtWidgets.QHBoxLayout()
         self.angle_main = _spin(-45.0, 45.0, 0.0, 0.1, 1, "°")
+        self.angle_main.setProperty("hig_plain", True)  # a small value field, as in the mockup
+        self.angle_main.setFixedWidth(84)
         self.angle_main.setKeyboardTracking(False)
         self.angle_main.valueChanged.connect(lambda v: abs(self.angle_spin.value() - v) > 1e-6 and self.angle_spin.setValue(v))
         self.angle_spin.valueChanged.connect(lambda v: (self.angle_main.blockSignals(True), self.angle_main.setValue(v),
@@ -2270,6 +2274,9 @@ class MainWindow(QtWidgets.QMainWindow):
         b2.clicked.connect(lambda: self.detect(use_lines=True))
         hb = QtWidgets.QHBoxLayout()
         hb.setSpacing(6)
+        for x in (b, b2):  # two compact capsules side by side (mockup)
+            x.setStyleSheet("padding: 0 9px;")
+            x.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         hb.addWidget(b)
         hb.addWidget(b2)
         f.addRow(hb)
@@ -2360,8 +2367,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 while it.layout().count():
                     w = it.layout().takeAt(0).widget()
                     if w:
+                        w.hide()
                         w.deleteLater()
             elif it.widget():
+                it.widget().hide()
                 it.widget().deleteLater()
         if not a.protein_lines:
             box.addWidget(controls.hint("단백질 선 도구로 가로로 끌어 빨간 선을 그리세요"))
@@ -2927,7 +2936,7 @@ class MainWindow(QtWidgets.QMainWindow):
         f.addRow("마커", hb)
         hint = QtWidgets.QLabel("왼쪽 화면의 마커 위 파란 상자 = 그림에 쓰는 마커 띠. 끌어서 옮기고 가장자리로 폭을 바꿉니다.")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #1565c0; font-size: 11px;")
+        hint.setStyleSheet(f"color: {_tok('blue')}; font-size: 11px;")
         f.addRow(hint)
         hb = QtWidgets.QHBoxLayout()
         self.marker_orient = QtWidgets.QComboBox()
@@ -3028,7 +3037,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "떨어져 있는 박스도 그룹으로 묶어 Control 과 짝지을 수 있습니다. 묶음 세트를 여러 개 만들어 두고(예: '샘플 짝', '시간별'), "
             "4번 정량 탭의 'Control 짝짓기 기준'에서 어떤 세트로 계산할지 고릅니다. 한 박스는 여러 세트에 동시에 들어갈 수 있습니다.")
         info.setWordWrap(True)
-        info.setStyleSheet("color: #555;")
+        info.setStyleSheet(f"color: {_tok('label-secondary')};")
         l.addWidget(info)
         hb = QtWidgets.QHBoxLayout()
         hb.addWidget(QtWidgets.QLabel("세트"))
@@ -3060,7 +3069,7 @@ class MainWindow(QtWidgets.QMainWindow):
         l.addLayout(hb)
         self.group_hint = QtWidgets.QLabel()
         self.group_hint.setWordWrap(True)
-        self.group_hint.setStyleSheet("color: #888; font-size: 11px;")
+        self.group_hint.setStyleSheet(f"color: {_tok('label-secondary')}; font-size: 11px;")
         l.addWidget(self.group_hint)
         return g
 
@@ -3105,7 +3114,7 @@ class MainWindow(QtWidgets.QMainWindow):
         hb = QtWidgets.QHBoxLayout()
         gl.addLayout(hb)
         msg = QtWidgets.QLabel(hint)
-        msg.setStyleSheet("color: #888;")
+        msg.setStyleSheet(f"color: {_tok('label-secondary')};")
         msg.setWordWrap(True)
         gl.addWidget(msg)
         return g, t, hb, msg
@@ -3145,7 +3154,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.basis_msg)
         self.sets_btn = QtWidgets.QPushButton("측정 묶음 세트 · 편집…")
         self.sets_btn.setFlat(True)
-        self.sets_btn.setStyleSheet("text-align: left; color: #0066cc; background: transparent;")
+        self.sets_btn.setStyleSheet(f"text-align: left; color: {_tok('blue')}; background: transparent;")
         self.sets_btn.clicked.connect(self.edit_groupings)
         lay.addWidget(self.sets_btn)
         lay.addWidget(controls.section("그래프 항목"))
@@ -3155,7 +3164,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addLayout(self.series_box)
         self.add_formula_btn = QtWidgets.QPushButton("＋ 수식 추가")
         self.add_formula_btn.setFlat(True)
-        self.add_formula_btn.setStyleSheet("text-align: left; color: #0066cc; background: transparent; font-weight: 600;")
+        self.add_formula_btn.setStyleSheet(f"text-align: left; color: {_tok('blue')}; background: transparent; font-weight: 600;")
         self.add_formula_btn.clicked.connect(lambda: self.open_formula_card())
         lay.addWidget(self.add_formula_btn)
         self.formula_card = QtWidgets.QFrame()
@@ -3185,8 +3194,8 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addStretch(1)
         lay.addWidget(controls.hint("저장: 창 위 '내보내기' 또는 파일 › 내보내기… (⌘E)"))
         side_scroll = self._scroll(side)
-        side_scroll.setMinimumWidth(360)
-        side_scroll.setMaximumWidth(400)
+        side_scroll.setMinimumWidth(260)  # mockup: a narrow sidebar on the window floor
+        side_scroll.setMaximumWidth(300)
 
         # graph + editor
         gp = self.prefs["graph"]
@@ -3206,11 +3215,12 @@ class MainWindow(QtWidgets.QMainWindow):
         hb = QtWidgets.QHBoxLayout()
         hb.addWidget(self.graph_title)
         hb.addWidget(self.graph_sub, 1)
+        self.graph_head = hb  # the graph's zoom chip goes at its end (quant window)
         gl.addLayout(hb)
         self.plot_scroll = QtWidgets.QScrollArea()
         self.plot_scroll.setWidgetResizable(True)
         self.plot_scroll.setWidget(self.plot)
-        self.plot_scroll.setStyleSheet("QScrollArea { background: white; border-radius: 6px; }")
+        self.plot_scroll.setStyleSheet("QScrollArea { background: white; border-radius: 10px; }")
         self.plot_scroll.setMinimumSize(460, 340)  # smaller and the axis titles would not fit
         gl.addWidget(self.plot_scroll, 1)
         self.graph_editor = self._build_graph_editor()
@@ -3278,6 +3288,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def combo(items, key):
             cb = QtWidgets.QComboBox()
+            cb.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            cb.setMinimumContentsLength(8)  # long choices elide instead of widening the inspector
             for k, t in items:
                 cb.addItem(t, k)
             cb.setCurrentIndex(max(0, cb.findData(o.get(key))))
@@ -3313,9 +3325,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.size_h = _spin(20, 400, o["size_mm"][1], 5, suffix=" mm")
         for sp in (self.size_w, self.size_h):
             sp.valueChanged.connect(lambda _=None: self.set_graph_opt("size_mm", [self.size_w.value(), self.size_h.value()]))
+            theme.plain_number(sp)  # [90] × [60] mm, two small fields (mockup)
+            sp.setSuffix("")
+            sp.setFixedWidth(64)
+        hb.addStretch(1)
         hb.addWidget(self.size_w)
         hb.addWidget(QtWidgets.QLabel("×"))
         hb.addWidget(self.size_h)
+        mm = QtWidgets.QLabel("mm")
+        theme.hint(mm)
+        hb.addWidget(mm)
         f.addRow("그림 크기", hb)
         bw = QtWidgets.QDoubleSpinBox()
         bw.setRange(0.2, 1.0)
@@ -3421,10 +3440,10 @@ class MainWindow(QtWidgets.QMainWindow):
         pane.setObjectName("hig_inspector")
         pane.setAttribute(Qt.WA_StyledBackground, True)
         pl = QtWidgets.QVBoxLayout(pane)
-        pl.setContentsMargins(14, 12, 10, 12)
+        pl.setContentsMargins(12, 12, 4, 10)
         pl.addWidget(tabs.chips)
         pl.addWidget(tabs, 1)
-        pane.setFixedWidth(380)
+        pane.setFixedWidth(theme.INSPECTOR_W)  # same inspector box as the main window
         self.graph_tabs = tabs
         for i in range(tabs.count()):
             theme.unify(tabs.widget(i).widget())
@@ -3658,7 +3677,7 @@ class MainWindow(QtWidgets.QMainWindow):
         bad = [f"{x['group']}: {', '.join(x['problems'])}" for x in st if x["problems"]]
         self.basis_msg.setText(("⚠ " + " · ".join(bad)) if bad else
                                ("그룹마다 Target ÷ 같은 그룹의 Control" if d.basis else "레인마다 Target ÷ 같은 레인의 Control"))
-        self.basis_msg.setStyleSheet("color: #d70015; font-size: 11px;" if bad else "color: rgba(60,60,67,0.6); font-size: 11px;")
+        self.basis_msg.setStyleSheet(f"color: {_tok('red')}; font-size: 11px;" if bad else f"color: {_tok('label-secondary')}; font-size: 11px;")
 
     def on_ref_lane(self, *_):
         self.ref_name = self.ref_lane.currentData()
@@ -3753,7 +3772,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fill_quant_images()
         self._pooled, msgs = self.quant_pooled()
         self.formula_msg.setText("\n".join(msgs) if msgs else FORMULA_HINT)
-        self.formula_msg.setStyleSheet("color: #d70015; font-size: 11px;" if msgs else "")
+        self.formula_msg.setStyleSheet(f"color: {_tok('red')}; font-size: 11px;" if msgs else "")
         self.fill_series_rows()
         self.fill_results_table()
         self.replot()
@@ -3830,7 +3849,7 @@ class MainWindow(QtWidgets.QMainWindow):
             hl.addWidget(cb, 1)
             if name in mine:
                 scope, i, f = mine[name]
-                cb.setStyleSheet("color: #0066cc; font-weight: 600;")
+                cb.setStyleSheet(f"color: {_tok('blue')}; font-weight: 600;")
                 for text, tip, fn in (("✎", "수식 편집", lambda _=None, s=scope, i=i: self.open_formula_card((s, i))),
                                       ("✕", "수식 삭제", lambda _=None, s=scope, i=i: self.delete_formula((s, i)))):
                     b = QtWidgets.QToolButton()
@@ -4081,7 +4100,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "각 이미지는 I1, I2 …로 불리고 [프로젝트 이름]이 붙습니다. '이미지 간 수식'에서 예) I1.Vinculin / I3.Vinculin"
         )
         info.setWordWrap(True)
-        info.setStyleSheet("color: #555;")
+        info.setStyleSheet(f"color: {_tok('label-secondary')};")
         lay.addWidget(info)
         self.group_tree = QtWidgets.QTreeWidget()
         self.group_tree.setHeaderLabels(["이미지 / 그룹", "종류"])
@@ -4529,7 +4548,7 @@ class MainWindow(QtWidgets.QMainWindow):
         hb.addWidget(b)
         f.addRow(hb)
         self.orient_label = QtWidgets.QLabel()
-        self.orient_label.setStyleSheet("color: #666; font-size: 11px;")
+        self.orient_label.setStyleSheet(f"color: {_tok('label-secondary')}; font-size: 11px;")
         f.addRow(self.orient_label)
         return g
 
@@ -5511,7 +5530,7 @@ class MainWindow(QtWidgets.QMainWindow):
         common, self.multi_results, _, msgs = self.compute_multi()
         self.multi_keys = common
         self.multi_msg.setText("\n".join(msgs) if msgs else MULTI_FORMULA_HINT)
-        self.multi_msg.setStyleSheet("color: #c0392b;" if msgs else "color: #888;")
+        self.multi_msg.setStyleSheet(f"color: {_tok('red')};" if msgs else f"color: {_tok('label-secondary')};")
         cb = self.multi_ref_combo
         cb.blockSignals(True)
         cb.clear()

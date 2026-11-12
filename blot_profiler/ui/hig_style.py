@@ -200,7 +200,7 @@ R_CAPSULE = CTL // 2  # buttons, chips, segmented controls
 R_FIELD = 8
 R_VALUE = 6
 R_ROW = 10  # selected row in the sidebar list
-R_INSET_GROUP = 11  # property cards (spec §1: radius 11)
+R_INSET_GROUP = 12  # property cards (macOS tahoe group radius 12)
 R_MENU = 12
 INSET = 8
 ROW_PAD = 12  # inset row padding = title / section header start (one grid line)
@@ -228,6 +228,8 @@ def stylesheet(scheme: str | None = None, glass: bool | None = None) -> str:
     line = tint('label', 0.12)  # hig-glass-line
     edge = tint('label', 0.07 if s == 'light' else 0.10)
     seg_on = '#ffffff' if s == 'light' else '#636366'
+    card = theme.TOKENS[s]['region-card']  # white cards on the inspector box (mockup 1.0.1)
+    card_edge = tint('label', 0.06 if s == 'light' else 0.08)
     region = lambda r: _qrgba(theme.region_color(r, s, glass))  # noqa: E731
     if glass:  # the regions are see-through over the window's glass
         surfaces = """
@@ -254,8 +256,8 @@ QWidget#hig_segment QPushButton:hover {{ background: {tint('label', 0.05)}; }}
 QWidget#hig_segment QPushButton:checked {{ background: {seg_on}; color: {c('label')}; font-weight: 600;
     border: 1px solid {edge}; }}
 /* zoom chip over a canvas: magnifier + percent and its buttons on one capsule */
-QFrame#zoom_chip {{ background: {tint('background', 0.85)}; border: 1px solid {line}; border-radius: 15px; }}
-QFrame#zoom_chip QToolButton {{ min-height: 22px; min-width: 22px; border-radius: 11px; }}
+QFrame#zoom_chip {{ background: {card}; border: 1px solid {edge}; border-radius: 13px; }}
+QFrame#zoom_chip QLabel {{ background: transparent; color: {c('label')}; padding: 0; }}
 QScrollArea, QScrollArea > QWidget > QWidget#qt_scrollarea_viewport,
 QScrollArea > QWidget#qt_scrollarea_viewport {{ background: transparent; border: none; }}
 QSplitter::handle {{ background: transparent; }}
@@ -265,13 +267,20 @@ QStatusBar::item {{ border: none; }}
 
 /* ---- inset group (hig-inset-group): rounded translucent card, title above ---- */
 QGroupBox {{
-    background: {tint('label', 0.05)}; border: none;
-    border-radius: {R_INSET_GROUP}px; margin-top: 24px; padding: 0;
+    background: {card}; border: 1px solid {card_edge};
+    border-radius: {R_INSET_GROUP}px; margin-top: 26px; padding: 0;
 }}
+QGroupBox[hig_untitled="true"] {{ margin-top: 2px; }}
+QGroupBox {{ font-weight: 700; }}
+QGroupBox QLabel, QGroupBox QCheckBox, QGroupBox QRadioButton, QGroupBox QComboBox,
+QGroupBox QAbstractSpinBox, QGroupBox QLineEdit, QGroupBox QListView, QGroupBox QTableView,
+QGroupBox QHeaderView, QGroupBox QToolButton {{ font-weight: 400; }}
+QGroupBox QPushButton {{ font-weight: 500; }}
+QWidget#hig_sidebar QGroupBox {{ background: transparent; border: none; }}
 QGroupBox::title {{
     subcontrol-origin: margin; subcontrol-position: top left;
-    left: {ROW_PAD}px; top: 4px; padding: 0;
-    color: {c('label')}; font-weight: 600;
+    left: 2px; top: 4px; padding: 0;
+    color: {c('label')}; font-weight: 700;
 }}
 QGroupBox[checkable="true"]::title {{ color: {c('label')}; }}
 QGroupBox[checkable="true"]:!checked::title {{ color: {c('label-secondary')}; }}
