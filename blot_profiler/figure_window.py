@@ -335,6 +335,14 @@ class PreviewLabel(QtWidgets.QLabel):
         return []
 
     def mouseMoveEvent(self, e):
+        if getattr(self, "_pan", None) is not None:
+            sa = self._scroll_area()
+            d_ = e.globalPosition() - self._pan
+            self._pan = e.globalPosition()
+            if sa is not None:
+                sa.horizontalScrollBar().setValue(int(sa.horizontalScrollBar().value() - d_.x()))
+                sa.verticalScrollBar().setValue(int(sa.verticalScrollBar().value() - d_.y()))
+            return
         pos = e.position().toPoint()
         if self.drag:
             self.cur = pos
@@ -350,6 +358,9 @@ class PreviewLabel(QtWidgets.QLabel):
         super().mouseMoveEvent(e)
 
     def mousePressEvent(self, e):
+        if getattr(self, "_space", False) and e.button() == Qt.LeftButton:  # Space + drag: move
+            self._pan = e.globalPosition()
+            return
         if e.button() == Qt.LeftButton:
             pos = e.position().toPoint()
             self._press = pos
@@ -364,6 +375,9 @@ class PreviewLabel(QtWidgets.QLabel):
         super().mousePressEvent(e)
 
     def mouseReleaseEvent(self, e):
+        if getattr(self, "_pan", None) is not None:
+            self._pan = None
+            return
         if self.drag:
             kind, target, start = self.drag
             pos = e.position().toPoint()
@@ -411,10 +425,27 @@ class PreviewLabel(QtWidgets.QLabel):
         menu.exec(e.globalPos())
 
     def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Space and not e.isAutoRepeat():
+            self._space = True
+            self.setCursor(Qt.OpenHandCursor)
+            return
         if e.key() == Qt.Key_Escape and self.edit_mode:
             self.modeToggled.emit(False)
             return
         super().keyPressEvent(e)
+
+    def keyReleaseEvent(self, e):
+        if e.key() == Qt.Key_Space and not e.isAutoRepeat():
+            self._space = False
+            self.unsetCursor()
+            return
+        super().keyReleaseEvent(e)
+
+    def _scroll_area(self):
+        w = self.parentWidget()
+        while w is not None and not isinstance(w, QtWidgets.QScrollArea):
+            w = w.parentWidget()
+        return w
 
     def dragEnterEvent(self, e):
         if _dropped_paths(e):
@@ -475,6 +506,14 @@ class PreviewLabel(QtWidgets.QLabel):
 
 class FigureEditor(QtWidgets.QWidget):
     """Figure editor for the image shown in the main window (see :meth:`set_doc`)."""
+
+    zoomChanged = QtCore.Signal(float)
+    _pzoom = 1.0  # preview zoom ([ ] and the window toolbar); 1 = fit the pane
+
+    def zoom_preview(self, k: float):
+        self._pzoom = max(0.3, min(5.0, self._pzoom * k))
+        self.zoomChanged.emit(self._pzoom)
+        self._show_preview()
 
     def __init__(self, main):
         super().__init__(main)
@@ -1974,6 +2013,9 @@ class FigureEditor(QtWidgets.QWidget):
         pm = self._png
         if aw > 50 and ah > 50 and (pm.width() > aw or pm.height() > ah):  # fit the window, keep the aspect ratio
             pm = pm.scaled(aw, ah, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if abs(self._pzoom - 1.0) > 1e-3:
+            pm = pm.scaled(max(1, int(pm.width() * self._pzoom)), max(1, int(pm.height() * self._pzoom)),
+                           Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.preview.setPixmap(pm)
 
     def showEvent(self, e):
@@ -1993,11 +2035,12 @@ class FigureEditor(QtWidgets.QWidget):
             QtCore.QTimer.singleShot(0, self._show_preview)
         return super().eventFilter(obj, e)
 
-    def export(self):
+    def export(self, fmt: Optional[str] = None):
         if not self.ready():
             return
         m = self.main
-        p = m._save_path("그림 저장", f"figure.{m.prefs['export'].get('image_format', 'png')}", m._image_filter())
+        fmt = fmt or m.prefs['export'].get('image_format', 'png')
+        p = m._save_path("그림 저장", f"figure.{fmt}", m._image_filter(fmt))
         if p:
             self.write_figure(p)
             self.status(f"저장했습니다: {p}")
@@ -2027,6 +2070,12 @@ class FigureEditor(QtWidgets.QWidget):
             for texts, v in cols:
                 row += [texts[i] if i < len(texts) else "", f"{v[i]:.6g}" if i < v.size and np.isfinite(v[i]) else ""]
             rows.append(row)
+        marks = sorted((k for k in self.s.get("kda", []) if k.get("kda") not in (None, "")), key=lambda k: k["y"])
+        if marks:  # marker sizes and where they are (blot px)
+            unit = self.s.get("unit", "kDa")
+            rows.append([""] * len(header))
+            for k in marks:
+                rows.append([unit, f"{float(k['kda']):g}"] + [f"y {float(k['y']):.0f} px"] + [""] * (len(header) - 3))
         return header, rows
 
     def write_numbers_csv(self, p: str):
@@ -2040,3 +2089,74 @@ class FigureEditor(QtWidgets.QWidget):
                 w.writerow(["# Figure에 숫자 줄이 없습니다 (Figure 만들기 → 정량 숫자 넣기)"])
             w.writerow(header)
             w.writerows(rows)
+
+
+class FigureWindow(QtWidgets.QMainWindow):
+    """Figure 창 (spec §7, §9): toolbar 레인별 자르기 / Full blot, zoom and 내보내기; the editor
+    (add tools left, properties right, double-click to edit) in the middle."""
+
+    def __init__(self, main, editor: "FigureEditor"):
+        super().__init__(main, Qt.Window)
+        from .ui import controls
+
+        self.main = main
+        self.editor = editor
+        self.setWindowTitle("Figure")
+        self.resize(1440, 900)
+        tb = QtWidgets.QToolBar("Figure")
+        tb.setMovable(False)
+        self.addToolBar(Qt.TopToolBarArea, tb)
+        self.setUnifiedTitleAndToolBarOnMac(True)
+        self.sub = QtWidgets.QLabel()
+        self.sub.setStyleSheet("color: rgba(60,60,67,0.6); padding-left: 6px;")
+        tb.addWidget(self.sub)
+        sp = QtWidgets.QWidget()
+        sp.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        tb.addWidget(sp)
+        self.layout_seg = controls.Segmented([("rows", "레인별 자르기"), ("full", "Full blot")])
+        self.layout_seg.changed.connect(self.set_layout)
+        tb.addWidget(self.layout_seg)
+        sp = QtWidgets.QWidget()
+        sp.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        tb.addWidget(sp)
+        tb.addAction("−", lambda: editor.zoom_preview(0.8)).setToolTip("축소 ( ] )")
+        self.zoom_label = QtWidgets.QLabel("100%")
+        self.zoom_label.setFixedWidth(46)
+        self.zoom_label.setAlignment(Qt.AlignCenter)
+        tb.addWidget(self.zoom_label)
+        tb.addAction("+", lambda: editor.zoom_preview(1.25)).setToolTip("확대 ( [ )")
+        tb.addSeparator()
+        b = QtWidgets.QToolButton()
+        b.setText("내보내기")
+        b.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        m = QtWidgets.QMenu(b)
+        im = m.addMenu("Figure 이미지")
+        for ext, name in (("png", "PNG"), ("tif", "TIFF"), ("pdf", "PDF"), ("svg", "SVG")):
+            im.addAction(f"{name}…", lambda ext=ext: editor.export(fmt=ext))
+        m.addAction("Figure에 쓰인 데이터 (CSV)…", main.export_figure_numbers)
+        m.addSeparator()
+        m.addAction("여러 개 골라서 내보내기…", main.open_export_dialog).setShortcut("Ctrl+E")
+        b.setMenu(m)
+        tb.addWidget(b)
+        self.setCentralWidget(editor)
+        editor.zoomChanged.connect(lambda k: self.zoom_label.setText(f"{k * 100:.0f}%"))
+
+    def set_layout(self, kind):
+        self.editor.w_layout.setCurrentIndex(max(0, self.editor.w_layout.findData(kind)))
+
+    def show_for(self, doc):
+        self.editor.set_doc(doc)
+        self.sub.setText(f"{doc.project + ' · ' if getattr(doc, 'project', '') else ''}{doc.name}")
+        self.layout_seg.set_value((self.editor.s or {}).get("layout", "rows"))
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_BracketLeft:
+            self.editor.zoom_preview(1.25)
+            return
+        if e.key() == Qt.Key_BracketRight:
+            self.editor.zoom_preview(0.8)
+            return
+        super().keyPressEvent(e)

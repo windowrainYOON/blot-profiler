@@ -1003,7 +1003,15 @@ def basis_view(a: Analysis, meas: List[Measurement], sname: Optional[str]):
     (boxes outside the set are left out). With no set (or an unknown one) the lanes as they are."""
     g = grouping(a, sname) if sname else None
     if g is None:
-        return a, meas
+        out = [i for i, r in enumerate(a.lane_roles[: a.n_lanes]) if r != LANE_SAMPLE]
+        if not out or a.ladder_row:  # gel: ladder lanes are kept apart by the Ladder row already
+            return a, meas
+        keep = [i for i in range(a.n_lanes) if i not in out]  # marker / excluded lanes leave the results
+        new = {old: k for k, old in enumerate(keep)}
+        v = Analysis(rows=a.rows, lane_labels=[a.lane_labels[i] for i in keep], named_lanes=list(a.named_lanes),
+                     ladder_row=a.ladder_row, formulas=a.formulas, groupings=a.groupings)
+        v.bands = [Band(row=b.row, lane=new[b.lane], cx=b.cx, cy=b.cy) for b in a.bands if b.lane in new]
+        return v, [replace(m, lane=new[m.lane]) for m in meas if m.lane in new]
     order = list(g["groups"])
     ids = a.band_ids()
     lane_of = {ids[id(b)]: order.index(b.tags[sname]) for b in a.bands if b.tags.get(sname) in order}

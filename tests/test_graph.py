@@ -80,7 +80,8 @@ def test_export_dialog_writes_only_graph_data(tmp_path):
     w.load_image(str(p))
     for i in range(1, len(w.analysis.rows)):
         w.set_row_role(i, core.ROLE_TARGET)
-    names = list(w.results)
+    w.recompute_results()
+    names = w.series_names()
     assert len(names) >= 2
     w.series_on[names[1]] = False  # this one is not in the graph
     w.replot()
@@ -90,10 +91,14 @@ def test_export_dialog_writes_only_graph_data(tmp_path):
     dlg.checks["results_csv"].setChecked(True)
     dlg.run()
     out = tmp_path / "out"
-    assert sorted(os.listdir(out)) == ["t_graph.png", "t_graph_data.csv", "t_results.csv"]
+    assert sorted(os.listdir(out)) == ["t_all_bands.csv", "t_graph.png", "t_graph_data.csv"]
     rows = list(csv.reader(open(out / "t_graph_data.csv", encoding="utf-8-sig")))
-    header = next(r for r in rows if r and r[0] == "레인")
-    assert names[0] in header and names[1] not in header
+    assert rows[1][0].startswith("# 이미지") and rows[2][0].startswith("# Control")
+    header_i = next(i for i, r in enumerate(rows) if r and r[0] == "이미지")
+    assert rows[header_i] == ["이미지", "항목", "그룹", "레인", "값"]
+    items = {r[1] for r in rows[header_i + 1:]}
+    assert names[0] in items and names[1] not in items
+    assert any(r[3] == "평균" for r in rows[header_i + 1:])
     # the inline formula card adds a graph item
     w.open_formula_card()
     ed = w.formula_editor

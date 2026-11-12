@@ -197,6 +197,22 @@ def layout_panels(a: core.Analysis, s: dict, shape):
     return panel_rows(a, s, H), x0, x1
 
 
+def _full_blot_names(a: core.Analysis, s: dict):
+    """Full blot of a Western: (panel settings, y) of each shown protein, to label its height."""
+    if a.ladder_row:  # a DNA gel: rows are band positions, not proteins
+        return []
+    names = {r.name: i for i, r in enumerate(a.rows)}
+    out = []
+    for p in s.get("panels", []):
+        ri = names.get(p["row"])
+        if ri is None or not p.get("show", True):
+            continue
+        ys = [b.cy for b in a.bands if b.row == ri]
+        if ys:
+            out.append((p, float(np.mean(ys))))
+    return out
+
+
 def panel_rows(a: core.Analysis, s: dict, height: int):
     """[(panel settings, row index, y0, y1)] for the panels that are shown."""
     out = []
@@ -361,7 +377,10 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
 
     # widths of the label columns left and right of the blot
     left_items, right_items = [], []
+    full_names = _full_blot_names(a, s) if s.get("layout") == "full" else []
     for p, *_ in panels:
+        (left_items if prot_side == "left" else right_items).append(_text_w(p["label"], fsize(f"protein:{p['row']}", "protein")))
+    for p, _ in full_names:
         (left_items if prot_side == "left" else right_items).append(_text_w(p["label"], fsize(f"protein:{p['row']}", "protein")))
     for i, n in enumerate(numbers):
         left_items.append(_text_w(n["label"], fsize(f"numlabel:{i}", "number")))
@@ -526,6 +545,9 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             _frame(sx, s["frame_lw"])
             layout["strips"].append({"x": sx0, "y": y, "w": strip_w, "h": h})
         side_text(f"protein:{p['row']}", "protein", prot_side, y + h / 2, p["label"], weight=weight)
+        for fp, ry in full_names:  # Full blot (Western): every protein's name at its own height
+            if y0 <= ry <= y1:
+                side_text(f"protein:{fp['row']}", "protein", prot_side, y + (ry - y0) * scale, fp["label"], weight=weight)
         if show_kda:
             for ki, k in enumerate(kda):
                 if not y0 <= k["y"] <= y1:

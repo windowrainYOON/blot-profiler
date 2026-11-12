@@ -25,6 +25,7 @@ FALLBACK_FONTS = ["AppleGothic", "Apple SD Gothic Neo", "Malgun Gothic", "NanumG
 def style(graph_prefs: Optional[dict] = None, **over) -> dict:
     """Graph style: the defaults of File → 설정, with the choices of the graph sidebar on top."""
     s = dict(prefs.DEFAULTS["graph"])
+    s.update({"bar_width": 0.8, "x_rot": "auto", "points": True, "legend": True})
     s.update(graph_prefs or {})
     s.update({k: v for k, v in over.items() if v is not None})
     return s
@@ -56,8 +57,13 @@ def summary(values, err: str = "sd") -> Tuple[float, float, int]:
     return float(np.mean(v)), e, int(v.size)
 
 
+MARKERS = ["o", "s", "^", "D", "v", "P", "X"]  # a different dot shape per series (PRISM)
+
+
 def _draw(fig, xlabels: List[str], data: List[Tuple[str, List[np.ndarray]]], ylabel: str, st: dict, title: str = ""):
-    """data = [(series name, [values at each x position])]."""
+    """data = [(series name, [values at each x position])]. Style keys: see prefs.DEFAULTS['graph']
+    plus the editor's: bar_width, x_rot, tick_dir, tick_len, y_min, y_max, y_title, title, legend,
+    legend_pos (axes fraction), labels {series: shown name}, series {series: {color, marker}}, texts."""
     fig.clear()
     fig.patch.set_facecolor("white")
     font = [st.get("font") or "Arial"] + FALLBACK_FONTS
@@ -71,14 +77,19 @@ def _draw(fig, xlabels: List[str], data: List[Tuple[str, List[np.ndarray]]], yla
             return ax
         pal = PALETTES.get(st.get("colors"), PALETTES["bw"])
         k = len(data)
-        width = 0.8 / k
+        width = float(st.get("bar_width", 0.8)) / k
         rng = np.random.default_rng(7)
         kind = st.get("kind", "bar_points")
+        points = st.get("points", True)
         lw_bar, lw_err, cap = float(st["bar_lw"]), float(st["err_lw"]), float(st["cap"])
+        own = st.get("series") or {}
+        shown = st.get("labels") or {}
         all_vals = []
         for si, (name, groups) in enumerate(data):
-            fill = pal[si % len(pal)]
+            fill = (own.get(name) or {}).get("color") or pal[si % len(pal)]
+            marker = (own.get(name) or {}).get("marker") or MARKERS[si % len(MARKERS)]
             dot_face = "white" if _dark(fill) and kind != "points_mean" else ("black" if kind != "points_mean" else fill)
+            label = shown.get(name, name)
             for xi, vals in enumerate(groups):
                 vals = np.asarray(vals, float)
                 vals = vals[np.isfinite(vals)]
@@ -89,43 +100,83 @@ def _draw(fig, xlabels: List[str], data: List[Tuple[str, List[np.ndarray]]], yla
                 m, e, n = summary(vals, st.get("err", "sd"))
                 if kind in ("bar_points", "bars"):
                     ax.bar(x, m, width * 0.82, color=fill, edgecolor="black", linewidth=lw_bar,
-                           label=name if xi == 0 else None, zorder=2)
-                    if n > 1:
+                           label=label if xi == 0 else None, zorder=2, gid=f"series:{name}")
+                    if n > 1:  # PRISM: error bar above the bar only
                         ax.errorbar(x, m, yerr=[[0], [e]], fmt="none", ecolor="black", elinewidth=lw_err,
                                     capsize=cap, capthick=lw_err, zorder=3)
                 else:  # scatter dot plot: mean line with error bars both ways
                     half = width * 0.32
                     ax.plot([x - half, x + half], [m, m], color="black", lw=lw_err * 1.3, zorder=3,
-                            label=name if xi == 0 else None, solid_capstyle="butt")
+                            label=label if xi == 0 else None, solid_capstyle="butt")
                     if n > 1:
                         ax.errorbar(x, m, yerr=e, fmt="none", ecolor="black", elinewidth=lw_err,
                                     capsize=cap * 0.8, capthick=lw_err, zorder=3)
-                if kind != "bars" and (n > 1 or kind == "points_mean" or st.get("single_points", False)):
+                if kind != "bars" and points and (n > 1 or kind == "points_mean" or st.get("single_points", False)):
                     jit = rng.uniform(-0.22, 0.22, vals.size) * width if vals.size > 1 else np.zeros(1)
-                    ax.scatter(x + jit, vals, s=float(st["point_size"]), facecolor=dot_face, edgecolor="black",
-                               linewidth=0.9, zorder=4)
+                    ax.scatter(x + jit, vals, s=float(st["point_size"]), marker=marker, facecolor=dot_face,
+                               edgecolor="black", linewidth=0.9, zorder=4)
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)
         for side in ("left", "bottom"):
             ax.spines[side].set_linewidth(float(st["axis_lw"]))
-        ax.tick_params(direction="out", length=6, width=float(st["axis_lw"]), labelsize=float(st["tick_size"]))
+        ax.tick_params(direction=st.get("tick_dir", "out"), length=float(st.get("tick_len", 6)),
+                       width=float(st["axis_lw"]), labelsize=float(st["tick_size"]))
         ax.set_xticks(range(len(xlabels)))
-        long = max(len(str(s)) for s in xlabels) > 4
-        ax.set_xticklabels(xlabels, rotation=45 if long else 0, ha="right" if long else "center",
+        rot = st.get("x_rot", "auto")
+        rot = (45 if max(len(str(s)) for s in xlabels) > 4 else 0) if rot in ("auto", None) else int(rot)
+        ax.set_xticklabels(xlabels, rotation=rot, ha="right" if rot and rot < 90 else "center",
                            fontsize=float(st["tick_size"]) + 1, fontweight=weight)
         for lab in ax.get_yticklabels():
             lab.set_fontweight(weight)
         ax.set_xlim(-0.6, len(xlabels) - 0.4)
-        ax.set_ylabel(ylabel, fontsize=float(st["label_size"]), fontweight=weight)
+        yl = ax.set_ylabel(st.get("y_title") or ylabel, fontsize=float(st["label_size"]), fontweight=weight)
+        yl.set_gid("ylabel")
         finite = [v for v in all_vals if np.isfinite(v)]
         if st.get("y0", True) and finite and min(finite) >= 0:
             ax.set_ylim(bottom=0)
-        if title:
-            ax.set_title(title, fontsize=float(st["label_size"]), fontweight=weight)
-        if k > 1 or (data and data[0][0]):
-            ax.legend(frameon=False, fontsize=float(st["legend_size"]), loc="upper left", bbox_to_anchor=(1.0, 1.0))
+        if st.get("y_min") is not None:
+            ax.set_ylim(bottom=float(st["y_min"]))
+        if st.get("y_max") is not None:
+            ax.set_ylim(top=float(st["y_max"]))
+        t = st.get("title") if st.get("title") is not None else title
+        if t:
+            ax.set_title(t, fontsize=float(st.get("title_size", st["label_size"])), fontweight=weight).set_gid("title")
+        if st.get("legend", True) and (k > 1 or (data and data[0][0])):
+            pos = st.get("legend_pos")
+            if pos:
+                leg = ax.legend(frameon=False, fontsize=float(st["legend_size"]), loc="upper left", bbox_to_anchor=tuple(pos))
+            else:
+                leg = ax.legend(frameon=False, fontsize=float(st["legend_size"]), loc="upper left", bbox_to_anchor=(1.0, 1.0))
+            leg.set_gid("legend")
+        for i, tb in enumerate(st.get("texts") or []):
+            ax.text(float(tb.get("x", 0.5)), float(tb.get("y", 0.9)), tb.get("text", ""), transform=ax.transAxes,
+                    fontsize=float(tb.get("size", st["legend_size"])), gid=f"text:{i}", zorder=6)
         fig.tight_layout()
         return ax
+
+
+def pool(per_image: List[Tuple[str, Dict[str, np.ndarray], List[str]]], by_condition: bool, split_images: bool):
+    """Values of several images in one graph: ``per_image`` = [(image key, {series: values per lane},
+    lane names)]. Lanes of the same name are one x position (replicates, all images together);
+    with ``split_images`` every image gets its own series. Returns (x labels, [(series, [arrays])])."""
+    order: List[str] = []
+    cells: Dict[str, Dict[str, List[float]]] = {}
+    for key, series, labels in per_image:
+        for name, v in series.items():
+            v = np.atleast_1d(np.asarray(v, float))
+            if v.size <= 1:
+                continue
+            sname = f"{key}: {name}" if split_images else name
+            for i, val in enumerate(v):
+                lab = labels[i] if i < len(labels) else str(i + 1)
+                x = lab if by_condition else (f"{key} {lab}" if len(per_image) > 1 else lab)
+                if not by_condition and len(per_image) == 1:
+                    x = f"{i + 1}:{lab}" if labels.count(lab) > 1 else lab
+                if x not in order:
+                    order.append(x)
+                cells.setdefault(sname, {}).setdefault(x, []).append(float(val))
+    data = [(s, [np.array(c.get(x, []), float) for x in order]) for s, c in cells.items()]
+    return order, data
 
 
 def plot_series(fig, series: Dict[str, np.ndarray], labels, conditions, by_condition: bool, ylabel: str, st: dict,
