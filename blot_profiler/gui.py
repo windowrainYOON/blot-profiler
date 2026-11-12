@@ -25,6 +25,7 @@ from . import figure  # noqa: E402
 from . import project as projfile  # noqa: E402
 from . import lanes  # noqa: E402
 from . import graph, prefs  # noqa: E402
+from .ui import controls, theme  # noqa: E402
 from . import __version__  # noqa: E402
 
 
@@ -249,10 +250,27 @@ class BandItem(QtWidgets.QGraphicsRectItem):
                     painter.drawRect(QtCore.QRectF(hx - s, hy - s, 2 * s, 2 * s))
 
 
+def _seg_dist(p, a, b) -> float:
+    """Distance (px) of point p from segment a–b."""
+    ax, ay, bx, by, px, py = a.x(), a.y(), b.x(), b.y(), p.x(), p.y()
+    dx, dy = bx - ax, by - ay
+    L = dx * dx + dy * dy
+    t = 0.0 if L == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L))
+    return ((px - ax - t * dx) ** 2 + (py - ay - t * dy) ** 2) ** 0.5
+
+
 class BlotView(QtWidgets.QGraphicsView):
     filesDropped = QtCore.Signal(list)  # image/analysis files dropped on the view
     drawn = QtCore.Signal(str, float, float, float, float)  # "line"/"crop", x0, y0, x1, y1 (image px)
     editRequested = QtCore.Signal(object)  # BandItem double-clicked: resize it
+    linesChanged = QtCore.Signal(str)  # lane / protein lines edited (message)
+    markerEdited = QtCore.Signal(str)  # marker strip or size marks edited
+    tickSelected = QtCore.Signal(int)
+    proteinDrawn = QtCore.Signal(float, float, float, float)
+    laneMenu = QtCore.Signal(QtCore.QPoint, float, float)
+    proteinMenu = QtCore.Signal(QtCore.QPoint, int)
+    toolHint = QtCore.Signal(str)
+    zoomChanged = QtCore.Signal(float)
     changed = QtCore.Signal()  # boxes moved/added/removed
     selectionChangedBands = QtCore.Signal()
     contextRequested = QtCore.Signal(QtCore.QPoint, object)  # global pos, BandItem | None
@@ -265,7 +283,7 @@ class BlotView(QtWidgets.QGraphicsView):
         self.setRenderHints(QtGui.QPainter.Antialiasing | QtGui.QPainter.SmoothPixmapTransform)
         self.setDragMode(QtWidgets.QGraphicsView.RubberBandDrag)
         self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
-        self.setBackgroundBrush(QtGui.QColor("#d9d9d9"))
+        self.setBackgroundBrush(QtGui.QColor("#f5f5f7"))
         self.setAcceptDrops(True)
         self.viewport().setAcceptDrops(True)
         self.pix_item: Optional[QtWidgets.QGraphicsPixmapItem] = None
@@ -277,7 +295,14 @@ class BlotView(QtWidgets.QGraphicsView):
         self.show_labels = True
         self.resize_mode = False
         self.draw_mode: Optional[str] = None  # "line" (straighten) / "crop": the next drag draws
-        self.extra_items = []  # lane lines, measurement groups
+        self.extra_items = []  # measurement groups
+        self.line_items = []  # lane / protein lines, marker strip (1.0 canvas tools)
+        self.tool = "select"
+        self.sel: Optional[dict] = None
+        self._drag: Optional[dict] = None
+        self.marker_s: Optional[dict] = None  # figure settings of the image: marker strip and size marks
+        self._space = False
+        self._pan = None
         self.show_set: Optional[str] = None  # grouping set drawn on the image
         self.auto_fit = True  # keep the image fitted to the view until the user zooms
         self.show_lanes = True
@@ -343,10 +368,12 @@ class BlotView(QtWidgets.QGraphicsView):
         if not r.isEmpty():
             self.fitInView(r.adjusted(-10, -26, 10, 10), Qt.KeepAspectRatio)
         self.auto_fit = True
+        self.zoomChanged.emit(self.transform().m11())
 
     def zoom(self, factor: float):
         self.auto_fit = False
         self.scale(factor, factor)
+        self.zoomChanged.emit(self.transform().m11())
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -417,16 +444,376 @@ class BlotView(QtWidgets.QGraphicsView):
             t.setPos(x + w_ + 4, y - 4)  # right of the top box, clear of the box ID
             t.setZValue(5)
             self.extra_items.append(t)
-        if self.show_lanes and self.pix_item is not None and getattr(a, "lane_geom", None):
-            H = self.pix_item.pixmap().height()
-            pen = QtGui.QPen(QtGui.QColor(0, 151, 167, 150), 1, Qt.DashLine)
-            pen.setCosmetic(True)
-            for g in a.lane_geom:
-                x_top = lanes.lane_line_x(g, 0.0)
-                x_bot = lanes.lane_line_x(g, float(H))
-                line = sc.addLine(x_top, 0, x_bot, H, pen)
-                line.setZValue(1)
-                self.extra_items.append(line)
+        self.rebuild_lines()
+
+
+    # ---------------------------------------------------------------- 1.0 canvas tools
+    # 선택 (boxes) · 레인 선 (blue polylines, point editing) · 단백질 선 (red dashed lines)
+    # · 마커 영역 (strip on the marker image, size marks). Hit tests in screen pixels.
+    LANE_BLUE = "#1f7ae0"
+    PROT_RED = "#d70015"
+    MARK_ORANGE = "#ff9f0a"
+    HIT = 7  # px
+
+    def set_tool(self, tool: str):
+        self.tool = tool
+        self.sel = None
+        for it in self.items_:
+            it.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, tool == "select")
+            it.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, tool == "select")
+        self.setDragMode(QtWidgets.QGraphicsView.RubberBandDrag if tool == "select" else QtWidgets.QGraphicsView.NoDrag)
+        self.viewport().setCursor(Qt.ArrowCursor if tool == "select" else Qt.CrossCursor)
+        self.rebuild_lines()
+
+    def _px(self, x, y) -> QtCore.QPointF:
+        return QtCore.QPointF(self.mapFromScene(QtCore.QPointF(x, y)))
+
+    def _img_h(self) -> float:
+        return float(self.pix_item.pixmap().height()) if self.pix_item is not None else 0.0
+
+    def _lane_hit(self, pos):
+        """(line index, point index or None) under the mouse."""
+        best = None
+        for i, ln in enumerate(self.analysis.lane_lines):
+            pts = sorted(ln, key=lambda p: p[1])
+            for j, (x, y) in enumerate(pts):
+                d_ = (self._px(x, y) - pos).manhattanLength()
+                if d_ <= self.HIT + 2 and (best is None or d_ < best[0]):
+                    best = (d_, i, j)
+        if best:
+            return best[1], best[2]
+        for i, ln in enumerate(self.analysis.lane_lines):
+            pts = sorted(ln, key=lambda p: p[1])
+            for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+                a, b = self._px(x0, y0), self._px(x1, y1)
+                if _seg_dist(pos, a, b) <= self.HIT:
+                    return i, None
+        return None
+
+    def _pline_hit(self, pos):
+        """(line index, 'a' | 'b' | None) under the mouse."""
+        for i, p in enumerate(self.analysis.protein_lines):
+            for end, (x, y) in (("a", (p["x0"], p["y0"])), ("b", (p["x1"], p["y1"]))):
+                if (self._px(x, y) - pos).manhattanLength() <= self.HIT + 2:
+                    return i, end
+        for i, p in enumerate(self.analysis.protein_lines):
+            if _seg_dist(pos, self._px(p["x0"], p["y0"]), self._px(p["x1"], p["y1"])) <= self.HIT:
+                return i, None
+        return None
+
+    def _marker_x(self, x) -> float:
+        return (self.marker_item.x() if self.marker_item is not None else 0.0) + x
+
+    def _tick_hit(self, pos):
+        s = self.marker_s
+        if not s or self.marker_item is None:
+            return None
+        x0, x1 = self._marker_x(s.get("strip_x0", 0)), self._marker_x(s.get("strip_x1", 0))
+        for i, k in enumerate(s.get("kda", [])):
+            a, b = self._px(x0, k["y"]), self._px(x1, k["y"])
+            if _seg_dist(pos, a, b) <= self.HIT:
+                return i
+        return None
+
+    def rebuild_lines(self):
+        """Lane lines, protein lines and the marker strip as drawn items (rebuilt after each edit)."""
+        sc = self.scene()
+        for it in self.line_items:
+            sc.removeItem(it)
+        self.line_items = []
+        a = self.analysis
+        H = self._img_h()
+        if self.pix_item is None:
+            return
+        tool = self.tool
+        sel = self.sel or {}
+        show_lanes = self.show_lanes or tool in ("lane", "protein")
+        if show_lanes:
+            for i, ln in enumerate(a.lane_lines):
+                pts = sorted(ln, key=lambda p: p[1])
+                on = sel.get("kind") == "lane" and sel.get("i") == i
+                pen = QtGui.QPen(QtGui.QColor(self.LANE_BLUE), 2.6 if on else 1.6)
+                pen.setCosmetic(True)
+                if tool not in ("lane",):
+                    pen.setColor(QtGui.QColor(31, 122, 224, 140))
+                    pen.setStyle(Qt.DashLine)
+                path = QtGui.QPainterPath(QtCore.QPointF(*pts[0]))
+                for x, y in pts[1:]:
+                    path.lineTo(x, y)
+                it = sc.addPath(path, pen)
+                it.setZValue(6)
+                self.line_items.append(it)
+                if tool == "lane":
+                    for j, (x, y) in enumerate(pts):
+                        filled = on and sel.get("j") == j
+                        self._handle(x, y, "circle", self.LANE_BLUE, filled, 4.5 if on else 3.5)
+                lab = a.lane_labels[i] if i < len(a.lane_labels) else f"L{i + 1}"
+                self._tag(core.poly_x(pts, H - 1) if H else pts[-1][0], H - 1, lab, self.LANE_BLUE, on, below=False)
+        if tool == "protein" or (self.show_lanes and a.protein_lines):
+            for i, p in enumerate(a.protein_lines):
+                on = sel.get("kind") == "pline" and sel.get("i") == i
+                pen = QtGui.QPen(QtGui.QColor(self.PROT_RED), 2.4 if on else 1.6, Qt.DashLine)
+                pen.setCosmetic(True)
+                it = sc.addLine(p["x0"], p["y0"], p["x1"], p["y1"], pen)
+                it.setZValue(6)
+                self.line_items.append(it)
+                if tool == "protein":
+                    for x, y in ((p["x0"], p["y0"]), (p["x1"], p["y1"])):
+                        self._handle(x, y, "square", self.PROT_RED, on, 4.0)
+                self._tag(p["x1"] + 6, p["y1"], str(p.get("row", "")), self.PROT_RED, True, below=None)
+        s = self.marker_s
+        if self.marker_item is not None and s and (tool == "marker" or s.get("kda")):
+            x0, x1 = self._marker_x(s.get("strip_x0", 0)), self._marker_x(s.get("strip_x1", 0))
+            if x1 > x0:
+                pen = QtGui.QPen(QtGui.QColor(self.MARK_ORANGE), 1.5, Qt.DashLine)
+                pen.setCosmetic(True)
+                it = sc.addRect(QtCore.QRectF(x0, 0, x1 - x0, H), pen)
+                it.setZValue(6)
+                self.line_items.append(it)
+                for i, k in enumerate(s.get("kda", [])):
+                    on = sel.get("kind") == "tick" and sel.get("i") == i
+                    color = "#0a84ff" if on else self.MARK_ORANGE
+                    pen = QtGui.QPen(QtGui.QColor(color), 3 if on else 1.6)
+                    pen.setCosmetic(True)
+                    it = sc.addLine(x0 + 2, k["y"], x1 - 2, k["y"], pen)
+                    it.setZValue(7)
+                    self.line_items.append(it)
+                    v = k.get("kda")
+                    txt = "?" if v is None else (f"{v:g}")
+                    self._tag(x1 + 3, k["y"], txt, color, on, below=None, plain=not on)
+
+    def _handle(self, x, y, shape, color, filled, r):
+        sc = self.scene()
+        pen = QtGui.QPen(QtGui.QColor(color) if not filled else QtGui.QColor("white"), 1.5)
+        pen.setCosmetic(True)
+        brush = QtGui.QColor(color) if filled else QtGui.QColor("white")
+        rect = QtCore.QRectF(-r, -r, 2 * r, 2 * r)
+        it = sc.addEllipse(rect, pen, brush) if shape == "circle" else sc.addRect(rect, pen, brush)
+        it.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations)
+        it.setPos(x, y)
+        it.setZValue(8)
+        self.line_items.append(it)
+
+    def _tag(self, x, y, text, color, filled, below=False, plain=False):
+        if not text:
+            return
+        sc = self.scene()
+        t = QtWidgets.QGraphicsSimpleTextItem(text)
+        f = t.font()
+        f.setPointSizeF(9)
+        f.setBold(True)
+        t.setFont(f)
+        t.setBrush(QtGui.QColor("white") if filled and not plain else QtGui.QColor(color))
+        br = t.boundingRect().adjusted(-4, -1, 4, 1)
+        bg = QtWidgets.QGraphicsPathItem()
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(br, 4, 4)
+        bg.setPath(path)
+        bg.setBrush(QtGui.QColor(color) if filled and not plain else QtGui.QColor(255, 255, 255, 230))
+        pen = QtGui.QPen(QtGui.QColor(color), 1)
+        pen.setCosmetic(True)
+        bg.setPen(pen)
+        grp = sc.createItemGroup([bg, t])
+        grp.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations)
+        off = -br.height() / 2 if below is None else (2 if below else -br.height() - 2)
+        grp.setPos(x, y)
+        grp.setTransform(QtGui.QTransform().translate(-br.width() / 2 if below is not None else 0, off))
+        grp.setZValue(9)
+        self.line_items.append(grp)
+
+    def _tool_press(self, e) -> bool:
+        """Mouse press with a line / marker tool; True when handled."""
+        pos = e.position()
+        p = self.mapToScene(e.position().toPoint())
+        a = self.analysis
+        H = self._img_h()
+        if self.tool == "lane":
+            hit = self._lane_hit(pos)
+            if e.button() == Qt.RightButton:
+                self.sel = {"kind": "lane", "i": hit[0], "j": hit[1]} if hit else None
+                self.rebuild_lines()
+                self.laneMenu.emit(e.globalPosition().toPoint(), p.x(), p.y())
+                return True
+            if hit:
+                i, j = hit
+                self.sel = {"kind": "lane", "i": i, "j": j}
+                pts = a.lane_lines[i]
+                self._drag = {"kind": "lane_pt" if j is not None else "lane", "i": i, "j": j, "p0": p,
+                              "orig": [list(q) for q in sorted(pts, key=lambda q: q[1])]}
+            elif self.pix_item is not None and self.pix_item.sceneBoundingRect().contains(p):
+                a.lane_lines.append([[p.x(), 0.0], [p.x(), H - 1.0]])
+                a.lane_lines.sort(key=lambda ln: float(np.mean([q[0] for q in ln])))
+                i = next(k for k, ln in enumerate(a.lane_lines) if abs(ln[0][0] - p.x()) < 1e-6)
+                self.sel = {"kind": "lane", "i": i, "j": None}
+                self.linesChanged.emit("새 레인 선을 넣었습니다")
+            else:
+                self.sel = None
+            self.rebuild_lines()
+            return True
+        if self.tool == "protein":
+            hit = self._pline_hit(pos)
+            if e.button() == Qt.RightButton:
+                self.sel = {"kind": "pline", "i": hit[0]} if hit else None
+                self.rebuild_lines()
+                self.proteinMenu.emit(e.globalPosition().toPoint(), hit[0] if hit else -1)
+                return True
+            if hit:
+                i, end = hit
+                self.sel = {"kind": "pline", "i": i}
+                self._drag = {"kind": "pline_end" if end else "pline", "i": i, "end": end, "p0": p,
+                              "orig": dict(a.protein_lines[i])}
+            else:  # drag sideways to draw a new red line
+                self.sel = None
+                self._drag = {"kind": "pline_new", "p0": p}
+            self.rebuild_lines()
+            return True
+        if self.tool == "marker":
+            if self.marker_item is None or not self.marker_s:
+                self.toolHint.emit("마커 이미지가 없습니다 — 오른쪽 '마커' 카드에서 마커 이미지를 넣으세요")
+                return True
+            t = self._tick_hit(pos)
+            s = self.marker_s
+            if t is not None:
+                self.sel = {"kind": "tick", "i": t}
+                self._drag = {"kind": "tick", "i": t, "p0": p}
+                self.tickSelected.emit(t)
+            elif self.marker_item.sceneBoundingRect().contains(p):
+                x0, x1 = self._marker_x(s.get("strip_x0", 0)), self._marker_x(s.get("strip_x1", 0))
+                if x1 > x0 and x0 <= p.x() <= x1:  # inside the strip: a new size mark
+                    s.setdefault("kda", []).append({"kda": None, "y": float(p.y())})
+                    s["kda"].sort(key=lambda k: k["y"])
+                    i = next(k for k, v in enumerate(s["kda"]) if abs(v["y"] - p.y()) < 1e-6)
+                    self.sel = {"kind": "tick", "i": i}
+                    self.markerEdited.emit("마커 밴드 위치를 넣었습니다 — 크기를 넣으면 나머지는 래더 순서로 채워집니다")
+                    self.tickSelected.emit(i)
+                else:  # outside: draw the strip
+                    self._drag = {"kind": "strip", "p0": p}
+            self.rebuild_lines()
+            return True
+        return False
+
+    def _tool_move(self, e) -> bool:
+        st = self._drag
+        if not st:
+            return False
+        p = self.mapToScene(e.position().toPoint())
+        a = self.analysis
+        k = st["kind"]
+        if k == "lane_pt":
+            pts = st["orig"]
+            j = st["j"]
+            new = [list(q) for q in pts]
+            new[j] = [p.x(), min(max(p.y(), (pts[j - 1][1] + 1) if j > 0 else -1e9), (pts[j + 1][1] - 1) if j + 1 < len(pts) else 1e9)]
+            a.lane_lines[st["i"]] = new
+        elif k == "lane":
+            dx = p.x() - st["p0"].x()
+            a.lane_lines[st["i"]] = [[q[0] + dx, q[1]] for q in st["orig"]]
+        elif k in ("pline", "pline_end"):
+            o = st["orig"]
+            q = dict(o)
+            if k == "pline":
+                dy = p.y() - st["p0"].y()
+                q["y0"], q["y1"] = o["y0"] + dy, o["y1"] + dy
+            elif st["end"] == "a":
+                q["x0"], q["y0"] = p.x(), p.y()
+            else:
+                q["x1"], q["y1"] = p.x(), p.y()
+            a.protein_lines[st["i"]] = q
+        elif k == "pline_new":
+            st["p1"] = p
+            if "item" not in st:
+                pen = QtGui.QPen(QtGui.QColor(self.PROT_RED), 1.6, Qt.DashLine)
+                pen.setCosmetic(True)
+                st["item"] = self.scene().addLine(st["p0"].x(), st["p0"].y(), p.x(), p.y(), pen)
+            st["item"].setLine(st["p0"].x(), st["p0"].y(), p.x(), p.y())
+            return True
+        elif k == "tick":
+            self.marker_s["kda"][st["i"]]["y"] = float(p.y())
+        elif k == "strip":
+            st["p1"] = p
+            if "item" not in st:
+                pen = QtGui.QPen(QtGui.QColor(self.MARK_ORANGE), 1.5, Qt.DashLine)
+                pen.setCosmetic(True)
+                st["item"] = self.scene().addRect(QtCore.QRectF(st["p0"], p).normalized(), pen)
+            st["item"].setRect(QtCore.QRectF(st["p0"], p).normalized())
+            return True
+        self.rebuild_lines()
+        return True
+
+    def _tool_release(self, e) -> bool:
+        st, self._drag = self._drag, None
+        if not st:
+            return False
+        p = self.mapToScene(e.position().toPoint())
+        k = st["kind"]
+        for key in ("item",):
+            if key in st:
+                self.scene().removeItem(st[key])
+        moved = (p - st["p0"]).manhattanLength() > 2
+        if k == "pline_new" and moved and abs(p.x() - st["p0"].x()) > 10:
+            x0, y0, x1, y1 = st["p0"].x(), st["p0"].y(), p.x(), p.y()
+            if x1 < x0:
+                x0, y0, x1, y1 = x1, y1, x0, y0
+            self.proteinDrawn.emit(x0, y0, x1, y1)
+        elif k == "strip" and moved and self.marker_item is not None:
+            mx = self.marker_item.x()
+            w = self.marker_item.pixmap().width()
+            xa, xb = sorted((p.x() - mx, st["p0"].x() - mx))
+            self.marker_s["strip_x0"], self.marker_s["strip_x1"] = int(max(0, xa)), int(min(w, xb))
+            self.marker_s["show_strip"] = True
+            self.markerEdited.emit("마커 영역을 정했습니다 — 영역 안을 클릭해 마커 밴드 위치를 넣으세요")
+        elif k == "tick" and moved:
+            self.marker_s["kda"].sort(key=lambda t: t["y"])
+            self.markerEdited.emit("마커 밴드 위치를 옮겼습니다")
+        elif k in ("lane_pt", "lane") and moved:
+            self.analysis.lane_lines.sort(key=lambda ln: float(np.mean([q[0] for q in ln])))
+            self.linesChanged.emit("레인 선을 고쳤습니다 — '선 기준으로 다시 검출'로 박스에 반영합니다")
+        elif k in ("pline", "pline_end") and moved:
+            self.linesChanged.emit("단백질 선을 고쳤습니다 — '선 기준으로 다시 검출'로 박스에 반영합니다")
+        self.rebuild_lines()
+        return True
+
+    def add_lane_point(self, i, y):
+        pts = sorted(self.analysis.lane_lines[i], key=lambda q: q[1])
+        x = float(core.poly_x(pts, y))
+        pts.append([x, float(y)])
+        pts.sort(key=lambda q: q[1])
+        self.analysis.lane_lines[i] = pts
+        self.sel = {"kind": "lane", "i": i, "j": next(j for j, q in enumerate(pts) if q[1] == float(y))}
+        self.rebuild_lines()
+        self.linesChanged.emit("레인 선에 점을 넣었습니다 — 점을 끌어 선을 휘게 합니다")
+
+    def delete_selection(self, whole: bool = False) -> bool:
+        """⌫ on a line tool: the selected point, line or size mark."""
+        sel = self.sel or {}
+        a = self.analysis
+        if sel.get("kind") == "lane" and sel.get("i") is not None and sel["i"] < len(a.lane_lines):
+            pts = sorted(a.lane_lines[sel["i"]], key=lambda q: q[1])
+            if sel.get("j") is not None and not whole and len(pts) > 2:
+                del pts[sel["j"]]
+                a.lane_lines[sel["i"]] = pts
+                self.sel = {"kind": "lane", "i": sel["i"], "j": None}  # the line stays selected
+                self.rebuild_lines()
+                self.linesChanged.emit("점을 지웠습니다")
+                return True
+            else:
+                del a.lane_lines[sel["i"]]
+                msg = "레인 선을 지웠습니다"
+        elif sel.get("kind") == "pline" and sel.get("i") is not None and sel["i"] < len(a.protein_lines):
+            del a.protein_lines[sel["i"]]
+            msg = "단백질 선을 지웠습니다"
+        elif sel.get("kind") == "tick" and self.marker_s and sel.get("i") is not None:
+            del self.marker_s["kda"][sel["i"]]
+            self.sel = None
+            self.rebuild_lines()
+            self.markerEdited.emit("마커 밴드 표시를 지웠습니다")
+            return True
+        else:
+            return False
+        self.sel = None
+        self.rebuild_lines()
+        self.linesChanged.emit(msg)
+        return True
 
     def refresh_items(self):
         self.ids = self.analysis.band_ids()
@@ -507,6 +894,12 @@ class BlotView(QtWidgets.QGraphicsView):
         self.viewport().setCursor(Qt.CrossCursor if mode else Qt.ArrowCursor)
 
     def mousePressEvent(self, e):
+        if self._space and e.button() == Qt.LeftButton:  # Space + drag: move the view
+            self._pan = e.position()
+            self.viewport().setCursor(Qt.ClosedHandCursor)
+            return
+        if self.tool != "select" and not self.draw_mode and self._tool_press(e):
+            return
         if self.draw_mode and e.button() == Qt.LeftButton and self.pix_item is not None:
             p = self.mapToScene(e.position().toPoint())
             pen = QtGui.QPen(QtGui.QColor("#ff6d00"), 2, Qt.DashLine)
@@ -525,6 +918,15 @@ class BlotView(QtWidgets.QGraphicsView):
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
+        if self._pan is not None:
+            d_ = e.position() - self._pan
+            self._pan = e.position()
+            self.horizontalScrollBar().setValue(int(self.horizontalScrollBar().value() - d_.x()))
+            self.verticalScrollBar().setValue(int(self.verticalScrollBar().value() - d_.y()))
+            self.auto_fit = False
+            return
+        if self._tool_move(e):
+            return
         if self._draw is not None:
             p0, item = self._draw
             p = self.mapToScene(e.position().toPoint())
@@ -536,6 +938,12 @@ class BlotView(QtWidgets.QGraphicsView):
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
+        if self._pan is not None:
+            self._pan = None
+            self.viewport().setCursor(Qt.OpenHandCursor if self._space else (Qt.ArrowCursor if self.tool == "select" else Qt.CrossCursor))
+            return
+        if self._tool_release(e):
+            return
         if self._draw is not None:
             p0, item = self._draw
             self._draw = None
@@ -553,6 +961,13 @@ class BlotView(QtWidgets.QGraphicsView):
 
     def mouseDoubleClickEvent(self, e):
         p = self.mapToScene(e.position().toPoint())
+        if self.tool == "lane":
+            hit = self._lane_hit(e.position())
+            if hit:
+                self.add_lane_point(hit[0], p.y())
+            return
+        if self.tool != "select":
+            return
         item = self.itemAt(e.position().toPoint())
         if isinstance(item, QtWidgets.QGraphicsSimpleTextItem):
             item = item.parentItem()
@@ -570,7 +985,27 @@ class BlotView(QtWidgets.QGraphicsView):
             self.select_bands([item.band])
         self.contextRequested.emit(e.globalPos(), item if isinstance(item, BandItem) else None)
 
+    def keyReleaseEvent(self, e):
+        if e.key() == Qt.Key_Space and not e.isAutoRepeat():
+            self._space = False
+            self.viewport().setCursor(Qt.ArrowCursor if self.tool == "select" else Qt.CrossCursor)
+            return
+        super().keyReleaseEvent(e)
+
     def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Space and not e.isAutoRepeat():
+            self._space = True
+            self.viewport().setCursor(Qt.OpenHandCursor)
+            return
+        if e.key() == Qt.Key_BracketLeft:  # [ zoom in, ] zoom out (spec 1.0)
+            self.zoom(1.25)
+            return
+        if e.key() == Qt.Key_BracketRight:
+            self.zoom(0.8)
+            return
+        if e.key() in (Qt.Key_Backspace, Qt.Key_Delete) and self.tool != "select":
+            if self.delete_selection(whole=bool(e.modifiers() & (Qt.ControlModifier | Qt.MetaModifier))):
+                return
         if e.key() == Qt.Key_Escape and self.draw_mode:
             self.drawn.emit("cancel", 0, 0, 0, 0)
             return
@@ -680,8 +1115,11 @@ class FormulaEditor(QtWidgets.QWidget):
         formula = formula or {}
         self.tokens: List[str] = tokenize(str(formula.get("expr", "")))
 
+        self.prefix_fn = lambda: ""  # quick buttons: "I2." to take a protein from another image
+        self.preview_fn = None  # values -> preview text (grouped means in the graph sidebar)
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        self.top = QtWidgets.QVBoxLayout()  # room for extra pickers above the protein buttons
         f = QtWidgets.QFormLayout()
         self.name = QtWidgets.QLineEdit(str(formula.get("name", "")))
         f.addRow("이름", self.name)
@@ -695,6 +1133,7 @@ class FormulaEditor(QtWidgets.QWidget):
         self.display.setPlaceholderText("항목을 누르고, + - * / ( ) 와 숫자는 키보드나 버튼으로")
         self.display.installEventFilter(self)
         lay.addWidget(self.display)
+        lay.addLayout(self.top)
 
         if self.terms:  # proteins as buttons: one click puts the name in
             cap = QtWidgets.QLabel(f"{self.terms[0][0]} — 눌러서 넣기")
@@ -702,30 +1141,34 @@ class FormulaEditor(QtWidgets.QWidget):
             lay.addWidget(cap)
             grid = QtWidgets.QGridLayout()
             cols = 3 if compact else 6
+            grid.setSpacing(4)
             for i, (label, tok) in enumerate(self.terms[0][1][: self.QUICK]):
                 b = QtWidgets.QPushButton(label)
                 b.setFocusPolicy(Qt.NoFocus)
                 b.setToolTip(tok)
-                b.clicked.connect(lambda _=None, t=tok: self.push(t))
+                b.clicked.connect(lambda _=None, t=tok: self.push(self.prefix_fn() + t))
                 grid.addWidget(b, i // cols, i % cols)
             lay.addLayout(grid)
         hb = QtWidgets.QHBoxLayout()
         for label, tok in (("+", "+"), ("−", "-"), ("×", "*"), ("÷", "/"), ("(", "("), (")", ")")):
             b = QtWidgets.QPushButton(label)
-            b.setFixedWidth(34 if compact else 44)
+            b.setFixedWidth(30 if compact else 44)
+            b.setStyleSheet("padding: 0; font-weight: 600;")
             b.setFocusPolicy(Qt.NoFocus)
             b.clicked.connect(lambda _=None, t=tok: self.push(t))
             hb.addWidget(b)
         b = QtWidgets.QPushButton("⌫")
         b.setToolTip("하나 지우기")
-        b.setFixedWidth(34 if compact else 44)
+        b.setFixedWidth(30 if compact else 44)
+        b.setStyleSheet("padding: 0;")
         b.setFocusPolicy(Qt.NoFocus)
         b.clicked.connect(self.pop)
         hb.addWidget(b)
         b = QtWidgets.QPushButton("C" if compact else "모두 지우기")
         b.setToolTip("모두 지우기")
         if compact:
-            b.setFixedWidth(34)
+            b.setFixedWidth(30)
+            b.setStyleSheet("padding: 0;")
         b.setFocusPolicy(Qt.NoFocus)
         b.clicked.connect(self.clear)
         hb.addWidget(b)
@@ -833,7 +1276,7 @@ class FormulaEditor(QtWidgets.QWidget):
             val = core.evaluate(expr, self.variables)
             vals = np.atleast_1d(np.asarray(val, float))
             shown = ", ".join("—" if not np.isfinite(v) else f"{v:.4g}" for v in vals[:10]) + (" …" if vals.size > 10 else "")
-            self.preview.setText(f"미리보기: {shown}")
+            self.preview.setText(self.preview_fn(vals) if self.preview_fn else f"미리보기: {shown}")
             self.preview.setStyleSheet("color: #2e7d32;")
             self._set_valid(True)
         except Exception as e:
@@ -1139,94 +1582,119 @@ class MarkerStepDialog(QtWidgets.QDialog):
 
 
 class ExportDialog(QtWidgets.QDialog):
-    """File → 내보내기: choose what to save, in which form and where; several files at once."""
+    """파일 › 내보내기… (spec §9): pick what to save (data and pictures) and save it at once."""
 
-    ITEMS = [("graph_csv", "그래프 데이터 (CSV)", "지금 그래프에 켜진 항목만 · 레인 값 + 그룹 평균·오차·n", "graph_data.csv"),
-             ("graph_img", "그래프 이미지", "지금 보이는 그래프 그대로", "graph.{fmt}"),
-             ("figure_img", "Figure 이미지", "6번 탭의 그림 (현재 이미지)", "figure.{fmt}"),
-             ("figure_csv", "Figure 숫자 데이터 (CSV)", "Figure의 숫자 줄에 들어간 값만", "figure_numbers.csv"),
-             ("results_csv", "전체 결과 (CSV)", "열린 모든 이미지의 모든 밴드·결과", "results.csv")]
+    DATA = [("graph_csv", "정량 그래프에 쓰인 값", "켜 둔 항목·이미지·레인만 · 레인별 값 + 그룹 평균·SD·n", "graph_data.csv"),
+            ("multi_csv", "여러 이미지 그래프에 쓰인 값", "수식 결과 포함", "multi_graph_data.csv"),
+            ("results_csv", "모든 밴드 값", "모든 박스의 Raw·배경·Net, 그래프와 상관없이 전체", "all_bands.csv"),
+            ("figure_csv", "Figure에 쓰인 데이터", "레인 이름, kDa 위치, Figure 안 정량 숫자", "figure_data.csv")]
+    PICS = [("graph_img", "정량 그래프", "", "graph", ("png", "pdf", "svg")),
+            ("multi_img", "여러 이미지 그래프", "", "multi_graph", ("png", "pdf", "svg")),
+            ("figure_img", "Figure", "", "figure", ("tif", "png", "pdf", "svg")),
+            ("overlay_img", "박스 표시한 블롯 이미지", "검출 확인용", "boxes", ("png",))]
+    # (kept for older callers)
+    ITEMS = [(k, n, d, f) for k, n, d, f in DATA]
 
     def __init__(self, main):
         super().__init__(main)
         self.main = main
         self.setWindowTitle("내보내기")
-        self.resize(1000, 620)
+        self.resize(1080, 680)
         root = QtWidgets.QHBoxLayout(self)
         left = QtWidgets.QVBoxLayout()
-        g = QtWidgets.QGroupBox("무엇을 내보낼까요?")
+        t = QtWidgets.QLabel("내보내기")
+        t.setStyleSheet("font-size: 18px; font-weight: 700;")
+        left.addWidget(t)
+        left.addWidget(controls.hint("필요한 것만 골라 한 번에 저장합니다. 각 창 위의 '내보내기' 버튼은 그 창에 보이는 것 하나만 바로 저장합니다."))
+        self.checks, self.fmts = {}, {}
+        g = QtWidgets.QGroupBox("데이터 (CSV)")
         gl = QtWidgets.QVBoxLayout(g)
-        self.checks = {}
-        for key, name, sub, _ in self.ITEMS:
-            cb = QtWidgets.QCheckBox(name)
-            cb.setChecked(key in ("graph_csv", "graph_img"))
-            cb.setStyleSheet("font-weight: bold;")
-            cb.toggled.connect(self.refresh)
-            gl.addWidget(cb)
-            lab = QtWidgets.QLabel("      " + sub)
-            lab.setStyleSheet("color: #777;")
-            gl.addWidget(lab)
-            self.checks[key] = cb
+        for key, name, sub, _ in self.DATA:
+            gl.addLayout(self._row(key, name, sub, None))
         left.addWidget(g)
-        g = QtWidgets.QGroupBox("어떻게")
-        f = QtWidgets.QFormLayout(g)
+        g = QtWidgets.QGroupBox("그림")
+        gl = QtWidgets.QVBoxLayout(g)
+        w_, h_ = main.graph_opts.get("size_mm") or [90, 60]
+        for key, name, sub, _, fmts in self.PICS:
+            if key == "graph_img":
+                sub = f"{w_:g} × {h_:g} mm"
+            gl.addLayout(self._row(key, name, sub, fmts))
+        left.addWidget(g)
+        for k in ("graph_csv", "graph_img"):
+            self.checks[k].setChecked(True)
+        g, f = controls.card()
         self.scope = QtWidgets.QComboBox()
-        self.scope.addItem(f"현재 이미지 ({main.doc_key(main.cur)})", "current")
-        self.scope.addItem("열린 모든 이미지 (그래프 데이터)", "all")
-        self.scope.addItem("5번 탭: 여러 이미지 비교 (그래프)", "multi")
-        self.scope.setCurrentIndex(max(0, self.scope.findData(main.graph_scope())))
+        self.scope.addItem("정량 창에서 고른 이미지", "current")
+        self.scope.addItem("열린 모든 이미지", "all")
         self.scope.currentIndexChanged.connect(self.refresh)
-        f.addRow("그래프 범위", self.scope)
-        self.fmt = QtWidgets.QComboBox()
-        for k, text in prefs.IMAGE_FORMATS:
-            self.fmt.addItem(text, k)
-        self.fmt.setCurrentIndex(max(0, self.fmt.findData(main.prefs["export"].get("image_format", "png"))))
-        self.fmt.currentIndexChanged.connect(self.refresh)
-        f.addRow("이미지 형식", self.fmt)
+        f.addRow("범위", self.scope)
         self.dpi = _spin(72, 2400, int(main.prefs["figure"].get("export_dpi", 600)), 50, suffix=" dpi")
-        f.addRow("해상도", self.dpi)
+        f.addRow("해상도 (PNG·TIFF)", self.dpi)
         hb = QtWidgets.QHBoxLayout()
         self.folder = QtWidgets.QLineEdit(prefs.export_folder(main.prefs, main.image_path or ""))
         hb.addWidget(self.folder, 1)
-        b = QtWidgets.QPushButton("폴더…")
+        b = QtWidgets.QPushButton("바꾸기…")
         b.clicked.connect(self.choose_folder)
         hb.addWidget(b)
         f.addRow("저장 위치", hb)
         self.prefix = QtWidgets.QLineEdit(main._base_name())
         self.prefix.textChanged.connect(self.refresh)
         f.addRow("파일 이름 앞부분", self.prefix)
-        self.names = QtWidgets.QLabel()
-        self.names.setWordWrap(True)
-        self.names.setStyleSheet("color: #2e7d32;")
-        f.addRow(self.names)
         left.addWidget(g)
         left.addStretch(1)
         bb = QtWidgets.QHBoxLayout()
-        bb.addStretch(1)
+        self.count = QtWidgets.QLabel()
+        theme.hint(self.count)
+        bb.addWidget(self.count, 1)
         b = QtWidgets.QPushButton("취소")
         b.clicked.connect(self.reject)
         bb.addWidget(b)
-        self.go = QtWidgets.QPushButton()
+        self.go = controls.prominent(QtWidgets.QPushButton("내보내기"))
         self.go.setDefault(True)
-        self.go.setStyleSheet("font-weight: bold; padding: 5px 14px;")
         self.go.clicked.connect(self.run)
         bb.addWidget(self.go)
         left.addLayout(bb)
-        root.addLayout(left, 5)
+        lw = QtWidgets.QWidget()
+        lw.setLayout(left)
+        theme.unify(lw)
+        root.addWidget(lw, 5)
         right = QtWidgets.QVBoxLayout()
         self.preview_title = QtWidgets.QLabel()
-        self.preview_title.setStyleSheet("font-weight: bold;")
+        self.preview_title.setStyleSheet("font-weight: 600;")
         right.addWidget(self.preview_title)
         self.table = QtWidgets.QTableWidget()
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         right.addWidget(self.table, 1)
-        self.note = QtWidgets.QLabel()
-        self.note.setWordWrap(True)
-        self.note.setStyleSheet("color: #777;")
+        self.note = controls.hint("")
         right.addWidget(self.note)
         root.addLayout(right, 6)
         self.refresh()
+
+    def _row(self, key, name, sub, fmts):
+        hb = QtWidgets.QHBoxLayout()
+        cb = QtWidgets.QCheckBox()
+        cb.toggled.connect(self.refresh)
+        self.checks[key] = cb
+        hb.addWidget(cb)
+        v = QtWidgets.QVBoxLayout()
+        v.setSpacing(0)
+        lab = QtWidgets.QLabel(name)
+        lab.setStyleSheet("font-weight: 600;")
+        v.addWidget(lab)
+        if sub:
+            v.addWidget(controls.hint(sub))
+        hb.addLayout(v, 1)
+        if fmts:
+            seg = controls.Segmented([(f, {"tif": "TIFF"}.get(f, f.upper())) for f in fmts], small=True)
+            pref = self.main.prefs["export"].get("image_format", "png")
+            seg.set_value(pref if pref in fmts else fmts[0])
+            seg.changed.connect(lambda _=None: self.refresh())
+            self.fmts[key] = seg
+            hb.addWidget(seg)
+        else:
+            hb.addWidget(QtWidgets.QLabel("한 파일"))
+        return hb
 
     def choose_folder(self):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "저장 폴더", self.folder.text())
@@ -1234,24 +1702,31 @@ class ExportDialog(QtWidgets.QDialog):
             self.folder.setText(d)
 
     def files(self):
-        fmt = self.fmt.currentData()
         pre = self.prefix.text().strip() or "blot"
-        return [(key, f"{pre}_{name.format(fmt=fmt)}") for key, _, _, name in self.ITEMS if self.checks[key].isChecked()]
+        out = [(key, f"{pre}_{fn}") for key, _, _, fn in self.DATA if self.checks[key].isChecked()]
+        out += [(key, f"{pre}_{fn}.{self.fmts[key].value()}") for key, _, _, fn, _ in self.PICS if self.checks[key].isChecked()]
+        return out
 
     def refresh(self, *_):
+        if not hasattr(self, "go"):  # still being built
+            return
         files = self.files()
-        self.names.setText("→ " + ", ".join(n for _, n in files) if files else "고른 항목이 없습니다")
-        self.go.setText(f"{len(files)}개 파일 내보내기")
+        self.count.setText(f"파일 {len(files)}개를 저장합니다" if files else "고른 항목이 없습니다")
         self.go.setEnabled(bool(files))
         m = self.main
-        if self.checks["graph_csv"].isChecked() or not self.checks["figure_csv"].isChecked():
-            header, rows, notes = m.graph_data(self.scope.currentData())
-            self.preview_title.setText(f"미리보기: {self.prefix.text().strip() or 'blot'}_graph_data.csv")
-            self.note.setText("맨 위에 주석(#) 줄로 남깁니다: " + " / ".join(n.lstrip("# ") for n in notes))
-        else:
+        pre = self.prefix.text().strip() or "blot"
+        if self.checks["figure_csv"].isChecked() and not self.checks["graph_csv"].isChecked():
             header, rows = m.figure_editor.numbers_table() if m._figure_ready() else (["-"], [])
-            self.preview_title.setText(f"미리보기: {self.prefix.text().strip() or 'blot'}_figure_numbers.csv")
-            self.note.setText("Figure 숫자 줄의 표시 글자와 값입니다.")
+            self.preview_title.setText(f"CSV 미리보기 · {pre}_figure_data.csv")
+            self.note.setText("Figure의 레인 이름·kDa 위치·숫자 줄입니다.")
+        elif self.checks["results_csv"].isChecked() and not self.checks["graph_csv"].isChecked():
+            header, rows = ["(모든 밴드 값은 저장할 때 만듭니다)"], []
+            self.preview_title.setText(f"CSV 미리보기 · {pre}_all_bands.csv")
+            self.note.setText("")
+        else:
+            header, rows, notes = m.graph_data(self.scope.currentData())
+            self.preview_title.setText(f"CSV 미리보기 · {pre}_graph_data.csv")
+            self.note.setText("맨 위 # 주석 줄: " + " / ".join(n.lstrip("# ") for n in notes))
         t = self.table
         t.clear()
         t.setColumnCount(len(header))
@@ -1284,22 +1759,26 @@ class ExportDialog(QtWidgets.QDialog):
             try:
                 if key == "graph_csv":
                     m.write_graph_csv(p, scope)
-                elif key == "graph_img":
-                    m.save_figure_file(m._graph_canvas(scope).fig, p, dpi)
-                elif key == "figure_img":
-                    if not m._figure_ready():
-                        raise ValueError("Figure를 만들 수 없습니다")
-                    m.figure_editor.write_figure(p, dpi)
-                elif key == "figure_csv":
-                    if not m._figure_ready():
-                        raise ValueError("Figure를 만들 수 없습니다")
-                    m.figure_editor.write_numbers_csv(p)
+                elif key == "multi_csv":
+                    m.write_graph_csv(p, "multi")
                 elif key == "results_csv":
                     m.write_results_csv(p)
+                elif key in ("figure_csv", "figure_img"):
+                    if not m._figure_ready():
+                        raise ValueError("Figure를 만들 수 없습니다")
+                    if key == "figure_csv":
+                        m.figure_editor.write_numbers_csv(p)
+                    else:
+                        m.figure_editor.write_figure(p, dpi)
+                elif key == "graph_img":
+                    m.write_graph_image(p, m.plot, dpi)
+                elif key == "multi_img":
+                    m.write_graph_image(p, m.multi_plot, dpi)
+                elif key == "overlay_img":
+                    m.write_overlay(p)
                 done.append(os.path.basename(p))
             except Exception as e:
                 errors.append(f"{os.path.basename(p)}: {e}")
-        m.prefs["export"]["image_format"] = self.fmt.currentData()
         m.remember_folder(folder)
         if errors:
             QtWidgets.QMessageBox.warning(self, "내보내기", "일부를 저장하지 못했습니다:\n" + "\n".join(errors))
@@ -1322,16 +1801,17 @@ class SettingsDialog(QtWidgets.QDialog):
         self.tabs = QtWidgets.QTabWidget()
         left.addWidget(self.tabs, 1)
         info = QtWidgets.QLabel("여기 값은 새로 만드는 그래프·Figure의 초기값입니다(이 컴퓨터에 저장). 이미 만든 Figure는 그대로이고, "
-                                "'저장하고 열린 Figure에도 적용'으로 열린 Figure도 바꿀 수 있습니다.")
+                                "'지금 열린 그림에도 적용'으로 열린 그림도 바꿀 수 있습니다.")
         info.setWordWrap(True)
         info.setStyleSheet("color: #777;")
         left.addWidget(info)
         bb = QtWidgets.QHBoxLayout()
-        b = QtWidgets.QPushButton("기본값으로 되돌리기")
+        b = QtWidgets.QPushButton("PRISM 기본값으로 되돌리기")
         b.clicked.connect(self.reset)
         bb.addWidget(b)
         bb.addStretch(1)
-        b = QtWidgets.QPushButton("저장하고 열린 Figure에도 적용")
+        b = QtWidgets.QPushButton("지금 열린 그림에도 적용")
+        b.setToolTip("저장하고, 지금 열린 그래프와 Figure도 이 값으로 바꿉니다")
         b.clicked.connect(self.save_and_apply)
         bb.addWidget(b)
         b = QtWidgets.QPushButton("취소")
@@ -1359,11 +1839,14 @@ class SettingsDialog(QtWidgets.QDialog):
         w = QtWidgets.QWidget()
         f = QtWidgets.QFormLayout(w)
         f.addRow("글꼴", self._font(g, "font"))
-        for lab, key in (("축 제목 크기", "label_size"), ("눈금 글자 크기", "tick_size"), ("범례 글자 크기", "legend_size")):
+        for lab, key in (("축 이름 크기", "label_size"), ("눈금 숫자 크기", "tick_size"), ("범례 글자 크기", "legend_size"),
+                         ("제목 크기", "title_size")):
             f.addRow(lab, self._num(g, key, 4, 36, 0.5, 1, " pt"))
         f.addRow(self._check(g, "bold", "글자 굵게"))
         for lab, key in (("축 선 굵기", "axis_lw"), ("막대 테두리 굵기", "bar_lw"), ("오차 막대 굵기", "err_lw")):
             f.addRow(lab, self._num(g, key, 0.2, 6, 0.1, 1, " pt"))
+        f.addRow("눈금 길이", self._num(g, "tick_len", 0, 20, 0.5, 1, " pt"))
+        f.addRow("눈금 방향", self._combo(g, "tick_dir", [("out", "바깥"), ("in", "안쪽")]))
         f.addRow("점 크기", self._num(g, "point_size", 2, 200, 2, 0, ""))
         f.addRow("오차 막대 캡 길이", self._num(g, "cap", 0, 20, 1, 0, ""))
         f.addRow("기본 형태", self._combo(g, "kind", prefs.GRAPH_KINDS))
@@ -1379,7 +1862,9 @@ class SettingsDialog(QtWidgets.QDialog):
         f.addRow(self._check(fg, "label_bold", "단백질 이름(IB) 굵게"))
         f.addRow("패널 테두리 굵기", self._num(fg, "frame_lw", 0, 3, 0.1, 1, " pt"))
         f.addRow("그룹 막대 굵기", self._num(fg, "group_bar_lw", 0.2, 6, 0.1, 1, " pt"))
-        f.addRow("패널 폭", self._num(fg, "width_in", 1, 12, 0.1, 2, " in"))
+        mm = _spin(25, 300, round(float(fg.get("width_in", 3.2)) * 25.4), 1, suffix=" mm")
+        mm.valueChanged.connect(lambda v: (fg.__setitem__("width_in", round(v / 25.4, 3)), self.preview()))
+        f.addRow("기본 너비", mm)
         f.addRow("패널 간격", self._num(fg, "panel_gap_in", 0, 1, 0.01, 2, " in"))
         f.addRow("저장 해상도", self._num(fg, "export_dpi", 72, 2400, 50, 0, " dpi"))
         self.tabs.addTab(self._scrolled(w), "Figure")
@@ -1517,6 +2002,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._updating = False
         self._tilt_done = False
         self._tagged = ([], [])  # measurement groups of the boxes, carried over when detecting again
+        self.ref_name: Optional[str] = None  # 1.0 기준 (lane / group name)
+        self._ref_default = True  # first image: its first lane becomes the reference
+        self.ctrl_name: Optional[str] = None  # Control protein (None = the one with the Control role)
+        self.formulas_all: List[Dict[str, str]] = []  # formulas of the graph sidebar (every image)
+        self._pooled = []
         self.project_path: Optional[str] = None  # where the project was last saved/opened
         self._saved_fp: Optional[str] = None  # state at that moment (unsaved-change mark)
 
@@ -1532,100 +2022,100 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.drawn.connect(lambda k, *xy: self.set_draw_mode(None) if k == "cancel" else self.on_drawn(k, *xy))
         self.view.resizeModeExited.connect(lambda: self.resize_mode.setChecked(False))
 
-        self.tabs = QtWidgets.QTabWidget()
-        self.tabs.setUsesScrollButtons(True)
-        self.tabs.addTab(self._scroll(self._build_detect_tab()), "1. 검출")
-        self.tabs.addTab(self._scroll(self._build_rows_tab()), "2. 단백질 / 레인")
-        self.tabs.addTab(self._scroll(self._build_bands_tab()), "3. 밴드")
-        self.RES_TAB = self.tabs.addTab(self._build_results_tab(), "4. 정량 / 그래프")
-        self.tabs.addTab(self._build_multi_tab(), "5. 여러 이미지")
-        from .figure_window import FigureEditor
+        # ---- 1.0 layout: sidebar | canvas | inspector (spec §1–4); results and figure in their own windows
+        self.auto_lanes = QtWidgets.QCheckBox()  # lanes follow the boxes (always on; no control any more)
+        self.auto_lanes.setChecked(True)
+        self._groupings_widget = self._build_groupings()  # 측정 묶음 세트, edited from the quantification window
+        from .figure_window import FigureEditor, FigureWindow
+        from .quant_window import QuantWindow
 
         self.figure_editor = FigureEditor(self)
-        self.FIG_TAB = self.tabs.addTab(self.figure_editor, "6. Figure 만들기")
-        self.tabs.tabBar().setTabTextColor(self.FIG_TAB, QtGui.QColor("#1565c0"))
-        self.tabs.currentChanged.connect(self.on_tab_changed)
-        self._split_sizes = None
-        self.tabs.setMinimumWidth(380)
+        self.fig_win = FigureWindow(self, self.figure_editor)
+        self.quant_win = QuantWindow(self)
+        self.step = 0
 
-        left = QtWidgets.QWidget()
-        ll = QtWidgets.QVBoxLayout(left)
-        ll.setContentsMargins(0, 0, 0, 0)
-        # one tab per opened image
-        tb = QtWidgets.QHBoxLayout()
-        self.doc_tabs = QtWidgets.QTabBar()
-        self.doc_tabs.setTabsClosable(True)
-        self.doc_tabs.setExpanding(False)
-        self.doc_tabs.setDocumentMode(True)
-        self.doc_tabs.setToolTip("열린 이미지 (수식에서는 I1, I2 …로 부릅니다)")
-        self.doc_tabs.currentChanged.connect(self.switch_doc)
-        self.doc_tabs.tabCloseRequested.connect(self.close_doc)
-        tb.addWidget(self.doc_tabs, 1)
-        add_btn = QtWidgets.QPushButton("+ 이미지 추가")
-        add_btn.setToolTip("TIF 이미지를 더 열어 함께 정량합니다 (여러 개 선택 가능)")
-        add_btn.clicked.connect(self.open_image)
-        tb.addWidget(add_btn)
-        ll.addLayout(tb)
-        ll.addWidget(self.view, 1)
         self.contrast_lo = QtWidgets.QSlider(Qt.Horizontal)
         self.contrast_hi = QtWidgets.QSlider(Qt.Horizontal)
         for s, v in ((self.contrast_lo, 0), (self.contrast_hi, 1000)):
             s.setRange(0, 1000)
             s.setValue(v)
             s.valueChanged.connect(lambda _=None: self.update_display(reset_zoom=False))
-        self.show_corrected = QtWidgets.QCheckBox("배경 제거 이미지 표시")
+        self.show_corrected = QtWidgets.QCheckBox("배경 제거 이미지 보기")
         self.show_corrected.toggled.connect(lambda _=None: self.update_display(reset_zoom=False))
-        self.show_labels = QtWidgets.QCheckBox("밴드 ID 표시")
+        self.show_labels = QtWidgets.QCheckBox("박스 ID 보기")
         self.show_labels.setChecked(True)
         self.show_labels.toggled.connect(self.toggle_labels)
         self.show_marker = QtWidgets.QCheckBox("마커 같이 보기")
         self.show_marker.setChecked(True)
         self.show_marker.toggled.connect(lambda _=None: (self.refresh_marker_view(), self.view.fit()))
-        self.resize_mode = QtWidgets.QCheckBox("박스 크기 조절 모드")
-        self.resize_mode.setToolTip(
-            "켜면 박스 가장자리·모서리를 드래그해 크기를 바꿉니다. 같은 단백질 그룹(행)과 함께 선택한 밴드의 행이 함께 바뀝니다.\n"
-            "우클릭 메뉴에서도 켜고 끌 수 있고, Esc로 끝냅니다."
-        )
-        self.resize_mode.toggled.connect(self.on_resize_mode)
-        zl = QtWidgets.QHBoxLayout()
-        zl.addWidget(QtWidgets.QLabel("표시 대비"))
-        zl.addWidget(self.contrast_lo, 1)
-        zl.addWidget(self.contrast_hi, 1)
-        for text, tip, fn in (("−", "축소", lambda: self.view.zoom(0.8)), ("+", "확대", lambda: self.view.zoom(1.25)),
-                              ("창에 맞춤", "이미지를 창 크기에 맞춥니다 (창 크기를 바꾸면 계속 따라갑니다)", self.view.fit)):
-            b = QtWidgets.QToolButton()
-            b.setText(text)
-            b.setToolTip(tip)
-            b.clicked.connect(fn)
-            zl.addWidget(b)
-        ll.addLayout(zl)
-        cl = QtWidgets.QHBoxLayout()
-        cl.addWidget(self.show_corrected)
-        cl.addWidget(self.show_labels)
-        cl.addWidget(self.show_marker)
-        self.show_lane_lines = QtWidgets.QCheckBox("레인 선")
+        self.show_lane_lines = QtWidgets.QCheckBox("레인 선 · 단백질 선 보기")
         self.show_lane_lines.setChecked(True)
-        self.show_lane_lines.toggled.connect(lambda on: (setattr(self.view, "show_lanes", on), self.view.rebuild_extras()))
-        cl.addWidget(self.show_lane_lines)
-        cl.addStretch(1)
-        ll.addLayout(cl)
-        hint = QtWidgets.QLabel(
-            "클릭·드래그: 박스 선택(여러 개) · 박스를 잡고 끌기: 이동 · Backspace: 삭제 · 우클릭: 그룹·역할·병합 · "
-            "박스 더블클릭: 크기 수정(Esc나 빈 곳 클릭으로 끝) · 빈 곳 더블클릭: 박스 추가 · ⌘/Ctrl+휠: 확대"
-        )
-        hint.setStyleSheet("color: #888; font-size: 11px;")
-        hint.setWordWrap(True)
-        ll.addWidget(hint)
+        self.show_lane_lines.toggled.connect(lambda on: (setattr(self.view, "show_lanes", on), self.view.rebuild_lines()))
+        self.resize_mode = QtWidgets.QCheckBox("박스 크기 수정")
+        self.resize_mode.toggled.connect(self.on_resize_mode)
+
+        self.sidebar = self._build_sidebar()
+        canvas = QtWidgets.QWidget()
+        canvas.setObjectName("hig_content")
+        canvas.setAttribute(Qt.WA_StyledBackground, True)
+        cl = QtWidgets.QVBoxLayout(canvas)
+        cl.setContentsMargins(20, 14, 20, 8)
+        cl.setSpacing(10)
+        head = QtWidgets.QHBoxLayout()
+        self.canvas_title = QtWidgets.QLabel("검출")
+        self.canvas_title.setStyleSheet("font-size: 20px; font-weight: 700;")
+        head.addWidget(self.canvas_title)
+        head.addStretch(1)
+        self.canvas_note = QtWidgets.QLabel()
+        theme.hint(self.canvas_note)
+        head.addWidget(self.canvas_note)
+        self.tool_seg = controls.Segmented([("select", "선택"), ("lane", "레인 선"), ("protein", "단백질 선"), ("marker", "마커 영역")])
+        self.tool_seg.changed.connect(self.set_tool)
+        head.addWidget(self.tool_seg)
+        cl.addLayout(head)
+        cl.addWidget(self.view, 1)
+        st = QtWidgets.QHBoxLayout()
+        self.key_hint = QtWidgets.QLabel()
+        theme.hint(self.key_hint)
+        st.addWidget(self.key_hint, 1)
+        self.img_info = QtWidgets.QLabel()
+        theme.hint(self.img_info)
+        st.addWidget(self.img_info)
+        cl.addLayout(st)
+
+        self.inspector = QtWidgets.QStackedWidget()
+        self.inspector.addWidget(self._inspector_page(self._build_detect_inspector()))
+        self.inspector.addWidget(self._inspector_page(self._build_lanes_inspector()))
+        insp = QtWidgets.QWidget()
+        insp.setObjectName("hig_inspector")
+        insp.setAttribute(Qt.WA_StyledBackground, True)
+        il = QtWidgets.QVBoxLayout(insp)
+        il.setContentsMargins(0, 0, 0, 0)
+        il.addWidget(self.inspector)
+        insp.setFixedWidth(372)
 
         split = QtWidgets.QSplitter()
+        split.setHandleWidth(0)
+        split.setChildrenCollapsible(False)
         self.split = split
-        split.addWidget(left)
-        split.addWidget(self.tabs)
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
-        left.setMinimumWidth(300)
-        self._split_init = False
+        split.addWidget(self.sidebar)
+        split.addWidget(canvas)
+        split.addWidget(insp)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setStretchFactor(2, 0)
+        self.sidebar.setMinimumWidth(200)
+        self.sidebar.setMaximumWidth(280)
         self.setCentralWidget(split)
+        self.view.linesChanged.connect(self.on_lines_changed)
+        self.view.markerEdited.connect(self.on_marker_edited)
+        self.view.tickSelected.connect(self.on_tick_selected)
+        self.view.proteinDrawn.connect(self.add_protein_line)
+        self.view.laneMenu.connect(self.show_lane_menu)
+        self.view.proteinMenu.connect(self.show_protein_menu)
+        self.view.toolHint.connect(lambda m: self.statusBar().showMessage(m))
+        self.view.zoomChanged.connect(lambda k: self.zoom_label.setText(f"{k * 100:.0f}%"))
+        self.set_step(0)
         self._build_menu()
         self._build_toolbar()
         self.statusBar().showMessage("TIF 파일을 열어 시작하세요 (파일 → 열기 또는 창에 끌어다 놓기)")
@@ -1640,6 +2130,603 @@ class MainWindow(QtWidgets.QMainWindow):
         self._title_timer.setInterval(1500)
         self._title_timer.timeout.connect(self.update_title)
         self._title_timer.start()
+
+    # ---------------------------------------------------------------- 1.0 sidebar / steps / inspector
+    def _inspector_page(self, page):
+        theme.unify(page)
+        return self._scroll(page)
+
+    def _build_sidebar(self):
+        side = QtWidgets.QWidget()
+        side.setObjectName("hig_sidebar")
+        side.setAttribute(Qt.WA_StyledBackground, True)
+        lay = QtWidgets.QVBoxLayout(side)
+        lay.setContentsMargins(10, 12, 10, 12)
+        lay.setSpacing(2)
+        hb = QtWidgets.QHBoxLayout()
+        hb.addWidget(controls.section("이미지"))
+        hb.addStretch(1)
+        b = QtWidgets.QToolButton()
+        b.setText("＋")
+        b.setToolTip("이미지 열기… (여러 개, 끌어다 놓아도 됩니다)")
+        b.clicked.connect(self.open_image)
+        hb.addWidget(b)
+        lay.addLayout(hb)
+        self.img_list = controls.SideList()
+        self.img_list.currentRowChanged.connect(self.switch_doc)
+        self.img_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.img_list.customContextMenuRequested.connect(self._img_menu)
+        lay.addWidget(self.img_list)
+        lay.addWidget(controls.section("단계"))
+        self.step_list = controls.SideList()
+        self.step_list.currentRowChanged.connect(self.set_step)
+        lay.addWidget(self.step_list)
+        lay.addWidget(controls.section("결과 창"))
+        self.win_list = controls.SideList()
+        self.win_list.set_rows([("정량·그래프", "새 창"), ("Figure", "새 창")])
+        self.win_list.itemClicked.connect(lambda it: (self.open_quant_window() if self.win_list.row(it) == 0
+                                                       else self.open_figure_window(), self.win_list.clearSelection()))
+        lay.addWidget(self.win_list)
+        lay.addStretch(1)
+        lay.addWidget(controls.hint("저장·불러오기는 모두 위쪽 메뉴 막대의 파일 메뉴에 있습니다."))
+        return side
+
+    def _img_menu(self, pos):
+        row = self.img_list.indexAt(pos).row()
+        if row < 0:
+            return
+        m = QtWidgets.QMenu(self)
+        m.addAction("이 이미지 닫기", lambda: self.close_doc(row))
+        m.exec(self.img_list.mapToGlobal(pos))
+
+    def refresh_steps(self):
+        a = self.analysis
+        rows = [("1  검출", f"레인 {a.n_lanes} · 줄 {len(a.rows)}" if a.bands else ""), ("2  레인 / 단백질", "")]
+        self.step_list.set_rows(rows, self.step)
+
+    def set_step(self, i: int):
+        if i < 0:
+            return
+        self.step = i
+        self.inspector.setCurrentIndex(i)
+        self.canvas_title.setText("검출" if i == 0 else "레인 / 단백질")
+        self.tool_seg.setVisible(i == 0)
+        self.canvas_note.setVisible(i == 1)
+        self.canvas_note.setText("박스를 클릭·드래그로 선택, 더블클릭으로 크기 수정, 끌어서 이동")
+        if i == 1 and self.view.tool != "select":
+            self.tool_seg.set_value("select")
+            self.set_tool("select")
+        self.refresh_steps()
+        self.update_key_hint()
+
+    def set_tool(self, tool: str):
+        self.view.set_tool(tool)
+        self.update_key_hint()
+        msg = {"lane": "레인 선: 빈 곳 클릭 = 새 선 · 점 끌기 = 휘기 · 선 더블클릭 = 점 추가 · ⌫ = 지우기 · 우클릭 = 메뉴",
+               "protein": "단백질 선: 가로로 끌어 새 빨간 선 · 양끝 네모로 기울이기 · 선을 끌어 옮기기 · ⌫ = 지우기",
+               "marker": "마커 영역: 마커 이미지에서 끌어 영역을 정하고, 영역 안을 클릭해 마커 밴드 위치를 넣으세요",
+               "select": "선택: 박스를 클릭·드래그로 고르고 끌어서 옮깁니다"}[tool]
+        self.statusBar().showMessage(msg)
+
+    def update_key_hint(self):
+        tail = ("드래그: 선택 · ROI 수정 · 영역 설정" if self.step == 0
+                else "더블클릭: 크기 수정 · ⌫ 지우기 · 우클릭: 그룹·병합")
+        self.key_hint.setText(f"[ 확대   ] 축소   Space + 드래그: 화면 이동   {tail}")
+
+    # ---- inspector: 검출
+    def _take_row(self, widget):
+        """Take ``widget`` out of the old settings form (the row's label goes with it)."""
+        par = widget.parentWidget()
+        lay = par.layout() if par is not None else None
+        if isinstance(lay, QtWidgets.QFormLayout):
+            res = lay.takeRow(widget)
+            if res.labelItem is not None and res.labelItem.widget() is not None:
+                res.labelItem.widget().deleteLater()
+        return widget
+
+    def _build_detect_inspector(self):
+        old = self._build_detect_tab()  # every former setting; the ones below move into the cards
+        page = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(page)
+        g, f = controls.card("검출")
+        self.kind_seg = controls.Segmented([(core.MODE_WESTERN, "Western"), (core.MODE_GEL, "DNA gel")], small=True)
+        self.kind_seg.changed.connect(lambda m: self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(m))))
+        self.mode_combo.currentIndexChanged.connect(lambda _: self.kind_seg.set_value(self.mode_combo.currentData()))
+        f.addRow("종류", self.kind_seg)
+        f.addRow("민감도", controls.slider_row(self._take_row(self.sens)))
+        self._take_row(self.auto_tilt)
+        self.auto_tilt.setText("")
+        theme.switch(self.auto_tilt)
+        f.addRow(self._row_title("기울기 자동 보정", "블롯과 마커를 같은 각도로 통째로 돌립니다"), self.auto_tilt)
+        hb = QtWidgets.QHBoxLayout()
+        self.angle_main = _spin(-45.0, 45.0, 0.0, 0.1, 1, "°")
+        self.angle_main.setKeyboardTracking(False)
+        self.angle_main.valueChanged.connect(lambda v: abs(self.angle_spin.value() - v) > 1e-6 and self.angle_spin.setValue(v))
+        self.angle_spin.valueChanged.connect(lambda v: (self.angle_main.blockSignals(True), self.angle_main.setValue(v),
+                                                        self.angle_main.blockSignals(False)))
+        hb.addWidget(self.angle_main)
+        lab = QtWidgets.QLabel("자동")
+        theme.hint(lab)
+        hb.addWidget(lab)
+        self.angle_auto = controls.switch("", True)
+        self.angle_auto.toggled.connect(lambda on: self.auto_tilt.isChecked() != on and self.auto_tilt.setChecked(on))
+        self.auto_tilt.toggled.connect(lambda on: self.angle_auto.isChecked() != on and self.angle_auto.setChecked(on))
+        hb.addWidget(self.angle_auto)
+        f.addRow("회전 각도", hb)
+        lay.addWidget(g)
+
+        g, f = controls.card()
+        self.lines_title = QtWidgets.QLabel()
+        self.lines_title.setStyleSheet("font-weight: 600;")
+        f.addRow(self.lines_title)
+        f.addRow(controls.hint("선을 고친 뒤 다시 검출하면 그 선을 기준으로 박스를 찾습니다."))
+        b = QtWidgets.QPushButton("레인 선 자동으로 찾기")
+        b.clicked.connect(self.find_lane_lines)
+        b2 = controls.prominent(QtWidgets.QPushButton("선 기준으로 다시 검출"))
+        b2.clicked.connect(lambda: self.detect(use_lines=True))
+        hb = QtWidgets.QHBoxLayout()
+        hb.setSpacing(6)
+        hb.addWidget(b)
+        hb.addWidget(b2)
+        f.addRow(hb)
+        lay.addWidget(g)
+
+        g, f = controls.card("단백질 선")
+        self.only_on_lines = controls.switch("", False)
+        self.only_on_lines.setToolTip("켜면 다시 검출할 때 빨간 선과 레인 선이 만나는 자리에만 박스를 놓습니다")
+        f.addRow("빨간 선 위에서만 찾기", self.only_on_lines)
+        self.pline_box = QtWidgets.QVBoxLayout()
+        f.addRow(self.pline_box)
+        lay.addWidget(g)
+
+        g, f = controls.card("마커")
+        hb = QtWidgets.QHBoxLayout()
+        self.marker_name = QtWidgets.QLabel("없음")
+        self.marker_name.setWordWrap(True)
+        self.marker_name.setMinimumWidth(40)
+        theme.hint(self.marker_name)
+        hb.addWidget(self.marker_name, 1)
+        b = QtWidgets.QPushButton("바꾸기…")
+        b.clicked.connect(self.open_marker)
+        hb.addWidget(b)
+        f.addRow("마커 이미지", hb)
+        self.ladder_combo = QtWidgets.QComboBox()
+        self.ladder_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.ladder_combo.setMinimumContentsLength(10)
+        self.ladder_combo.currentIndexChanged.connect(lambda _: self.apply_ladder())
+        f.addRow("래더", self.ladder_combo)
+        hb = QtWidgets.QHBoxLayout()
+        self.first_kda = QtWidgets.QDoubleSpinBox()
+        self.first_kda.setRange(0, 100000)
+        self.first_kda.setDecimals(0)
+        self.first_kda.setSpecialValueText("—")
+        self.first_kda.setKeyboardTracking(False)
+        self.first_kda.valueChanged.connect(lambda _: self.apply_ladder())
+        hb.addWidget(self.first_kda)
+        self.kda_unit = QtWidgets.QLabel("kDa")
+        hb.addWidget(self.kda_unit)
+        f.addRow("첫 마커 크기", hb)
+        self.kda_chips = controls.ChipRow()
+        self.kda_chips.clicked.connect(self.edit_kda_chip)
+        f.addRow(controls.hint("마커 영역 도구로 영역을 그리고 밴드를 클릭하세요. 나머지는 래더 순서로 자동 · 칩을 눌러 고침"))
+        f.addRow(self.kda_chips)
+        lay.addWidget(g)
+
+        disp = QtWidgets.QWidget()
+        dl = QtWidgets.QFormLayout(disp)
+        hb = QtWidgets.QHBoxLayout()
+        hb.addWidget(self.contrast_lo)
+        hb.addWidget(self.contrast_hi)
+        dl.addRow("표시 대비", hb)
+        for w in (self.show_corrected, self.show_labels, self.show_marker, self.show_lane_lines):
+            dl.addRow(w)
+        body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(body)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.addWidget(old)
+        gd = QtWidgets.QGroupBox("보기")
+        QtWidgets.QVBoxLayout(gd).addWidget(disp)
+        bl.addWidget(gd)
+        col = controls.Collapsible("세부 설정", body)
+        col.btn.setToolTip("배경 제거 · 회전·자르기 · 검출 값 · 보기")
+        lay.addWidget(col)
+        lay.addStretch(1)
+        self.fill_ladders()
+        return page
+
+    def _row_title(self, title, desc):
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        v.addWidget(QtWidgets.QLabel(title))
+        d = QtWidgets.QLabel(desc)
+        d.setWordWrap(True)
+        theme.hint(d)
+        v.addWidget(d)
+        return w
+
+    def refresh_lines_card(self):
+        a = self.analysis
+        self.lines_title.setText(f"레인 선 {len(a.lane_lines)}개 · 단백질 선 {len(a.protein_lines)}개")
+        box = self.pline_box
+        while box.count():
+            it = box.takeAt(0)
+            if it.layout():
+                while it.layout().count():
+                    w = it.layout().takeAt(0).widget()
+                    if w:
+                        w.deleteLater()
+            elif it.widget():
+                it.widget().deleteLater()
+        if not a.protein_lines:
+            box.addWidget(controls.hint("단백질 선 도구로 가로로 끌어 빨간 선을 그리세요"))
+        names = [r.name for r in a.rows]
+        for i, p in enumerate(a.protein_lines):
+            hb = QtWidgets.QHBoxLayout()
+            hb.addWidget(controls.color_dot("#d70015", 12))
+            cb = QtWidgets.QComboBox()
+            cb.addItems(names + (["(새 단백질)"] if p.get("row") not in names else []))
+            cb.setCurrentText(p.get("row") if p.get("row") in names else "(새 단백질)")
+            cb.setToolTip("이 선이 잡을 단백질 행")
+            cb.currentTextChanged.connect(lambda t, i=i: self.set_pline_row(i, t))
+            hb.addWidget(cb, 1)
+            y = (p["y0"] + p["y1"]) / 2.0
+            lab = QtWidgets.QLabel(f"y {y:.0f}")
+            theme.hint(lab)
+            hb.addWidget(lab)
+            box.addLayout(hb)
+
+    # ---- inspector: 레인 / 단백질
+    def _build_lanes_inspector(self):
+        page = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(page)
+        g = QtWidgets.QGroupBox("레인")
+        self.lane_grid = QtWidgets.QGridLayout(g)
+        lay.addWidget(g)
+        lay.addWidget(controls.hint("역할: 시료 · 마커(ladder) · 제외. 이름이 같은 레인은 반복으로 평균 ± SD."))
+        g = QtWidgets.QGroupBox("단백질")
+        self.prot_grid = QtWidgets.QGridLayout(g)
+        lay.addWidget(g)
+        hb = QtWidgets.QHBoxLayout()
+        hb.addStretch(1)
+        b = QtWidgets.QPushButton("＋ 새 단백질")
+        b.setToolTip("이미지에서 새 단백질의 박스 하나를 드래그로 그립니다")
+        b.clicked.connect(self.new_protein)
+        hb.addWidget(b)
+        b = controls.prominent(QtWidgets.QPushButton("ROI 박스 채우기"))
+        b.setToolTip("고른 단백질 박스와 같은 크기의 박스를 모든 레인의 같은 높이에 채웁니다")
+        b.clicked.connect(self.fill_roi_boxes)
+        hb.addWidget(b)
+        lay.addLayout(hb)
+        self.fill_hint = controls.hint("")
+        lay.addWidget(self.fill_hint)
+        g, f = controls.card("선택한 박스")
+        self.box_w = _spin(2, 5000, 20, suffix=" px")
+        self.box_h = _spin(2, 5000, 10, suffix=" px")
+        self.box_w.valueChanged.connect(lambda v: self._set_sel_size("width", v))
+        self.box_h.valueChanged.connect(lambda v: self._set_sel_size("height", v))
+        f.addRow("폭", self.box_w)
+        f.addRow("높이", self.box_h)
+        f.addRow(controls.hint("같은 단백질의 박스는 모두 같은 크기입니다. 박스를 더블클릭해 끌어도 됩니다."))
+        self.sel_card = g
+        g.setVisible(False)
+        lay.addWidget(g)
+        lay.addStretch(1)
+        return page
+
+    @staticmethod
+    def _clear_grid(grid):
+        while grid.count():
+            it = grid.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+
+    def fill_lanes_table(self):
+        a = self.analysis
+        a.ensure_lane_labels()
+        core.sync_lane_roles(a)
+        g = self.lane_grid
+        self._clear_grid(g)
+        for c, t in enumerate(("#", "이름", "역할")):
+            lab = QtWidgets.QLabel(t)
+            theme.hint(lab)
+            g.addWidget(lab, 0, c)
+        for i in range(a.n_lanes):
+            lab = QtWidgets.QLabel(f"L{i + 1}")
+            theme.hint(lab)
+            g.addWidget(lab, i + 1, 0)
+            e = QtWidgets.QLineEdit(a.lane_labels[i])
+            e.editingFinished.connect(lambda i=i, e=e: self.rename_lane(i, e.text()))
+            g.addWidget(e, i + 1, 1)
+            cb = QtWidgets.QComboBox()
+            for r in core.LANE_ROLES:
+                cb.addItem(core.LANE_ROLE_LABELS[r], r)
+            cb.setCurrentIndex(max(0, cb.findData(a.lane_roles[i] if i < len(a.lane_roles) else core.LANE_SAMPLE)))
+            cb.currentIndexChanged.connect(lambda _=None, i=i, cb=cb: self.set_lane_role(i, cb.currentData()))
+            g.addWidget(cb, i + 1, 2)
+        g.setColumnStretch(1, 1)
+        self.fill_groupings()
+        self.fill_basis_combo()
+        self.refresh_steps()
+        self.refresh_lines_card()
+        self.view.rebuild_lines()
+
+    def fill_rows_table(self):
+        a = self.analysis
+        g = self.prot_grid
+        self._clear_grid(g)
+        for i, r in enumerate(a.rows):
+            g.addWidget(controls.color_dot(row_color(i).name(), 10), i, 0)
+            e = QtWidgets.QLineEdit(r.name)
+            e.editingFinished.connect(lambda i=i, e=e: self.rename_protein(i, e.text()))
+            g.addWidget(e, i, 1)
+            cb = QtWidgets.QComboBox()
+            roles = [core.ROLE_CONTROL, core.ROLE_TARGET] + ([core.ROLE_IGNORE] if r.role == core.ROLE_IGNORE else [])
+            for role in roles:
+                cb.addItem(ROLE_SHORT[role], role)
+            cb.setCurrentIndex(max(0, cb.findData(r.role)))
+            cb.currentIndexChanged.connect(lambda _=None, i=i, cb=cb: self.set_row_role(i, cb.currentData()))
+            g.addWidget(cb, i, 2)
+        g.setColumnStretch(1, 1)
+        self.update_sel_card()
+
+    def rename_lane(self, i, text):
+        a = self.analysis
+        text = text.strip()
+        if not text or i >= len(a.lane_labels) or a.lane_labels[i] == text:
+            return
+        a.lane_labels[i] = text
+        if text not in a.named_lanes:
+            a.named_lanes.append(text)
+        self.view.refresh_items()
+        self.view.rebuild_lines()
+        self.remeasure()
+        self._figure_changed(self.doc)
+
+    def rename_protein(self, i, text):
+        a = self.analysis
+        text = text.strip()
+        if not text or i >= len(a.rows) or a.rows[i].name == text:
+            return
+        old = a.rows[i].name
+        new = core.unique_name(text, [r.name for k, r in enumerate(a.rows) if k != i])
+        a.rows[i].name = new
+        for p in a.protein_lines:
+            if p.get("row") == old:
+                p["row"] = new
+        self.structure_changed()
+
+    def set_lane_role(self, i, role):
+        a = self.analysis
+        core.sync_lane_roles(a)
+        a.lane_roles[i] = role
+        if self.doc.mode == core.MODE_GEL:
+            core.set_ladder_lanes(a, [k for k, r in enumerate(a.lane_roles) if r == core.LANE_MARKER])
+            core.sync_lane_roles(a)
+        self.structure_changed()
+
+    def update_sel_card(self):
+        sel = self.view.selected_bands()
+        self.sel_card.setVisible(bool(sel))
+        if sel:
+            r = self.analysis.rows[sel[0].row]
+            for sp, v in ((self.box_w, r.width), (self.box_h, r.height)):
+                sp.blockSignals(True)
+                sp.setValue(v)
+                sp.blockSignals(False)
+            self.sel_card.setTitle(f"선택한 박스 · {r.name}")
+            self.fill_hint.setText(f"'{r.name}' 박스와 같은 크기로 비어 있는 레인의 같은 높이에 박스를 채웁니다.")
+        else:
+            self.fill_hint.setText("박스를 하나 고르거나 '＋ 새 단백질'로 그린 뒤 'ROI 박스 채우기'를 누르세요.")
+
+    def _set_sel_size(self, attr, v):
+        rows = {b.row for b in self.view.selected_bands()}
+        for ri in rows:
+            setattr(self.analysis.rows[ri], attr, int(v))
+        if rows:
+            self.view.refresh_items()
+            self.remeasure()
+
+    def new_protein(self):
+        if self.doc.raw is None:
+            return
+        self.set_step(1)
+        self.set_draw_mode("box")
+        self.statusBar().showMessage("새 단백질: 이미지에서 박스 하나를 드래그로 그리세요 · Esc 취소")
+
+    def add_protein_box(self, x0, y0, x1, y1):
+        a = self.analysis
+        w, h = max(4, int(abs(x1 - x0))), max(3, int(abs(y1 - y0)))
+        name = core.unique_name(f"P{len(a.rows) + 1}", [r.name for r in a.rows])
+        a.rows.append(core.Row(name=name, width=w, height=h, role=core.ROLE_TARGET))
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        lane = 0
+        if a.lane_lines:
+            lane = int(np.argmin([abs(core.poly_x(ln, cy) - cx) for ln in a.lane_lines]))
+        b = core.Band(row=len(a.rows) - 1, lane=lane, cx=cx, cy=cy, user=True)
+        a.bands.append(b)
+        a.bands.sort(key=lambda b_: (b_.row, b_.lane))
+        self.structure_changed()
+        self.view.select_bands([b])
+        self.update_sel_card()
+        self.statusBar().showMessage(f"새 단백질 '{name}'을 만들었습니다 — 'ROI 박스 채우기'로 모든 레인에 채우세요")
+
+    def fill_roi_boxes(self):
+        sel = self.view.selected_bands()
+        a = self.analysis
+        if not sel:
+            self.statusBar().showMessage("채울 단백질의 박스를 하나 고르세요")
+            return
+        ri = sel[0].row
+        n = core.fill_row(a, ri)
+        self.structure_changed()
+        self.view.select_bands([b for b in a.bands if b.row == ri])
+        self.statusBar().showMessage(f"'{a.rows[ri].name}' 박스 {n}개를 채웠습니다")
+
+    # ---- lines
+    def on_lines_changed(self, msg):
+        self.refresh_lines_card()
+        self.statusBar().showMessage(msg)
+
+    def find_lane_lines(self):
+        corr = self.get_corrected()
+        if corr is None:
+            return
+        settings = core.DetectSettings(sensitivity=self.sens.value(), lut_gamma=self.lut_gamma.value())
+        work = core.detection_image(corr, settings)
+        H = work.shape[0]
+        a = lanes.detect(corr, settings, self.doc.mode)
+        self.analysis.lane_lines = [[[float(lanes.lane_line_x(g, 0.0)), 0.0], [float(lanes.lane_line_x(g, H - 1.0)), H - 1.0]]
+                                    for g in a.lane_geom]
+        self.view.rebuild_lines()
+        self.refresh_lines_card()
+        self.statusBar().showMessage(f"레인 선 {len(self.analysis.lane_lines)}개를 찾았습니다 — 고친 뒤 '선 기준으로 다시 검출'")
+
+    def show_lane_menu(self, gpos, x, y):
+        v = self.view
+        sel = v.sel or {}
+        a = self.analysis
+        m = QtWidgets.QMenu(self)
+        i = sel.get("i")
+        if i is not None:
+            m.addAction("여기에 점 추가\t더블클릭", lambda: v.add_lane_point(i, y))
+            if sel.get("j") is not None:
+                m.addAction("이 점 지우기\t⌫", lambda: v.delete_selection())
+            m.addSeparator()
+        H = v._img_h()
+        pitch = float(np.median(np.diff(sorted(np.mean([q[0] for q in ln]) for ln in a.lane_lines)))) if len(a.lane_lines) > 1 else 60.0
+
+        def add(dx):
+            base = a.lane_lines[i] if i is not None else [[x, 0.0], [x, H - 1]]
+            a.lane_lines.append([[q[0] + dx, q[1]] for q in base])
+            a.lane_lines.sort(key=lambda ln: float(np.mean([q[0] for q in ln])))
+            v.rebuild_lines()
+            self.on_lines_changed("레인 선을 넣었습니다")
+        m.addAction("왼쪽에 레인 선 추가", lambda: add(-pitch))
+        m.addAction("오른쪽에 레인 선 추가", lambda: add(pitch))
+        if i is not None:
+            m.addSeparator()
+            lab = a.lane_labels[i] if i < len(a.lane_labels) else f"L{i + 1}"
+            act = m.addAction(f"레인 선 {lab} 지우기\t⌘⌫", lambda: v.delete_selection(whole=True))
+            act.setProperty("hig_destructive", True)
+        m.exec(gpos)
+
+    def show_protein_menu(self, gpos, i):
+        if i < 0:
+            return
+        m = QtWidgets.QMenu(self)
+        sub = m.addMenu("잡을 단백질")
+        for r in self.analysis.rows:
+            sub.addAction(r.name, lambda n=r.name: self.set_pline_row(i, n))
+        m.addSeparator()
+        m.addAction("이 단백질 선 지우기\t⌫", lambda: self.view.delete_selection())
+        m.exec(gpos)
+
+    def add_protein_line(self, x0, y0, x1, y1):
+        a = self.analysis
+        used = {p.get("row") for p in a.protein_lines}
+        row = next((r.name for r in a.rows if r.name not in used), None)
+        if row is None:
+            row = core.unique_name(f"P{len(a.rows) + 1}", [r.name for r in a.rows] + list(used))
+        a.protein_lines.append({"row": row, "x0": x0, "y0": y0, "x1": x1, "y1": y1})
+        a.protein_lines.sort(key=lambda p: (p["y0"] + p["y1"]) / 2.0)
+        self.view.rebuild_lines()
+        self.refresh_lines_card()
+        self.statusBar().showMessage(f"단백질 선 '{row}'을 그렸습니다 — 양끝 네모로 기울이고, '선 기준으로 다시 검출'로 반영합니다")
+
+    def set_pline_row(self, i, name):
+        a = self.analysis
+        if 0 <= i < len(a.protein_lines) and name and name != "(새 단백질)":
+            a.protein_lines[i]["row"] = name
+            self.view.rebuild_lines()
+            self.refresh_lines_card()
+
+    # ---- marker: strip, size marks, ladder
+    def _marker_s(self):
+        d = self.doc
+        if d.figure is None:
+            d.figure = figure.default_settings()
+        return d.figure
+
+    def fill_ladders(self):
+        cb = self.ladder_combo
+        cb.blockSignals(True)
+        cb.clear()
+        gel = self.doc.mode == core.MODE_GEL if hasattr(self, "docs") else False
+        presets = core.LADDER_PRESETS if gel else core.LADDER_PRESETS_KDA
+        for name in presets:
+            cb.addItem(name, name)
+        cur = (self.doc.figure or {}).get("ladder") if hasattr(self, "docs") else None
+        cb.setCurrentIndex(max(0, cb.findData(cur)))
+        cb.blockSignals(False)
+        self.kda_unit.setText("bp" if gel else "kDa")
+
+    def on_marker_edited(self, msg):
+        s = self._marker_s()
+        s["show_kda"] = bool(s.get("kda"))
+        self.refresh_marker_card()
+        self._figure_changed(self.doc)
+        self.statusBar().showMessage(msg)
+
+    def on_tick_selected(self, i):
+        s = self._marker_s()
+        k = s.get("kda", [])
+        self.first_kda.blockSignals(True)
+        self.first_kda.setValue(float(k[i]["kda"]) if 0 <= i < len(k) and k[i].get("kda") else 0)
+        self.first_kda.blockSignals(False)
+        self.refresh_marker_card()
+
+    def _anchor(self):
+        sel = self.view.sel or {}
+        k = self._marker_s().get("kda", [])
+        if sel.get("kind") == "tick" and 0 <= sel.get("i", -1) < len(k):
+            return sel["i"]
+        return 0 if k else None
+
+    def apply_ladder(self):
+        """The size of one marker band (첫 마커 크기) fills the others in the ladder's order."""
+        if not hasattr(self, "docs"):
+            return
+        s = self._marker_s()
+        name = self.ladder_combo.currentData()
+        s["ladder"] = name
+        marks = s.get("kda", [])
+        i = self._anchor()
+        v = self.first_kda.value()
+        if i is None or not v:
+            self.refresh_marker_card()
+            return
+        presets = core.LADDER_PRESETS if self.doc.mode == core.MODE_GEL else core.LADDER_PRESETS_KDA
+        sizes = core.fill_ladder(len(marks), i, v, presets.get(name, core.DEFAULT_LADDER))
+        for m_, sz in zip(marks, sizes):
+            m_["kda"] = sz
+        s["unit"] = "bp" if self.doc.mode == core.MODE_GEL else "kDa"
+        self.on_marker_edited("마커 크기를 래더 순서로 채웠습니다 — 칩을 눌러 하나씩 고칠 수 있습니다")
+        self.view.rebuild_lines()
+
+    def edit_kda_chip(self, i):
+        s = self._marker_s()
+        k = s.get("kda", [])
+        if not 0 <= i < len(k):
+            return
+        self.view.sel = {"kind": "tick", "i": i}
+        self.view.rebuild_lines()
+        v, ok = QtWidgets.QInputDialog.getDouble(self, "마커 크기", f"{i + 1}번째 밴드 크기 ({self.kda_unit.text()}):",
+                                                 float(k[i].get("kda") or 0), 0, 1e6, 1)
+        if ok:
+            k[i]["kda"] = float(v) if v else None
+            self.on_marker_edited("마커 크기를 고쳤습니다")
+            self.view.rebuild_lines()
+
+    def refresh_marker_card(self):
+        d = self.doc
+        m = (d.figure or {}).get("marker_path") if d.marker is not None else None
+        self.marker_name.setText(os.path.basename(m) if m else "없음")
+        k = (d.figure or {}).get("kda", []) if d.figure else []
+        sel = self.view.sel or {}
+        cur = sel.get("i", -1) if sel.get("kind") == "tick" else -1
+        self.kda_chips.set_chips([("?" if t.get("kda") is None else f"{t['kda']:g}") for t in k], cur)
 
     # ---------------------------------------------------------------- images (documents)
     @property
@@ -1657,15 +2744,10 @@ class MainWindow(QtWidgets.QMainWindow):
         return f"I{k + 1}"
 
     def refresh_doc_tabs(self):
-        t = self.doc_tabs
-        t.blockSignals(True)
-        while t.count():
-            t.removeTab(0)
-        for k, d in enumerate(self.docs):
-            t.addTab(f"{self.doc_key(k)}: {d.name}" + (f"  [{d.project}]" if d.project and self._n_projects() > 1 else ""))
-            t.setTabToolTip(k, d.image_path or "")
-        t.setCurrentIndex(self.cur)
-        t.blockSignals(False)
+        """The image list of the sidebar (I1, I2 … with their project)."""
+        rows = [(f"{self.doc_key(k)} · {d.name}", d.project if d.project and self._n_projects() > 1 else "")
+                for k, d in enumerate(self.docs) if d.raw is not None]
+        self.img_list.set_rows(rows or [("(이미지 없음)", "")], self.cur)
 
     def switch_doc(self, k: int):
         if k < 0 or k >= len(self.docs):
@@ -1695,10 +2777,13 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.view.pix_item is not None:
                 self.view.set_image(QtGui.QImage(), reset_zoom=False)
         self.set_analysis(d.analysis)
-        if self.doc_tabs.currentIndex() != k:
-            self.doc_tabs.blockSignals(True)
-            self.doc_tabs.setCurrentIndex(k)
-            self.doc_tabs.blockSignals(False)
+        if self.img_list.currentRow() != k:
+            self.img_list.blockSignals(True)
+            self.img_list.setCurrentRow(k)
+            self.img_list.blockSignals(False)
+        self.fill_ladders()
+        self.refresh_marker_card()
+        self.img_info.setText(f"{d.raw.shape[1]} × {d.raw.shape[0]} · 측정은 원본(raw) 값" if d.raw is not None else "")
 
     def new_doc(self) -> ImageDoc:
         """Reuse the current tab if it is empty, otherwise add a new one."""
@@ -1727,12 +2812,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def showEvent(self, e):
         super().showEvent(e)
-        if not self._split_init:  # first show: image about 60 %, controls 40 % of the window
-            self._split_init = True
-            total = max(self.split.width(), 800)
-            right = min(max(int(total * 0.4), 420), total - 320)
-            self.split.setSizes([total - right, right])
-            QtCore.QTimer.singleShot(0, self.view.fit)
+        QtCore.QTimer.singleShot(0, self.view.fit)
 
     def edit_band_size(self, item):
         """Double-click on a box: select it and drag its edges to resize (its whole row follows)."""
@@ -1764,32 +2844,33 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------------------------------------------------------------- menus
     def _build_menu(self):
+        """파일 메뉴 (spec §11): every save is here too."""
         m = self.menuBar().addMenu("파일")
-        act = m.addAction("TIF 열기…", self.open_image)
-        act.setShortcut(QtGui.QKeySequence.Open)
+        m.addAction("새 프로젝트", self.new_project).setShortcut(QtGui.QKeySequence.New)
+        m.addAction("열기… (이미지 · 프로젝트, 여러 개 고르면 함께)", self.open_any).setShortcut(QtGui.QKeySequence.Open)
+        m.addAction("프로젝트 추가로 불러오기…", self.add_project_dialog)
         m.addSeparator()
-        m.addAction("프로젝트 열기… (.blotproj / .json, 여러 개 선택하면 함께 열기)", self.open_project_dialog).setShortcut("Ctrl+Shift+O")
-        m.addAction("프로젝트 추가로 불러오기… (지금 작업에 합치기)", self.add_project_dialog)
-        m.addAction("프로젝트 저장", lambda: self.save_project()).setShortcut(QtGui.QKeySequence.Save)
-        m.addAction("프로젝트 다른 이름으로 저장…", lambda: self.save_project(save_as=True)).setShortcut("Ctrl+Shift+S")
+        m.addAction("저장", lambda: self.save_project()).setShortcut(QtGui.QKeySequence.Save)
+        m.addAction("다른 이름으로 저장…", lambda: self.save_project(save_as=True)).setShortcut("Ctrl+Shift+S")
         m.addSeparator()
-        m.addAction("밴드 ROI·그룹 저장…", self.save_roi)
-        m.addAction("밴드 ROI·그룹 불러오기 (현재 이미지에 적용)…", self.load_roi)
+        m.addAction("ROI·그룹 저장…", self.save_roi)
+        m.addAction("ROI·그룹 불러오기…", self.load_roi)
         m.addSeparator()
-        m.addAction("내보내기… (여러 개를 한 번에)", self.open_export_dialog).setShortcut("Ctrl+E")
+        m.addAction("내보내기…", self.open_export_dialog).setShortcut("Ctrl+E")
         em = m.addMenu("바로 내보내기")
-        em.addAction("그래프 데이터 CSV (그래프에 쓰인 값만)…", self.export_graph_csv)
-        em.addAction("그래프 이미지…", lambda: self.export_plot())
+        em.addAction("정량 그래프의 데이터 (CSV)…", self.export_graph_csv)
+        em.addAction("정량 그래프 이미지…", lambda: self.export_plot())
         em.addAction("Figure 이미지…", self.export_figure)
-        em.addAction("Figure 숫자 CSV (Figure에 들어간 숫자만)…", self.export_figure_numbers)
-        em.addAction("전체 결과 CSV (모든 밴드·결과)…", self.export_csv)
-        em.addAction("박스 표시 이미지…", self.export_overlay)
+        em.addAction("Figure에 쓰인 데이터 (CSV)…", self.export_figure_numbers)
+        em.addAction("모든 밴드 값 (CSV)…", self.export_csv)
+        em.addAction("박스 표시한 블롯 이미지…", self.export_overlay)
         m.addSeparator()
-        act = m.addAction("설정… (그래프·Figure 기본 모양)", self.open_settings)
+        act = m.addAction("설정…", self.open_settings)
         act.setShortcut(QtGui.QKeySequence.Preferences)
         act.setMenuRole(QtGui.QAction.NoRole)  # stays in the File menu on macOS too
-        fm = self.menuBar().addMenu("Figure")
-        fm.addAction("Figure 만들기 탭으로 (논문용 그림)", self.open_figure_window).setShortcut("Ctrl+Shift+F")
+        fm = self.menuBar().addMenu("창")
+        fm.addAction("정량·그래프 창", self.open_quant_window).setShortcut("Ctrl+G")
+        fm.addAction("Figure 창", self.open_figure_window).setShortcut("Ctrl+Shift+F")
         v = self.menuBar().addMenu("보기")
         v.addAction("창에 맞추기", self.view.fit).setShortcut("Ctrl+0")
         v.addAction("확대", lambda: self.view.zoom(1.25)).setShortcut(QtGui.QKeySequence.ZoomIn)
@@ -1798,32 +2879,29 @@ class MainWindow(QtWidgets.QMainWindow):
         h.addAction("사용법", self.show_help)
 
     def _build_toolbar(self):
-        tb = QtWidgets.QToolBar("저장·내보내기")
-        tb.setObjectName("exportBar")
+        """Window toolbar (spec §1): zoom, the result windows."""
+        tb = QtWidgets.QToolBar("도구")
+        tb.setObjectName("mainBar")
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         tb.setIconSize(QtCore.QSize(16, 16))
-        st = self.style()
-        items = [("프로젝트 저장", QtWidgets.QStyle.SP_DialogSaveButton, lambda: self.save_project(), "프로젝트 저장 (⌘S)"),
-                 None,
-                 ("그래프 데이터 CSV", QtWidgets.QStyle.SP_FileDialogDetailedView, self.export_graph_csv,
-                  "지금 그래프에 그려진 항목의 값만 CSV로 (레인 값 + 그룹 평균·오차·n)"),
-                 ("그래프 저장", QtWidgets.QStyle.SP_DesktopIcon, lambda: self.export_plot(), "보이는 그래프를 이미지로"),
-                 None,
-                 ("Figure 저장", QtWidgets.QStyle.SP_FileIcon, self.export_figure, "6번 탭의 Figure를 이미지로"),
-                 ("Figure 숫자 CSV", QtWidgets.QStyle.SP_FileDialogContentsView, self.export_figure_numbers,
-                  "Figure의 숫자 줄에 들어간 값만 CSV로"),
-                 None,
-                 ("내보내기…", QtWidgets.QStyle.SP_DialogApplyButton, self.open_export_dialog, "여러 개를 한 번에 (⌘E)")]
-        for it in items:
-            if it is None:
-                tb.addSeparator()
-                continue
-            text, icon, fn, tip = it
-            act = tb.addAction(st.standardIcon(icon), text, fn)
-            act.setToolTip(tip)
+        sp = QtWidgets.QWidget()
+        sp.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        tb.addWidget(sp)
+        for text, tip, fn in (("−", "축소 ( ] )", lambda: self.view.zoom(0.8)),):
+            tb.addAction(text, fn).setToolTip(tip)
+        self.zoom_label = QtWidgets.QLabel("100%")
+        self.zoom_label.setFixedWidth(46)
+        self.zoom_label.setAlignment(Qt.AlignCenter)
+        tb.addWidget(self.zoom_label)
+        tb.addAction("+", lambda: self.view.zoom(1.25)).setToolTip("확대 ( [ )")
+        tb.addAction(controls.icon("fit"), "화면 맞춤", self.view.fit).setToolTip("화면 맞춤 (⌘0)")
+        tb.addSeparator()
+        tb.addAction("정량·그래프 창", self.open_quant_window).setToolTip("밴드 값 · 정량 그래프 · 여러 이미지 (새 창)")
+        tb.addAction("Figure 창", self.open_figure_window).setToolTip("논문용 Figure (새 창)")
         self.addToolBar(Qt.TopToolBarArea, tb)
-        self.export_bar = tb
+        self.setUnifiedTitleAndToolBarOnMac(True)
+        self.main_bar = tb
 
     # ---------------------------------------------------------------- tab 1
     def _build_detect_tab(self):
@@ -1950,59 +3028,6 @@ class MainWindow(QtWidgets.QMainWindow):
         return w
 
     # ---------------------------------------------------------------- tab 2
-    def _build_rows_tab(self):
-        w = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout(w)
-        info = QtWidgets.QLabel(
-            "검출하면 단백질 그룹(P1, P2 …)과 레인 그룹(L1, L2 …)이 위치에 따라 자동으로 제안됩니다.\n"
-            "정량 없이 바로 '6. Figure 만들기'로 가도 되고, 고치려면 밴드를 드래그로 선택한 뒤 우클릭 →\n"
-            "  · '새 단백질(행) 그룹 만들기' — 이름이 곧 단백질 이름입니다 (예: Vinculin, pErk).\n"
-            "  · '새 레인(열) 그룹 만들기' — 이름이 곧 레인 이름입니다 (예: DMSO, IgG 12h).\n"
-            "    같은 단백질의 밴드를 여러 열에서 고르면 그 열들이 한 레인 그룹(반복)이 됩니다.\n"
-            "밴드 ID는 '단백질_레인'으로 자동으로 붙고, 이름이 겹치면 _2, _3이 붙습니다.\n"
-            "한 단백질 그룹의 박스는 모두 같은 크기이고, 같은 레인 안의 밴드는 합해서 정량합니다."
-        )
-        info.setStyleSheet("color: #555;")
-        lay.addWidget(info)
-        self.rows_table = QtWidgets.QTableWidget(0, 4)
-        self.rows_table.setHorizontalHeaderLabels(["단백질 그룹", "역할", "박스 폭", "박스 높이"])
-        self.rows_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
-        self.rows_table.verticalHeader().setVisible(False)
-        self.rows_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.rows_table.itemSelectionChanged.connect(self.on_row_selected)
-        lay.addWidget(self.rows_table, 2)
-        hb = QtWidgets.QHBoxLayout()
-        b = QtWidgets.QPushButton("선택한 단백질 그룹 삭제")
-        b.clicked.connect(self.delete_row)
-        hb.addWidget(b)
-        b = QtWidgets.QPushButton("박스 높이를 밴드에 맞춤")
-        b.clicked.connect(self.autofit_rows)
-        hb.addWidget(b)
-        hb.addStretch(1)
-        lay.addLayout(hb)
-
-        self.auto_lanes = QtWidgets.QCheckBox("박스 위치·크기를 바꿀 때마다 위치(왼쪽→오른쪽) 순서로 레인 자동 갱신")
-        self.auto_lanes.setChecked(True)
-        self.auto_lanes.setToolTip("이름을 붙인 레인 그룹은 유지되고, 나머지 레인은 L1, L2 … 순서로 다시 붙습니다.\n"
-                                   "레인은 언제든 '새 레인(열) 그룹 만들기'로 바꿀 수 있습니다.")
-        self.auto_lanes.toggled.connect(lambda on: on and self.apply_auto_lanes())
-        lay.addWidget(self.auto_lanes)
-        self.lanes_table = QtWidgets.QTableWidget(0, 2)
-        self.lanes_table.setHorizontalHeaderLabels(["레인 (왼쪽부터)", "레인 그룹"])
-        self.lanes_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
-        self.lanes_table.verticalHeader().setVisible(False)
-        self.lanes_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.lanes_table.itemSelectionChanged.connect(self.on_lane_selected)
-        lay.addWidget(self.lanes_table, 2)
-        hb = QtWidgets.QHBoxLayout()
-        b = QtWidgets.QPushButton("선택한 레인 삭제")
-        b.clicked.connect(self.delete_lane)
-        hb.addWidget(b)
-        hb.addStretch(1)
-        lay.addLayout(hb)
-        lay.addWidget(self._build_groupings())
-        return w
-
     def _build_groupings(self):
         g = QtWidgets.QGroupBox("측정 묶음 (Control · Target 짝짓기, 레인은 그대로)")
         l = QtWidgets.QVBoxLayout(g)
@@ -2093,56 +3118,59 @@ class MainWindow(QtWidgets.QMainWindow):
         return g, t, hb, msg
 
     # ---------------------------------------------------------------- tab 4
+    # ---------------------------------------------------------------- 정량·그래프 (spec §6)
     def _build_results_tab(self):
-        """Graph sidebar (normalisation, graph items, formulas, PRISM look) | graph and table."""
+        """정량 page of the quantification window: sidebar (images, control pairing, graph items,
+        formulas) | graph with its editor (top 70 %) and the data table (bottom 30 %)."""
         side = QtWidgets.QWidget()
+        side.setObjectName("hig_sidebar")
+        side.setAttribute(Qt.WA_StyledBackground, True)
         lay = QtWidgets.QVBoxLayout(side)
-        self.results_title = QtWidgets.QLabel()
-        self.results_title.setStyleSheet("font-weight: bold; font-size: 14px;")
-        self.results_title.setWordWrap(True)
-        lay.addWidget(self.results_title)
-        lay.addWidget(raw_note())
-
-        g = QtWidgets.QGroupBox("Internal control 정규화")
-        f = QtWidgets.QFormLayout(g)
-        self.auto_norm = QtWidgets.QCheckBox("Target ÷ Control 자동 계산")
-        self.auto_norm.setToolTip("측정(Target) 단백질을 Control 단백질로 나눕니다 (아래 기준의 레인/그룹마다)")
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(4)
+        lay.addWidget(controls.section("이미지"))
+        self.quant_img_box = QtWidgets.QVBoxLayout()
+        lay.addLayout(self.quant_img_box)
+        lay.addWidget(controls.section("Control 짝짓기"))
+        f = QtWidgets.QFormLayout()
+        self.auto_norm = QtWidgets.QCheckBox()  # Target ÷ Control (always on in 1.0; formulas cover the rest)
         self.auto_norm.setChecked(True)
-        self.auto_norm.toggled.connect(self.recompute_results)
-        f.addRow(self.auto_norm)
         self.basis_combo = QtWidgets.QComboBox()
-        self.basis_combo.setToolTip("어떤 Control 박스로 어떤 Target 박스를 나눌지: 같은 레인끼리(기본), 또는 2번 탭에서 만든\n"
-                                    "측정 묶음 세트의 그룹끼리. 결과·그래프·CSV·Figure 숫자가 이 기준을 따릅니다.")
+        self.basis_combo.setToolTip("어떤 Control 박스로 어떤 Target 박스를 나눌지: 같은 레인끼리(기본) 또는 측정 묶음 세트의 그룹끼리")
         self.basis_combo.currentIndexChanged.connect(self.on_basis)
-        f.addRow("짝짓기 기준", self.basis_combo)
-        self.basis_msg = QtWidgets.QLabel()
-        self.basis_msg.setWordWrap(True)
-        f.addRow(self.basis_msg)
+        f.addRow("기준", self.basis_combo)
+        self.ctrl_combo = QtWidgets.QComboBox()
+        self.ctrl_combo.currentIndexChanged.connect(self.on_ctrl)
+        f.addRow("Control", self.ctrl_combo)
         self.ref_lane = QtWidgets.QComboBox()
         self.ref_lane.currentIndexChanged.connect(self.on_ref_lane)
-        self.ref_label = QtWidgets.QLabel("기준 레인 (=1.0)")
+        self.ref_label = QtWidgets.QLabel("1.0 기준")
         f.addRow(self.ref_label, self.ref_lane)
-        lay.addWidget(g)
-
-        g = QtWidgets.QGroupBox("그래프 항목")
-        self.series_box = QtWidgets.QVBoxLayout(g)
+        lay.addLayout(f)
+        self.basis_msg = QtWidgets.QLabel()
+        self.basis_msg.setWordWrap(True)
+        lay.addWidget(self.basis_msg)
+        self.sets_btn = QtWidgets.QPushButton("측정 묶음 세트 · 편집…")
+        self.sets_btn.setFlat(True)
+        self.sets_btn.setStyleSheet("text-align: left; color: #0066cc; background: transparent;")
+        self.sets_btn.clicked.connect(self.edit_groupings)
+        lay.addWidget(self.sets_btn)
+        lay.addWidget(controls.section("그래프 항목"))
+        self.series_box = QtWidgets.QVBoxLayout()
         self.series_box.setSpacing(2)
         self.series_on: Dict[str, bool] = {}
-        lay.addWidget(g)
-
-        g = QtWidgets.QGroupBox("수식")
-        fl = QtWidgets.QVBoxLayout(g)
-        self.add_formula_btn = QtWidgets.QPushButton("+ 수식 추가")
-        self.add_formula_btn.setStyleSheet("font-weight: bold; padding: 7px; color: #1565c0; background: #eef5ff;"
-                                           "border: 1px dashed #90caf9; border-radius: 4px;")
+        lay.addLayout(self.series_box)
+        self.add_formula_btn = QtWidgets.QPushButton("＋ 수식 추가")
+        self.add_formula_btn.setFlat(True)
+        self.add_formula_btn.setStyleSheet("text-align: left; color: #0066cc; background: transparent; font-weight: 600;")
         self.add_formula_btn.clicked.connect(lambda: self.open_formula_card())
-        fl.addWidget(self.add_formula_btn)
+        lay.addWidget(self.add_formula_btn)
         self.formula_card = QtWidgets.QFrame()
         self.formula_card.setObjectName("formulaCard")
-        self.formula_card.setStyleSheet("#formulaCard { background: #eef5ff; border: 1px solid #90caf9; border-radius: 6px; }")
+        self.formula_card.setStyleSheet("#formulaCard { background: rgba(0,102,204,0.06); border: 1px solid rgba(0,102,204,0.35); border-radius: 11px; }")
         cl = QtWidgets.QVBoxLayout(self.formula_card)
         self.formula_card_title = QtWidgets.QLabel()
-        self.formula_card_title.setStyleSheet("font-weight: bold;")
+        self.formula_card_title.setStyleSheet("font-weight: 600;")
         cl.addWidget(self.formula_card_title)
         self.formula_editor_box = QtWidgets.QVBoxLayout()
         cl.addLayout(self.formula_editor_box)
@@ -2151,98 +3179,896 @@ class MainWindow(QtWidgets.QMainWindow):
         b = QtWidgets.QPushButton("취소")
         b.clicked.connect(self.close_formula_card)
         hb.addWidget(b)
-        self.formula_ok = QtWidgets.QPushButton("그래프에 추가")
-        self.formula_ok.setStyleSheet("font-weight: bold;")
+        self.formula_ok = controls.prominent(QtWidgets.QPushButton("그래프에 추가"))
         self.formula_ok.clicked.connect(self.accept_formula_card)
         hb.addWidget(self.formula_ok)
         cl.addLayout(hb)
         self.formula_card.setVisible(False)
-        fl.addWidget(self.formula_card)
+        lay.addWidget(self.formula_card)
         self.formula_editor: Optional[FormulaEditor] = None
-        self.formula_row: Optional[int] = None
-        self.formula_msg = QtWidgets.QLabel(FORMULA_HINT)
-        self.formula_msg.setWordWrap(True)
-        self.formula_msg.setStyleSheet("color: #888; font-size: 11px;")
-        fl.addWidget(self.formula_msg)
-        lay.addWidget(g)
+        self.formula_row: Optional[tuple] = None
+        self.formula_msg = controls.hint(FORMULA_HINT)
+        lay.addWidget(self.formula_msg)
+        lay.addStretch(1)
+        lay.addWidget(controls.hint("저장: 창 위 '내보내기' 또는 파일 › 내보내기… (⌘E)"))
+        side_scroll = self._scroll(side)
+        side_scroll.setMinimumWidth(360)
+        side_scroll.setMaximumWidth(400)
 
-        g = QtWidgets.QGroupBox("그래프 모양 (PRISM 스타일)")
-        f = QtWidgets.QFormLayout(g)
+        # graph + editor
         gp = self.prefs["graph"]
         self.graph_opts = {k: gp[k] for k in ("kind", "err", "colors", "y0")}
-        self.kind_combo, self.err_combo, self.color_combo = (QtWidgets.QComboBox() for _ in range(3))
-        for cb, items, key, label in ((self.kind_combo, prefs.GRAPH_KINDS, "kind", "형태"), (self.err_combo, prefs.ERRORS, "err", "오차 막대"),
-                                      (self.color_combo, prefs.COLOR_SCHEMES, "colors", "색")):
-            for k, text in items:
-                cb.addItem(text, k)
-            cb.setCurrentIndex(max(0, cb.findData(self.graph_opts[key])))
-            cb.currentIndexChanged.connect(lambda _=None, cb=cb, key=key: self.set_graph_opt(key, cb.currentData()))
-            f.addRow(label, cb)
-        self.y0_check = QtWidgets.QCheckBox("Y축 0부터")
-        self.y0_check.setChecked(bool(self.graph_opts["y0"]))
-        self.y0_check.toggled.connect(lambda on: self.set_graph_opt("y0", on))
-        f.addRow(self.y0_check)
-        self.by_condition = QtWidgets.QCheckBox("같은 레인 그룹은 평균 ± 오차 (반복 레인)")
-        self.by_condition.setToolTip("이름이 같은 레인(반복)을 묶어 평균과 오차 막대로 그리고, 점으로 각 레인을 보여 줍니다")
-        self.by_condition.setChecked(True)
-        self.by_condition.toggled.connect(self.replot)
-        f.addRow(self.by_condition)
-        self.show_points = QtWidgets.QCheckBox("개별 값 점 표시")
-        self.show_points.setChecked(True)
-        self.show_points.toggled.connect(self.replot)
-        f.addRow(self.show_points)
-        lay.addWidget(g)
-        lay.addStretch(1)
-        side_scroll = self._scroll(side)
-        side_scroll.setMinimumWidth(390)
-
+        self.graph_opts.update({"points": True, "split_images": False, "by_condition": True, "bar_width": 0.8,
+                                "size_mm": [90, 60], "x_rot": "auto", "series": {}, "labels": {}, "texts": [],
+                                "legend": True, "legend_pos": None, "y_title": "", "title": "", "y_min": None, "y_max": None})
         self.plot = PlotCanvas()
+        self.plot.toolbar.setVisible(False)
         self.plot.style_fn = self.graph_style
+        self.graph_title = QtWidgets.QLabel("정량 그래프")
+        self.graph_title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        self.graph_sub = controls.hint("")
+        gw = QtWidgets.QWidget()
+        gl = QtWidgets.QVBoxLayout(gw)
+        gl.setContentsMargins(16, 12, 12, 8)
+        hb = QtWidgets.QHBoxLayout()
+        hb.addWidget(self.graph_title)
+        hb.addWidget(self.graph_sub, 1)
+        gl.addLayout(hb)
+        self.plot_scroll = QtWidgets.QScrollArea()
+        self.plot_scroll.setWidgetResizable(True)
+        self.plot_scroll.setWidget(self.plot)
+        self.plot_scroll.setStyleSheet("QScrollArea { background: white; border-radius: 4px; }")
+        gl.addWidget(self.plot_scroll, 1)
+        self.graph_editor = self._build_graph_editor()
+        top = QtWidgets.QWidget()
+        tl = QtWidgets.QHBoxLayout(top)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.addWidget(gw, 1)
+        tl.addWidget(self.graph_editor)
+
+        # data table
+        bottom = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(bottom)
+        bl.setContentsMargins(16, 6, 16, 8)
+        hb = QtWidgets.QHBoxLayout()
+        t = QtWidgets.QLabel("데이터")
+        t.setStyleSheet("font-weight: 700;")
+        hb.addWidget(t)
+        self.table_seg = controls.Segmented([("drawn", "그린 값"), ("bands", "밴드별"), ("summary", "요약")], small=True)
+        self.table_seg.changed.connect(lambda _: self.fill_results_table())
+        hb.addWidget(self.table_seg)
+        hb.addStretch(1)
+        hb.addWidget(controls.hint("행을 고르면 메인 창에서 그 박스가 선택됩니다"))
+        bl.addLayout(hb)
         self.results_table = QtWidgets.QTableWidget(0, 0)
         self.results_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.results_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.results_table.verticalHeader().setVisible(False)
+        self.results_table.itemSelectionChanged.connect(self.on_table_pick)
+        bl.addWidget(self.results_table, 1)
         right = QtWidgets.QSplitter(Qt.Vertical)
-        right.addWidget(self.plot)
-        right.addWidget(self.results_table)
-        right.setStretchFactor(0, 3)
-        right.setStretchFactor(1, 1)
+        right.addWidget(top)
+        right.addWidget(bottom)
+        right.setStretchFactor(0, 7)
+        right.setStretchFactor(1, 3)
+        canvas = QtWidgets.QWidget()
+        canvas.setObjectName("hig_content")
+        canvas.setAttribute(Qt.WA_StyledBackground, True)
+        QtWidgets.QVBoxLayout(canvas).addWidget(right)
+        canvas.layout().setContentsMargins(0, 0, 0, 0)
         root = QtWidgets.QSplitter(Qt.Horizontal)
+        root.setHandleWidth(0)
         root.addWidget(side_scroll)
-        root.addWidget(right)
+        root.addWidget(canvas)
         root.setStretchFactor(1, 1)
-        root.setSizes([400, 900])
+        self.results_title = QtWidgets.QLabel()  # (kept for older code paths)
+        self.by_condition = QtWidgets.QCheckBox()
+        self.by_condition.setChecked(True)
+        self.show_points = QtWidgets.QCheckBox()
+        self.show_points.setChecked(True)
         return root
 
+    def _build_graph_editor(self):
+        """Graph editor (380 px): chip tabs 그래프 / 데이터 시리즈 / 축 / 글꼴 / 범례·글자."""
+        from .ui.hig_widgets import ChipTabs
+
+        tabs = ChipTabs()
+        o = self.graph_opts
+        gp = self.prefs["graph"]
+
+        def page():
+            w = QtWidgets.QWidget()
+            lay = QtWidgets.QVBoxLayout(w)
+            return w, lay
+
+        def combo(items, key):
+            cb = QtWidgets.QComboBox()
+            for k, t in items:
+                cb.addItem(t, k)
+            cb.setCurrentIndex(max(0, cb.findData(o.get(key))))
+            cb.currentIndexChanged.connect(lambda _=None: self.set_graph_opt(key, cb.currentData()))
+            self._graph_widgets[key] = cb
+            return cb
+
+        def sw(key):
+            c = controls.switch("", bool(o.get(key)))
+            c.toggled.connect(lambda on: self.set_graph_opt(key, on))
+            self._graph_widgets[key] = c
+            return c
+
+        self._graph_widgets = {}
+        w, lay = page()
+        g, f = controls.card()
+        st = QtWidgets.QComboBox()
+        st.addItem("PRISM 기본")
+        f.addRow("스타일", st)
+        f.addRow("종류", combo(prefs.GRAPH_KINDS, "kind"))
+        f.addRow("X 묶음", combo([(True, "레인 이름 (반복은 평균)"), (False, "각 레인")], "by_condition"))
+        f.addRow("색", combo(prefs.COLOR_SCHEMES, "colors"))
+        f.addRow("오차 막대", combo(prefs.ERRORS, "err"))
+        lay.addWidget(g)
+        g, f = controls.card()
+        f.addRow("각 레인 값 점", sw("points"))
+        f.addRow("이미지마다 따로 그리기", sw("split_images"))
+        f.addRow("Y축 0부터", sw("y0"))
+        lay.addWidget(g)
+        g, f = controls.card()
+        hb = QtWidgets.QHBoxLayout()
+        self.size_w = _spin(20, 400, o["size_mm"][0], 5, suffix=" mm")
+        self.size_h = _spin(20, 400, o["size_mm"][1], 5, suffix=" mm")
+        for sp in (self.size_w, self.size_h):
+            sp.valueChanged.connect(lambda _=None: self.set_graph_opt("size_mm", [self.size_w.value(), self.size_h.value()]))
+        hb.addWidget(self.size_w)
+        hb.addWidget(QtWidgets.QLabel("×"))
+        hb.addWidget(self.size_h)
+        f.addRow("그림 크기", hb)
+        bw = QtWidgets.QDoubleSpinBox()
+        bw.setRange(0.2, 1.0)
+        bw.setSingleStep(0.05)
+        bw.setValue(float(o["bar_width"]))
+        bw.valueChanged.connect(lambda v: self.set_graph_opt("bar_width", float(v)))
+        f.addRow("막대 폭", controls.slider_row(bw))
+        lay.addWidget(g)
+        lay.addWidget(controls.hint("그래프의 범례·제목·글자 상자는 끌어서 옮기고, 더블클릭으로 편집합니다."))
+        lay.addStretch(1)
+        tabs.addTab(self._scroll(w), "그래프")
+
+        w, lay = page()
+        self.series_style_box = QtWidgets.QVBoxLayout()
+        g = QtWidgets.QGroupBox("데이터 시리즈")
+        g.setLayout(self.series_style_box)
+        lay.addWidget(g)
+        lay.addWidget(controls.hint("색 우물을 눌러 막대 색을, 모양으로 점 모양을, 이름으로 범례 글자를 바꿉니다."))
+        lay.addStretch(1)
+        tabs.addTab(self._scroll(w), "데이터 시리즈")
+
+        w, lay = page()
+        g, f = controls.card()
+        yt = QtWidgets.QLineEdit(o.get("y_title") or "")
+        yt.setPlaceholderText("자동 (Relative intensity)")
+        yt.editingFinished.connect(lambda: self.set_graph_opt("y_title", yt.text().strip()))
+        self._graph_widgets["y_title"] = yt
+        f.addRow("Y축 이름", yt)
+        for key, label in (("y_min", "Y 최소"), ("y_max", "Y 최대")):
+            hb = QtWidgets.QHBoxLayout()
+            sp = QtWidgets.QDoubleSpinBox()
+            sp.setRange(-1e9, 1e9)
+            sp.setDecimals(3)
+            sp.setValue(float(o.get(key) or 0))
+            au = controls.switch("", o.get(key) is None)
+            sp.setEnabled(not au.isChecked())
+            sp.valueChanged.connect(lambda v, key=key, au=au: (not au.isChecked()) and self.set_graph_opt(key, float(v)))
+            au.toggled.connect(lambda on, key=key, sp=sp: (sp.setEnabled(not on), self.set_graph_opt(key, None if on else sp.value())))
+            hb.addWidget(sp)
+            lab = QtWidgets.QLabel("자동")
+            theme.hint(lab)
+            hb.addWidget(lab)
+            hb.addWidget(au)
+            f.addRow(label, hb)
+        f.addRow("X 글자 기울기", combo([("auto", "자동"), (0, "0°"), (45, "45°"), (90, "90°")], "x_rot"))
+        ts = controls.Segmented([("out", "바깥"), ("in", "안쪽")], small=True)
+        ts.set_value(o.get("tick_dir") or gp.get("tick_dir", "out"))
+        ts.changed.connect(lambda v: self.set_graph_opt("tick_dir", v))
+        f.addRow("눈금 방향", ts)
+        tl = QtWidgets.QDoubleSpinBox()
+        tl.setRange(0, 20)
+        tl.setValue(float(o.get("tick_len") or gp.get("tick_len", 6)))
+        tl.setSuffix(" pt")
+        tl.valueChanged.connect(lambda v: self.set_graph_opt("tick_len", float(v)))
+        f.addRow("눈금 길이", tl)
+        lay.addWidget(g)
+        lay.addStretch(1)
+        tabs.addTab(self._scroll(w), "축")
+
+        w, lay = page()
+        g, f = controls.card()
+        fc = QtWidgets.QComboBox()
+        fc.setEditable(True)
+        fc.addItems(["Arial", "Helvetica", "Helvetica Neue", "Times New Roman"])
+        fc.setCurrentText(o.get("font") or gp.get("font", "Arial"))
+        fc.currentTextChanged.connect(lambda t: self.set_graph_opt("font", t))
+        f.addRow("글꼴", fc)
+        for key, label in (("label_size", "축 이름"), ("tick_size", "눈금 숫자"), ("legend_size", "범례"), ("title_size", "제목")):
+            sp = QtWidgets.QDoubleSpinBox()
+            sp.setRange(4, 40)
+            sp.setSingleStep(0.5)
+            sp.setSuffix(" pt")
+            sp.setValue(float(o.get(key) or gp.get(key, 12)))
+            sp.valueChanged.connect(lambda v, key=key: self.set_graph_opt(key, float(v)))
+            f.addRow(label, sp)
+        f.addRow("굵게", sw("bold") if "bold" in o else self._bold_switch())
+        lay.addWidget(g)
+        lay.addStretch(1)
+        tabs.addTab(self._scroll(w), "글꼴")
+
+        w, lay = page()
+        g, f = controls.card()
+        f.addRow("범례 보이기", sw("legend"))
+        b = QtWidgets.QPushButton("범례 위치 처음대로")
+        b.clicked.connect(lambda: self.set_graph_opt("legend_pos", None))
+        f.addRow(b)
+        tt = QtWidgets.QLineEdit(o.get("title") or "")
+        tt.setPlaceholderText("제목 없음")
+        tt.editingFinished.connect(lambda: self.set_graph_opt("title", tt.text().strip()))
+        self._graph_widgets["title"] = tt
+        f.addRow("제목", tt)
+        lay.addWidget(g)
+        g = QtWidgets.QGroupBox("글자 상자")
+        self.textbox_box = QtWidgets.QVBoxLayout(g)
+        lay.addWidget(g)
+        b = QtWidgets.QPushButton("＋ 글자 상자")
+        b.clicked.connect(self.add_text_box)
+        lay.addWidget(b)
+        lay.addStretch(1)
+        tabs.addTab(self._scroll(w), "범례·글자")
+
+        pane = QtWidgets.QWidget()
+        pane.setObjectName("hig_inspector")
+        pane.setAttribute(Qt.WA_StyledBackground, True)
+        pl = QtWidgets.QVBoxLayout(pane)
+        pl.setContentsMargins(14, 12, 10, 12)
+        pl.addWidget(tabs.chips)
+        pl.addWidget(tabs, 1)
+        pane.setFixedWidth(380)
+        self.graph_tabs = tabs
+        for i in range(tabs.count()):
+            theme.unify(tabs.widget(i).widget())
+        return pane
+
+    def _bold_switch(self):
+        c = controls.switch("", bool(self.prefs["graph"].get("bold", True)))
+        c.toggled.connect(lambda on: self.set_graph_opt("bold", on))
+        return c
+
     def graph_style(self) -> dict:
-        return graph.style(self.prefs["graph"], **self.graph_opts)
+        return graph.style(self.prefs["graph"], **{k: v for k, v in self.graph_opts.items() if v is not None
+                                                   or k in ("y_min", "y_max", "legend_pos")})
 
     def set_graph_opt(self, key, value):
         self.graph_opts[key] = value
+        if key in ("by_condition", "split_images"):
+            self.fill_results_table()
         self.replot()
         if hasattr(self, "multi_plot"):
             self.replot_multi()
 
+    def set_graph_opts(self, opts: dict):
+        for k, v in (opts or {}).items():
+            self.graph_opts[k] = v
+        for key, w in getattr(self, "_graph_widgets", {}).items():
+            if key not in self.graph_opts:
+                continue
+            v = self.graph_opts[key]
+            w.blockSignals(True)
+            if isinstance(w, QtWidgets.QComboBox):
+                w.setCurrentIndex(max(0, w.findData(v)))
+            elif isinstance(w, QtWidgets.QCheckBox):
+                w.setChecked(bool(v))
+            elif isinstance(w, QtWidgets.QLineEdit):
+                w.setText(v or "")
+            w.blockSignals(False)
+        self.replot()
+        if hasattr(self, "multi_plot"):
+            self.replot_multi()
+
+    def fill_series_styles(self, names):
+        box = self.series_style_box
+        while box.count():
+            it = box.takeAt(0)
+            if it.layout():
+                while it.layout().count():
+                    w = it.layout().takeAt(0).widget()
+                    if w:
+                        w.deleteLater()
+            elif it.widget():
+                it.widget().deleteLater()
+        pal = graph.PALETTES.get(self.graph_opts.get("colors"), graph.PALETTES["bw"])
+        for si, name in enumerate(names):
+            own = self.graph_opts["series"].get(name, {})
+            hb = QtWidgets.QHBoxLayout()
+            col = own.get("color") or pal[si % len(pal)]
+            b = QtWidgets.QPushButton()
+            b.setFixedSize(22, 22)
+            b.setStyleSheet(f"background: {col}; border: 1px solid #888; border-radius: 4px;")
+            b.setToolTip("색 바꾸기")
+            b.clicked.connect(lambda _=None, n=name: self.pick_series_color(n))
+            hb.addWidget(b)
+            e = QtWidgets.QLineEdit(self.graph_opts["labels"].get(name, name))
+            e.editingFinished.connect(lambda n=name, e=e: self._set_series_label(n, e.text()))
+            hb.addWidget(e, 1)
+            mk = QtWidgets.QComboBox()
+            for m, t in (("o", "●"), ("s", "■"), ("^", "▲"), ("D", "◆"), ("v", "▼")):
+                mk.addItem(t, m)
+            mk.setCurrentIndex(max(0, mk.findData(own.get("marker") or graph.MARKERS[si % len(graph.MARKERS)])))
+            mk.currentIndexChanged.connect(lambda _=None, n=name, mk=mk: self._set_series_style(n, "marker", mk.currentData()))
+            hb.addWidget(mk)
+            box.addLayout(hb)
+
+    def pick_series_color(self, name):
+        c = QtWidgets.QColorDialog.getColor(QtGui.QColor(self.graph_opts["series"].get(name, {}).get("color") or "#ffffff"), self)
+        if c.isValid():
+            self._set_series_style(name, "color", c.name())
+
+    def _set_series_style(self, name, key, value):
+        self.graph_opts["series"].setdefault(name, {})[key] = value
+        self.replot()
+
+    def _set_series_label(self, name, text):
+        self.graph_opts["labels"][name] = text.strip() or name
+        self.replot()
+
+    def add_text_box(self):
+        self.graph_opts["texts"].append({"text": "글자", "x": 0.1, "y": 0.92})
+        self.fill_text_boxes()
+        self.replot()
+
+    def fill_text_boxes(self):
+        box = self.textbox_box
+        while box.count():
+            it = box.takeAt(0)
+            if it.layout():
+                while it.layout().count():
+                    w = it.layout().takeAt(0).widget()
+                    if w:
+                        w.deleteLater()
+        for i, tb in enumerate(self.graph_opts["texts"]):
+            hb = QtWidgets.QHBoxLayout()
+            e = QtWidgets.QLineEdit(tb.get("text", ""))
+            e.editingFinished.connect(lambda i=i, e=e: (self.graph_opts["texts"][i].__setitem__("text", e.text()), self.replot()))
+            hb.addWidget(e, 1)
+            b = QtWidgets.QToolButton()
+            b.setText("✕")
+            b.clicked.connect(lambda _=None, i=i: (self.graph_opts["texts"].pop(i), self.fill_text_boxes(), self.replot()))
+            hb.addWidget(b)
+            box.addLayout(hb)
+
+    # ---- which images, which control, which reference
+    def quant_docs(self) -> List["ImageDoc"]:
+        return [d for d in self.loaded_docs() if d.measurements and getattr(d, "in_quant", True)]
+
+    def fill_quant_images(self):
+        box = self.quant_img_box
+        while box.count():
+            it = box.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        for k, d in enumerate(self.docs):
+            if d.raw is None:
+                continue
+            cb = QtWidgets.QCheckBox(f"{self.doc_key(k)} · {d.name}")
+            cb.setChecked(getattr(d, "in_quant", True))
+            cb.setToolTip(d.project or "")
+            cb.toggled.connect(lambda on, d=d: (setattr(d, "in_quant", on), self.recompute_results()))
+            box.addWidget(cb)
+
+    def basis_of(self, d):
+        """(analysis, measurements) as results see them: per lane, or per group of the chosen set."""
+        if d.basis and core.grouping(d.analysis, d.basis) is None:
+            d.basis = LANES_BASIS
+        return core.basis_view(d.analysis, d.measurements, d.basis or None)
+
+    def ref_of(self, d):
+        a, _ = self.basis_of(d)
+        if self.ref_name and self.ref_name in a.lane_labels:
+            return a.lane_labels.index(self.ref_name)
+        return None
+
+    def _scale(self, v, labels):
+        """1.0 기준: divide by the mean of the lanes (groups) with the reference name."""
+        v = np.asarray(v, float)
+        if not self.ref_name or v.ndim != 1:
+            return v
+        idx = [i for i, lab in enumerate(labels) if lab == self.ref_name and i < v.size]
+        ref = np.nanmean(v[idx]) if idx else np.nan
+        return v / ref if np.isfinite(ref) and ref != 0 else v
+
+    def fill_basis_combo(self):
+        cb = self.basis_combo
+        cur = self.doc.basis
+        cb.blockSignals(True)
+        cb.clear()
+        cb.addItem("레인 (기본)", LANES_BASIS)
+        names = []
+        for d in self.loaded_docs() or [self.doc]:
+            for g in d.analysis.groupings:
+                if g["name"] not in names:
+                    names.append(g["name"])
+        for n in names:
+            cb.addItem(f"묶음 세트 '{n}'", n)
+        cb.setCurrentIndex(max(0, cb.findData(cur)))
+        cb.blockSignals(False)
+        n_sets = len(names)
+        self.sets_btn.setText(f"측정 묶음 세트 {n_sets}개 · 편집…")
+        self.fill_ctrl_combo()
+        self.fill_ref_combo()
+
+    def on_basis(self, *_):
+        b = self.basis_combo.currentData()
+        for d in self.loaded_docs() or [self.doc]:
+            d.basis = b if b and core.grouping(d.analysis, b) is not None else LANES_BASIS
+        if b:
+            self.fill_groupings(select=b)
+            self.view.refresh_items()
+            self.view.rebuild_extras()
+        self.fill_ref_combo()
+        self.recompute_results()
+        self.recompute_multi()
+        self._figure_changed(self.doc)
+
+    def fill_ctrl_combo(self):
+        cb = self.ctrl_combo
+        names = []
+        for d in self.loaded_docs() or [self.doc]:
+            for r in d.analysis.rows:
+                if r.name not in names and r.role != core.ROLE_IGNORE:
+                    names.append(r.name)
+        default = next((r.name for r in self.analysis.rows if r.role == core.ROLE_CONTROL), None)
+        cb.blockSignals(True)
+        cb.clear()
+        cb.addItem("없음 (Net 값)", "")
+        for n in names:
+            cb.addItem(n, n)
+        want = self.ctrl_name if self.ctrl_name is not None else default
+        cb.setCurrentIndex(max(0, cb.findData(want or "")))
+        cb.blockSignals(False)
+
+    def on_ctrl(self, *_):
+        self.ctrl_name = self.ctrl_combo.currentData()
+        self.recompute_results()
+        self.recompute_multi()
+
+    def fill_ref_combo(self):
+        names = []
+        for d in self.quant_docs() or [self.doc]:
+            a, _ = self.basis_of(d)
+            for lab in a.lane_labels:
+                if lab not in names:
+                    names.append(lab)
+        cb = self.ref_lane
+        cb.blockSignals(True)
+        cb.clear()
+        cb.addItem("나누지 않음", None)
+        for n in names:
+            cb.addItem(n, n)
+        if names and self.quant_docs() and (self._ref_default and self.ref_name is None
+                                             or getattr(self, "_ref_auto", False) and self.ref_name not in names):
+            self.ref_name = names[0]  # 1.0 기준: the first lane group (e.g. DMSO) until the user picks another
+            self._ref_default = False
+            self._ref_auto = True
+        cb.setCurrentIndex(max(0, cb.findData(self.ref_name)))
+        cb.blockSignals(False)
+        self.ref_name = cb.currentData()
+        d = self.doc
+        st = core.group_status(d.analysis, d.basis) if d.basis else []
+        bad = [f"{x['group']}: {', '.join(x['problems'])}" for x in st if x["problems"]]
+        self.basis_msg.setText(("⚠ " + " · ".join(bad)) if bad else
+                               ("그룹마다 Target ÷ 같은 그룹의 Control" if d.basis else "레인마다 Target ÷ 같은 레인의 Control"))
+        self.basis_msg.setStyleSheet("color: #d70015; font-size: 11px;" if bad else "color: rgba(60,60,67,0.6); font-size: 11px;")
+
+    def on_ref_lane(self, *_):
+        self.ref_name = self.ref_lane.currentData()
+        self._ref_auto = False
+        self.recompute_results()
+        self.recompute_multi()
+
+    # ---- results of one image
+    def _control_row(self, a) -> Optional[int]:
+        if self.ctrl_name == "":
+            return None
+        if self.ctrl_name:
+            i = next((i for i, r in enumerate(a.rows) if r.name == self.ctrl_name), None)
+            if i is not None:
+                return i
+        return next((i for i, r in enumerate(a.rows) if r.role == core.ROLE_CONTROL), None)
+
+    def image_variables(self, k: int, a, meas) -> dict:
+        """Formula names for image k: its proteins / bands, and Ij.<protein> of the other images
+        matched by lane name."""
+        v = core.formula_variables(a, meas)
+        for j, dj in enumerate(self.docs):
+            if dj.raw is None or not dj.measurements:
+                continue
+            aj, mj = self.basis_of(dj)
+            for ri, r in enumerate(aj.rows):
+                vec = core.row_vector(aj, mj, ri)
+                v[f"I{j + 1}.{core._safe_name(r.name)}"] = (vec if j == k else
+                                                            core.to_common(vec, aj.lane_labels, a.lane_labels))
+        return v
+
+    def all_formulas(self, d) -> List[tuple]:
+        """(scope, index, formula): formulas of every image (graph sidebar) and of this image."""
+        return [("all", i, f) for i, f in enumerate(self.formulas_all)] + \
+               [("image", i, f) for i, f in enumerate(d.analysis.formulas)]
+
+    def image_results(self, d: ImageDoc):
+        """Results of one image: Target / Control and the formulas, per lane or per group of the
+        chosen grouping set, divided by the 1.0 reference. Returns (results, messages)."""
+        res: Dict[str, np.ndarray] = {}
+        msgs = []
+        if not d.measurements:
+            return res, msgs
+        a, meas = self.basis_of(d)
+        labels = a.lane_labels
+        c = self._control_row(a)
+        if c is not None:
+            for i, r in enumerate(a.rows):
+                if i == c or r.role == core.ROLE_IGNORE or (a.ladder_row and r.name == a.ladder_row):
+                    continue
+                v = core.normalize_to_control(a, meas, i, c, None)
+                if not np.isfinite(v).any():
+                    continue
+                res[f"{r.name} ÷ {a.rows[c].name}"] = self._scale(v, labels)
+        else:
+            for i, r in enumerate(a.rows):
+                if r.role != core.ROLE_IGNORE and not (a.ladder_row and r.name == a.ladder_row):
+                    res[f"{r.name} (Net)"] = core.row_vector(a, meas, i)
+        k = self.docs.index(d) if d in self.docs else 0
+        variables = self.image_variables(k, a, meas)
+        for _, _, f in self.all_formulas(d):
+            name = f.get("name") or f.get("expr")
+            expr = str(f.get("expr", "")).strip()
+            if not expr:
+                continue
+            try:
+                val = core.evaluate(expr, variables)
+                if f.get("normalize", "1") == "1" and np.ndim(val) == 1:
+                    val = self._scale(val, labels)
+                res[name] = np.atleast_1d(np.asarray(val, float))
+            except Exception as e:
+                msgs.append(f"{self.doc_key(k)} {name}: {e}")
+        return res, msgs
+
+    def quant_pooled(self):
+        """[(image key, results, lane names)] of the checked images, and messages."""
+        out, msgs = [], []
+        for d in self.quant_docs():
+            res, m = self.image_results(d)
+            a, _ = self.basis_of(d)
+            out.append((self.doc_key(self.docs.index(d)), res, list(a.lane_labels)))
+            msgs += m
+        return out, msgs
+
+    def recompute_results(self, *_):
+        if hasattr(self, "ref_lane") and self.quant_docs() and (self._ref_default and self.ref_name is None
+                                                                 or getattr(self, "_ref_auto", False)):
+            self.fill_ref_combo()
+        self.results, _ = self.image_results(self.doc)
+        if not hasattr(self, "series_box"):
+            return
+        self.fill_quant_images()
+        self._pooled, msgs = self.quant_pooled()
+        self.formula_msg.setText("\n".join(msgs) if msgs else FORMULA_HINT)
+        self.formula_msg.setStyleSheet("color: #d70015; font-size: 11px;" if msgs else "")
+        self.fill_series_rows()
+        self.fill_results_table()
+        self.replot()
+        if hasattr(self, "fig_win") and not self.fig_win.isVisible():
+            self.figure_editor.dirty = True  # numbers in the figure may have changed
+
+    def series_names(self) -> List[str]:
+        names = []
+        for _, res, _ in getattr(self, "_pooled", []):
+            for n, v in res.items():
+                if n not in names and np.size(v) > 1:
+                    names.append(n)
+        return names
+
+    def shown_series(self) -> List[str]:
+        return [n for n in self.series_names() if self.series_on.get(n, True)]
+
+    def graph_xy(self):
+        """x labels and [(series, [values per x])] of the graph."""
+        shown = set(self.shown_series())
+        per = [(key, {n: v for n, v in res.items() if n in shown}, labels) for key, res, labels in getattr(self, "_pooled", [])]
+        return graph.pool(per, bool(self.graph_opts.get("by_condition", True)), bool(self.graph_opts.get("split_images")))
+
+    def replot(self, *_):
+        if not hasattr(self, "plot"):
+            return
+        xl, data = self.graph_xy()
+        names = [n for n, _ in data]
+        if names and all(n.endswith(" (Net)") for n in names):
+            ylabel = "Net intensity (raw)"
+        else:
+            ylabel = "Relative intensity" if self.ref_name else "Ratio"
+        st = self.graph_style()
+        self._graph_ax = graph._draw(self.plot.fig, xl, data, ylabel, st)
+        self.plot.canvas.draw_idle()
+        n_img = len(getattr(self, "_pooled", []))
+        reps = max((len(v) for _, groups in data for v in groups), default=0)
+        self.graph_sub.setText(f"이미지 {n_img}개 · n = 최대 {reps} · 막대 = 평균, 오차 막대 = {'SEM' if st.get('err') == 'sem' else 'SD'}, 점 = 각 레인")
+        if hasattr(self, "series_style_box"):
+            self.fill_series_styles(names)
+            self.fill_text_boxes()
+
+    # ---- graph items and formulas (sidebar)
+    def fill_formulas(self):
+        self.fill_series_rows()
+
+    def formula_terms(self):
+        a = self.analysis
+        ids = sorted({m.band_id for m in self.measurements})
+        return [
+            ("단백질", [(r.name, core._safe_name(r.name)) for r in a.rows]),
+            ("밴드 (값 하나)", [(i, i) for i in ids]),
+        ]
+
+    def fill_series_rows(self):
+        box = self.series_box
+        while box.count():
+            it = box.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        mine = {}
+        for scope, i, f in self.all_formulas(self.doc):
+            mine.setdefault(str(f.get("name") or f.get("expr")), (scope, i, f))
+        names = self.series_names()
+        if not names:
+            box.addWidget(controls.hint("결과가 없습니다 — 단백질 역할(Control/Target)을 정하거나 수식을 추가하세요"))
+        for name in names:
+            row = QtWidgets.QWidget()
+            hl = QtWidgets.QHBoxLayout(row)
+            hl.setContentsMargins(0, 0, 0, 0)
+            cb = QtWidgets.QCheckBox(name)
+            cb.setChecked(self.series_on.get(name, True))
+            cb.toggled.connect(lambda on, n=name: (self.series_on.__setitem__(n, on), self.replot(), self.fill_results_table()))
+            hl.addWidget(cb, 1)
+            if name in mine:
+                scope, i, f = mine[name]
+                cb.setStyleSheet("color: #0066cc; font-weight: 600;")
+                for text, tip, fn in (("✎", "수식 편집", lambda _=None, s=scope, i=i: self.open_formula_card((s, i))),
+                                      ("✕", "수식 삭제", lambda _=None, s=scope, i=i: self.delete_formula((s, i)))):
+                    b = QtWidgets.QToolButton()
+                    b.setText(text)
+                    b.setToolTip(tip)
+                    b.clicked.connect(fn)
+                    hl.addWidget(b)
+            else:
+                sub = QtWidgets.QLabel("Net" if name.endswith(" (Net)") else "자동")
+                theme.hint(sub)
+                hl.addWidget(sub)
+            box.addWidget(row)
+
+    def _formula_list(self, scope):
+        return self.formulas_all if scope == "all" else self.analysis.formulas
+
+    def open_formula_card(self, which: Optional[tuple] = None):
+        """The formula editor opens inside the sidebar (new formula, or ``which`` = (scope, index))."""
+        if not self.measurements:
+            self.statusBar().showMessage("먼저 이미지를 열고 밴드를 검출하세요")
+            return
+        self.close_formula_card()
+        va, vm = self.basis_of(self.doc)
+        if which is not None:
+            formula = dict(self._formula_list(which[0])[which[1]])
+        else:
+            formula = {"name": f"수식{len(self.formulas_all) + 1}"}
+        self.formula_row = which
+        k = self.docs.index(self.doc)
+        ed = FormulaEditor(self.formula_card, self.formula_terms(), self.image_variables(k, va, vm), formula, compact=True)
+        # 항목 넣기: which image the protein buttons take (same image = per lane of each image)
+        hb = QtWidgets.QHBoxLayout()
+        img = QtWidgets.QComboBox()
+        img.addItem("각 이미지", "")
+        for j, d in enumerate(self.docs):
+            if d.raw is not None:
+                img.addItem(self.doc_key(j), f"I{j + 1}.")
+        lane = QtWidgets.QComboBox()
+        lane.addItem("같은 레인/그룹")
+        hb.addWidget(img)
+        hb.addWidget(lane)
+        cap = controls.hint("항목 넣기 (고르면 커서 자리에 들어감)")
+        ed.top.addWidget(cap)
+        ed.top.addLayout(hb)
+        ed.prefix_fn = lambda: img.currentData() or ""
+        ed.normalize.setText(f"1.0 기준({self.ref_name})으로 나누기" if self.ref_name else "1.0 기준으로 나누기")
+        labels = va.lane_labels
+
+        def preview(vals):
+            groups = {}
+            for i, v in enumerate(vals):
+                if i < len(labels) and np.isfinite(v):
+                    groups.setdefault(labels[i], []).append(v)
+            if ed.normalize.isChecked():
+                vals = self._scale(vals, labels)
+                groups = {}
+                for i, v in enumerate(vals):
+                    if i < len(labels) and np.isfinite(v):
+                        groups.setdefault(labels[i], []).append(v)
+            n = max((len(g) for g in groups.values()), default=0)
+            txt = " · ".join(f"{g} {np.mean(v):.2f}" for g, v in list(groups.items())[:6])
+            return f"미리보기 · 평균 (n = {n})\n{txt}"
+        ed.preview_fn = preview
+        ed.normalize.toggled.connect(lambda _=None: ed.refresh())
+        ed.validChanged.connect(self.formula_ok.setEnabled)
+        ed.submitted.connect(self.accept_formula_card)
+        ed.refresh()
+        self.formula_editor = ed
+        self.formula_editor_box.addWidget(ed)
+        self.formula_ok.setEnabled(ed.valid)
+        self.formula_ok.setText("저장" if which is not None else "그래프에 추가")
+        self.formula_card_title.setText("수식 편집" if which is not None else "새 수식")
+        self.formula_card.setVisible(True)
+        self.add_formula_btn.setVisible(False)
+        ed.display.setFocus()
+
+    def close_formula_card(self):
+        if self.formula_editor is not None:
+            self.formula_editor.setParent(None)
+            self.formula_editor.deleteLater()
+            self.formula_editor = None
+        self.formula_card.setVisible(False)
+        self.add_formula_btn.setVisible(True)
+
+    def accept_formula_card(self):
+        ed = self.formula_editor
+        if ed is None or not ed.valid:
+            return
+        f = ed.result()
+        if self.formula_row is not None:
+            lst = self._formula_list(self.formula_row[0])
+            if self.formula_row[1] < len(lst):
+                lst[self.formula_row[1]] = f
+            msg = f"수식 '{f['name']}'을(를) 고쳤습니다"
+        else:
+            self.formulas_all.append(f)
+            msg = f"✓ '{f['name']}'을(를) 그래프에 추가했습니다"
+        self.series_on[f["name"]] = True
+        self.close_formula_card()
+        self.recompute_results()
+        self.statusBar().showMessage(msg)
+
+    def add_formula(self):
+        self.open_formula_card()
+
+    def edit_formula(self, which=None):
+        if which is not None and which is not False:
+            self.open_formula_card(which if isinstance(which, tuple) else ("all", which))
+
+    def delete_formula(self, which=None):
+        if which is None or which is False:
+            return
+        which = which if isinstance(which, tuple) else ("all", which)
+        lst = self._formula_list(which[0])
+        if which[1] >= len(lst):
+            return
+        name = lst[which[1]].get("name")
+        del lst[which[1]]
+        self.close_formula_card()
+        self.recompute_results()
+        self.statusBar().showMessage(f"수식 '{name}'을(를) 지웠습니다")
+
+    # ---- data table (그린 값 · 밴드별 · 요약)
+    def fill_results_table(self):
+        if not hasattr(self, "table_seg"):
+            return
+        mode = self.table_seg.value()
+        t = self.results_table
+        rows, picks, header = [], [], []
+        err = "SEM" if self.graph_opts.get("err") == "sem" else "SD"
+        if mode == "bands":
+            header = ["이미지", "밴드 ID", "단백질", "역할", "레인", "레인 이름", "Raw", "배경", "Net"]
+            for d in self.quant_docs():
+                k = self.docs.index(d)
+                a = d.analysis
+                for m in d.measurements:
+                    r = a.rows[m.row]
+                    rows.append([self.doc_key(k), m.band_id, r.name, ROLE_SHORT.get(r.role, ""), f"L{m.lane + 1}",
+                                 a.lane_labels[m.lane] if m.lane < len(a.lane_labels) else "",
+                                 f"{m.raw:,.0f}", f"{m.background:,.0f}", f"{m.net:,.0f}"])
+                    picks.append((k, [m.band_id]))
+        elif mode == "summary":
+            xl, data = self.graph_xy()
+            header = ["항목", "그룹", "평균", err, "n"]
+            for name, groups in data:
+                for x, v in zip(xl, groups):
+                    m_, e_, n_ = graph.summary(v, self.graph_opts.get("err", "sd"))
+                    if n_:
+                        rows.append([name, x, f"{m_:.4g}", f"{e_:.3g}" if n_ > 1 else "", str(n_)])
+                        picks.append(None)
+        else:
+            ref = self.ref_name
+            header = ["이미지", "레인", "이름", "항목", "Control 짝", "Net", "Control Net", "정규화", f"{ref} = 1" if ref else "값"]
+            shown = set(self.shown_series())
+            for d in self.quant_docs():
+                k = self.docs.index(d)
+                a, meas = self.basis_of(d)
+                res, _ = self.image_results(d)
+                c = self._control_row(a)
+                ids = {}
+                for m in meas:
+                    ids.setdefault((m.row, m.lane), []).append(m.band_id)
+                for name, v in res.items():
+                    if name not in shown or np.size(v) <= 1:
+                        continue
+                    ri = next((i for i, r in enumerate(a.rows) if c is not None and name == f"{r.name} ÷ {a.rows[c].name}"), None)
+                    tv = core.row_vector(a, meas, ri) if ri is not None else None
+                    cv = core.row_vector(a, meas, c) if (ri is not None and c is not None) else None
+                    for i in range(np.size(v)):
+                        lab = a.lane_labels[i] if i < len(a.lane_labels) else ""
+                        rows.append([self.doc_key(k), f"L{i + 1}" if not d.basis else lab, lab, name,
+                                     f"{lab} {a.rows[c].name}" if ri is not None else "",
+                                     f"{tv[i]:,.0f}" if tv is not None and np.isfinite(tv[i]) else "",
+                                     f"{cv[i]:,.0f}" if cv is not None and np.isfinite(cv[i]) else "",
+                                     f"{tv[i] / cv[i]:.3f}" if tv is not None and cv is not None and cv[i] else "",
+                                     f"{v[i]:.3f}" if np.isfinite(v[i]) else ""])
+                        picks.append((k, (ids.get((ri, i), []) + (ids.get((c, i), []) if c is not None else [])) if ri is not None else []))
+        t.blockSignals(True)
+        t.clear()
+        t.setColumnCount(len(header))
+        t.setHorizontalHeaderLabels(header)
+        t.setRowCount(len(rows))
+        for r_, row in enumerate(rows):
+            for c_, x in enumerate(row):
+                it = QtWidgets.QTableWidgetItem(str(x))
+                if c_ >= len(header) - 4 and mode != "summary":
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                t.setItem(r_, c_, it)
+        t.blockSignals(False)
+        t.resizeColumnsToContents()
+        self._table_picks = picks
+
+    def on_table_pick(self):
+        rows = sorted({i.row() for i in self.results_table.selectedIndexes()})
+        picks = getattr(self, "_table_picks", [])
+        if not rows or rows[0] >= len(picks) or picks[rows[0]] is None:
+            return
+        k, ids = picks[rows[0]]
+        if k != self.cur:
+            self.switch_doc(k)
+        ids = set(ids)
+        bid = self.analysis.band_ids()
+        sel = [b for b in self.analysis.bands if bid[id(b)] in ids]
+        self.view.select_bands(sel)
+        if sel:
+            self.view.centerOn(sel[0].cx, sel[0].cy)
+
+    def edit_groupings(self):
+        """측정 묶음 세트 편집 (moved here from the lanes tab)."""
+        dlg = QtWidgets.QDialog(self.quant_win)
+        dlg.setWindowTitle("측정 묶음 세트")
+        lay = QtWidgets.QVBoxLayout(dlg)
+        self._groupings_widget.setParent(None)
+        lay.addWidget(self._groupings_widget)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        dlg.resize(520, 480)
+        self.fill_groupings()
+        dlg.exec()
+        self._groupings_widget.setParent(None)
+        self.fill_basis_combo()
+
     # ---------------------------------------------------------------- figure window
     def open_figure_window(self):
-        self.tabs.setCurrentIndex(self.FIG_TAB)
+        self.fig_win.show_for(self.doc)
 
-    def on_tab_changed(self, i):
-        """The graph and figure tabs get the whole window width; the blot view returns on the other tabs."""
-        if i in (self.FIG_TAB, self.RES_TAB):
-            if self._split_sizes is None:
-                self._split_sizes = self.split.sizes()
-            total = sum(self.split.sizes())
-            self.split.setCollapsible(0, True)
-            self.split.setSizes([0, total])  # the figure tab has its own preview; the blot view comes back on other tabs
-        elif self._split_sizes is not None:
-            self.split.setSizes(self._split_sizes)
-            self._split_sizes = None
-        else:
-            return
-        QtCore.QTimer.singleShot(0, self.view.fit)
+    def open_quant_window(self, page: Optional[str] = None):
+        self.quant_win.show_page(page)
 
     def _figure_changed(self, d):
         ed = self.figure_editor
-        if self.tabs.currentIndex() == self.FIG_TAB and ed.isVisible():
+        if self.fig_win.isVisible():
             ed.set_doc(self.doc)
         else:
             ed.dirty = True
@@ -2531,15 +4357,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sync_marker_orient()
         if m is None or not self.show_marker.isChecked():
             self.view.set_marker(None)
+            self.view.marker_s = None
+            self.view.rebuild_lines()
+            self.refresh_marker_card()
             return
         x = figure._stretch(m, 1, 99.5, 1.0)
         f = d.figure or {}
         if f.get("marker_invert", True):
             x = 1.0 - x  # dark ladder on white, like the blot preview
-        region = None
-        if f.get("strip_x1"):
-            region = (int(f["strip_x0"]), int(f["strip_x1"]), int(f.get("strip_dy", 0)))
-        self.view.set_marker(to_qimage(x, 0.0, 1.0), region, lambda x0, x1, dy: self.set_strip_region(d, x0, x1, dy))
+        self.view.set_marker(to_qimage(x, 0.0, 1.0))
+        self.view.marker_s = self._marker_s()
+        self.view.rebuild_lines()
+        self.refresh_marker_card()
 
     def set_strip_region(self, d: ImageDoc, x0, x1, dy):
         """Marker strip region dragged on the main view's marker preview."""
@@ -2855,7 +4684,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.structure_changed()
         self.statusBar().showMessage(f"ladder 레인: {', '.join(a.lane_labels[l] for l in core.ladder_lanes(a)) or '없음'}")
 
-    def detect(self):
+    def detect(self, use_lines: bool = False):
+        """Find the boxes. ``use_lines``: along the blue lane lines and red protein lines the user
+        drew or edited (선 기준으로 다시 검출)."""
         if self.signal is None:
             self.statusBar().showMessage("먼저 TIF 파일을 여세요")
             return
@@ -2870,8 +4701,11 @@ class MainWindow(QtWidgets.QMainWindow):
         user_bands = [(b.cx, b.cy, old.rows[b.row].name) for b in old.bands if getattr(b, "user", False)]
         self._tagged = ([(b.cx, b.cy, dict(b.tags)) for b in old.bands if b.tags],
                         [dict(g, groups=list(g["groups"])) for g in old.groupings])
-        if self.method_combo.currentData() == "lane":
-            self._detect_lane_first(corr, settings, old, user_bands)
+        if use_lines and not old.lane_lines:
+            self.statusBar().showMessage("레인 선이 없습니다 — '레인 선 자동으로 찾기'나 레인 선 도구로 먼저 그리세요")
+            return
+        if self.method_combo.currentData() == "lane" or use_lines:
+            self._detect_lane_first(corr, settings, old, user_bands, use_lines)
             return
         if self.doc.mode == core.MODE_GEL:
             a = core.detect_gel(corr, settings)
@@ -2879,6 +4713,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 a.lane_labels = list(old.lane_labels)
             a.formulas = list(old.formulas)
             self._restore_groups(a)
+            core.lines_from_analysis(a, corr.shape)
             self.set_analysis(a)
             if self.doc.figure is not None:
                 figure.apply_mode_defaults(self.doc.figure, a, core.MODE_GEL)
@@ -2899,15 +4734,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if a.rows and not any(r.role == core.ROLE_CONTROL for r in a.rows):
             a.rows[0].role = core.ROLE_CONTROL  # loading control is usually the top row; user can change
         self._restore_groups(a)
+        core.lines_from_analysis(a, corr.shape)
         self.set_analysis(a)
         self.statusBar().showMessage(
             f"자동 그룹 제안: 단백질 {len(a.rows)}개({', '.join(r.name for r in a.rows)}), 레인 {a.n_lanes}개, 박스 {len(a.bands)}개. "
             "바로 '6. Figure 만들기'로 가거나, 밴드를 드래그로 선택 → 우클릭으로 그룹 이름·구성을 고치세요."
         )
 
-    def _detect_lane_first(self, corr, settings, old, user_bands):
+    def _detect_lane_first(self, corr, settings, old, user_bands, use_lines: bool = False):
         d = self.doc
-        a = lanes.detect(corr, settings, d.mode)
+        if use_lines:
+            a = lanes.detect(corr, settings, d.mode, lane_lines=old.lane_lines, protein_lines=old.protein_lines,
+                             only_on_lines=self.only_on_lines.isChecked())
+        else:
+            a = lanes.detect(corr, settings, d.mode)
         if d.mode != core.MODE_GEL:
             for i, r in enumerate(a.rows):  # keep the user's names and roles when re-detecting
                 if i < len(old.rows):
@@ -2930,9 +4770,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if kept and a.method == "lane":
             core.auto_assign_lanes(a)
         self._restore_groups(a)
+        if use_lines:  # the user's lines stay as they are
+            a.lane_lines = [[list(q) for q in ln] for ln in old.lane_lines]
+            a.protein_lines = [dict(p) for p in old.protein_lines]
+        else:
+            core.lines_from_analysis(a, corr.shape)
+        if len(old.lane_roles) == a.n_lanes:
+            a.lane_roles = list(old.lane_roles)
         # tilt: corrected only by turning the whole image (and the marker with it)
         ang = lanes.tilt_angle(a)
-        if self.auto_tilt.isChecked() and not self._tilt_done and 0.3 <= abs(ang) <= 10:
+        if self.auto_tilt.isChecked() and not use_lines and not self._tilt_done and 0.3 <= abs(ang) <= 10:
             self._tilt_done = True
             try:
                 self.set_transform(d, dict(d.transform, angle=round(float(d.transform.get("angle", 0.0)) + ang, 2)))
@@ -2985,14 +4832,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.apply_auto_lanes():
             self.statusBar().showMessage("박스 위치에 맞춰 레인을 다시 지정했습니다 (이름 붙인 레인 그룹과 측정 묶음은 유지)")
         self.view.rebuild_extras()
-        # box sizes may have been changed by dragging in resize mode
-        for i, r in enumerate(self.analysis.rows):
-            for col, attr in ((2, "width"), (3, "height")):
-                sp = self.rows_table.cellWidget(i, col)
-                if sp is not None and sp.value() != getattr(r, attr):
-                    sp.blockSignals(True)
-                    sp.setValue(getattr(r, attr))
-                    sp.blockSignals(False)
+        self.update_sel_card()  # box sizes may have been changed by dragging in resize mode
         self.remeasure()
         self._figure_changed(self.doc)
 
@@ -3003,6 +4843,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.structure_changed()
 
     def delete_selected(self):
+        if self.view.tool != "select":
+            self.view.delete_selection()
+            return
         sel = self.view.selected_bands()
         if not sel:
             return
@@ -3260,70 +5103,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.group_table.selectRow(j)
 
     # ---------------------------------------------------------------- results basis (lanes or a grouping set)
-    def basis_of(self, d):
-        """(analysis, measurements) as results see them: per lane, or per group of the chosen set."""
-        if d.basis and core.grouping(d.analysis, d.basis) is None:
-            d.basis = LANES_BASIS
-        return core.basis_view(d.analysis, d.measurements, d.basis or None)
-
-    def ref_of(self, d):
-        return d.basis_ref.get(d.basis, 0) if d.basis else d.ref_lane
-
-    def fill_basis_combo(self):
-        d = self.doc
-        cb = self.basis_combo
-        cb.blockSignals(True)
-        cb.clear()
-        cb.addItem("레인 (기본: 같은 레인의 Control로 나눔)", LANES_BASIS)
-        for g in d.analysis.groupings:
-            cb.addItem(f"묶음 세트 '{g['name']}' ({len(g['groups'])}개 그룹)", g["name"])
-        i = cb.findData(d.basis)
-        cb.setCurrentIndex(i if i >= 0 else 0)
-        cb.blockSignals(False)
-        d.basis = cb.currentData()
-        self.fill_ref_combo()
-
-    def on_basis(self, *_):
-        self.doc.basis = self.basis_combo.currentData()
-        if self.doc.basis:  # show the grouping set being used
-            self.fill_groupings(select=self.doc.basis)
-            self.view.refresh_items()
-            self.view.rebuild_extras()
-        self.fill_ref_combo()
-        self.recompute_results()
-        self.recompute_multi()
-        self._figure_changed(self.doc)
-
-    def fill_ref_combo(self):
-        d = self.doc
-        a, _ = self.basis_of(d)
-        unit = "그룹" if d.basis else "레인"
-        self.ref_label.setText(f"기준 {unit} (=1.0)")
-        cb = self.ref_lane
-        cb.blockSignals(True)
-        cb.clear()
-        cb.addItem("정규화 안 함 (비율 그대로)", None)
-        for i in range(a.n_lanes):
-            cb.addItem(f"{i + 1}: {a.lane_labels[i]}", i)
-        ref = self.ref_of(d)
-        idx = 0 if ref is None else cb.findData(ref)
-        cb.setCurrentIndex(idx if idx >= 0 else min(1, cb.count() - 1))
-        cb.blockSignals(False)
-        self._set_ref(cb.currentData())
-        st = core.group_status(d.analysis, d.basis) if d.basis else []
-        bad = [f"{x['group']}: {', '.join(x['problems'])}" for x in st if x["problems"]]
-        self.basis_msg.setText(("⚠ " + " · ".join(bad)) if bad else
-                               (f"그룹 {len(st)}개: 그룹마다 Target ÷ 같은 그룹의 Control" if d.basis else
-                                "레인마다 Target ÷ 같은 레인의 Control"))
-        self.basis_msg.setStyleSheet("color: #c62828;" if bad else "color: #666;")
-
-    def _set_ref(self, v):
-        d = self.doc
-        if d.basis:
-            d.basis_ref[d.basis] = v
-        else:
-            d.ref_lane = v
-
     def make_lane_group(self):
         sel = self.view.selected_bands()
         if not sel:
@@ -3343,37 +5122,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"레인 그룹 '{final}': {n}개 열{' (반복)' if n > 1 else ''}{note}")
 
     # ---------------------------------------------------------------- tables: proteins / lanes
-    def fill_rows_table(self):
-        t = self.rows_table
-        t.blockSignals(True)
-        t.setRowCount(len(self.analysis.rows))
-        for i, r in enumerate(self.analysis.rows):
-            it = QtWidgets.QTableWidgetItem(r.name)
-            it.setForeground(row_color(i))
-            t.setItem(i, 0, it)
-            cb = QtWidgets.QComboBox()
-            for role in core.ROLES:
-                cb.addItem(ROLE_LABELS[role], role)
-            cb.setCurrentIndex(core.ROLES.index(r.role))
-            cb.currentIndexChanged.connect(lambda _=None, i=i, cb=cb: self.set_row_role(i, cb.currentData()))
-            t.setCellWidget(i, 1, cb)
-            for col, attr in ((2, "width"), (3, "height")):
-                sp = _spin(2, 5000, getattr(r, attr), suffix=" px")
-                sp.valueChanged.connect(lambda v, i=i, attr=attr: self.set_row_size(i, attr, v))
-                t.setCellWidget(i, col, sp)
-        t.blockSignals(False)
-        t.resizeColumnToContents(1)
-
     def set_row_role(self, i, role):
         if i >= len(self.analysis.rows):
             return
         self.analysis.rows[i].role = role
         self.view.refresh_items()
-        cb = self.rows_table.cellWidget(i, 1)
-        if cb and cb.currentData() != role:
-            cb.blockSignals(True)
-            cb.setCurrentIndex(core.ROLES.index(role))
-            cb.blockSignals(False)
         self.recompute_results()
         self.recompute_multi()
 
@@ -3383,20 +5136,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.apply_auto_lanes()
         self.remeasure()
 
-    def on_row_selected(self):
-        rows = {i.row() for i in self.rows_table.selectedIndexes()}
-        if rows:
-            self.view.select_bands([b for b in self.analysis.bands if b.row in rows])
-
-    def on_lane_selected(self):
-        lanes = {i.row() for i in self.lanes_table.selectedIndexes()}
-        if lanes:
-            self.view.select_bands([b for b in self.analysis.bands if b.lane in lanes])
-
     def delete_row(self):
-        rows = sorted({i.row() for i in self.rows_table.selectedIndexes()})
-        if not rows:
-            rows = sorted({b.row for b in self.view.selected_bands()})
+        rows = sorted({b.row for b in self.view.selected_bands()})
         for r in reversed(rows):
             self.analysis.remove_row(r)
         core.remove_empty(self.analysis)
@@ -3424,24 +5165,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fill_rows_table()
         self.remeasure()
 
-    def fill_lanes_table(self):
-        a = self.analysis
-        a.ensure_lane_labels()
-        t = self.lanes_table
-        t.setRowCount(a.n_lanes)
-        for i in range(a.n_lanes):
-            t.setItem(i, 0, QtWidgets.QTableWidgetItem(str(i + 1)))
-            t.setItem(i, 1, QtWidgets.QTableWidgetItem(a.lane_labels[i]))
-        self.fill_groupings()
-        self.fill_basis_combo()
-
-    def on_ref_lane(self, *_):
-        self._set_ref(self.ref_lane.currentData())
-        self.recompute_results()
-        self.recompute_multi()
-
     def delete_lane(self):
-        lanes = sorted({i.row() for i in self.lanes_table.selectedIndexes()}, reverse=True)
+        lanes = sorted({b.lane for b in self.view.selected_bands()}, reverse=True)
         a = self.analysis
         for lane in lanes:
             a.bands = [b for b in a.bands if b.lane != lane]
@@ -3478,125 +5203,9 @@ class MainWindow(QtWidgets.QMainWindow):
         elif item.column() == 2:
             f["normalize"] = "1" if item.checkState() == Qt.Checked else "0"
 
-    def fill_formulas(self):
-        self.fill_series_rows()
-
-    def formula_terms(self):
-        a = self.analysis
-        ids = sorted({m.band_id for m in self.measurements})
-        return [
-            ("단백질 그룹 (레인별 값)", [(r.name, core._safe_name(r.name)) for r in a.rows]),
-            ("밴드 (값 하나)", [(i, i) for i in ids]),
-        ]
-
-    def fill_series_rows(self):
-        """Graph items: automatic Target ÷ Control series and the user's formulas, each with a checkbox."""
-        box = self.series_box
-        while box.count():
-            it = box.takeAt(0)
-            if it.widget():
-                it.widget().deleteLater()
-        formulas = {str(f.get("name") or f.get("expr")): i for i, f in enumerate(self.analysis.formulas)}
-        if not self.results:
-            lab = QtWidgets.QLabel("결과가 없습니다 — 단백질 역할(Control/Target)을 정하거나 수식을 추가하세요")
-            lab.setWordWrap(True)
-            lab.setStyleSheet("color: #888;")
-            box.addWidget(lab)
-        for name in self.results:
-            row = QtWidgets.QWidget()
-            hl = QtWidgets.QHBoxLayout(row)
-            hl.setContentsMargins(0, 0, 0, 0)
-            cb = QtWidgets.QCheckBox(name)
-            cb.setChecked(self.series_on.get(name, True))
-            cb.toggled.connect(lambda on, n=name: (self.series_on.__setitem__(n, on), self.replot()))
-            hl.addWidget(cb, 1)
-            fi = formulas.get(name)
-            if fi is not None:
-                cb.setStyleSheet("color: #1565c0; font-weight: bold;")
-                f = self.analysis.formulas[fi]
-                sub = QtWidgets.QLabel("수식" + (" · 기준=1" if f.get("normalize", "1") == "1" else ""))
-                sub.setStyleSheet("color: #888; font-size: 11px;")
-                hl.addWidget(sub)
-                for text, tip, fn in (("✎", "수식 편집", lambda _=None, i=fi: self.open_formula_card(i)),
-                                      ("✕", "수식 삭제", lambda _=None, i=fi: self.delete_formula(i))):
-                    b = QtWidgets.QToolButton()
-                    b.setText(text)
-                    b.setToolTip(tip)
-                    b.clicked.connect(fn)
-                    hl.addWidget(b)
-            else:
-                sub = QtWidgets.QLabel("Net (Control 없음)" if name.endswith(" (Net)") else "자동: Target ÷ Control")
-                sub.setStyleSheet("color: #888; font-size: 11px;")
-                hl.addWidget(sub)
-            box.addWidget(row)
-
-    def open_formula_card(self, row: Optional[int] = None):
-        """The formula editor opens inside the sidebar (new formula, or ``row`` to edit)."""
-        a = self.analysis
-        if not self.measurements:
-            self.statusBar().showMessage("먼저 이미지를 열고 밴드를 검출하세요")
-            return
-        self.close_formula_card()
-        va, vm = self.basis_of(self.doc)
-        formula = dict(a.formulas[row]) if row is not None else {"name": f"수식{len(a.formulas) + 1}"}
-        self.formula_row = row
-        self.formula_editor = FormulaEditor(self.formula_card, self.formula_terms(), core.formula_variables(va, vm), formula,
-                                            compact=True)
-        self.formula_editor.validChanged.connect(self.formula_ok.setEnabled)
-        self.formula_editor.submitted.connect(self.accept_formula_card)
-        self.formula_editor_box.addWidget(self.formula_editor)
-        self.formula_ok.setEnabled(self.formula_editor.valid)
-        self.formula_ok.setText("저장" if row is not None else "그래프에 추가")
-        self.formula_card_title.setText("수식 편집" if row is not None else "새 수식")
-        self.formula_card.setVisible(True)
-        self.add_formula_btn.setVisible(False)
-        self.formula_editor.display.setFocus()
-
-    def close_formula_card(self):
-        if self.formula_editor is not None:
-            self.formula_editor.setParent(None)
-            self.formula_editor.deleteLater()
-            self.formula_editor = None
-        self.formula_card.setVisible(False)
-        self.add_formula_btn.setVisible(True)
-
-    def accept_formula_card(self):
-        ed = self.formula_editor
-        if ed is None or not ed.valid:
-            return
-        f = ed.result()
-        a = self.analysis
-        if self.formula_row is not None and self.formula_row < len(a.formulas):
-            a.formulas[self.formula_row] = f
-            msg = f"수식 '{f['name']}'을(를) 고쳤습니다"
-        else:
-            a.formulas.append(f)
-            msg = f"✓ '{f['name']}'을(를) 그래프에 추가했습니다"
-        self.series_on[f["name"]] = True
-        self.close_formula_card()
-        self.recompute_results()
-        self.statusBar().showMessage(msg)
-
     def _edit_formula_dialog(self, title, terms, variables, formula):
         dlg = FormulaDialog(self, title, terms, variables, formula)
         return dlg.result() if dlg.exec() == QtWidgets.QDialog.Accepted else None
-
-    def add_formula(self):
-        self.open_formula_card()
-
-    def edit_formula(self, row=None):
-        if row is not None and row is not False and row < len(self.analysis.formulas):
-            self.open_formula_card(row)
-
-    def delete_formula(self, row=None):
-        a = self.analysis
-        if row is None or row is False or row >= len(a.formulas):
-            return
-        name = a.formulas[row].get("name")
-        del a.formulas[row]
-        self.close_formula_card()
-        self.recompute_results()
-        self.statusBar().showMessage(f"수식 '{name}'을(를) 지웠습니다")
 
     # ---------------------------------------------------------------- measurement / results (current image)
     def measure_doc(self, d: ImageDoc):
@@ -3639,6 +5248,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_view_selection(self):
         sel = self.view.selected_bands()
+        self.update_sel_card()
         self.draw_profile(sel[:1])
         if sel:
             ids = self.analysis.band_ids()
@@ -3667,56 +5277,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def loaded_docs(self) -> List[ImageDoc]:
         return [d for d in self.docs if d.raw is not None]
 
-    def image_results(self, d: ImageDoc):
-        """Results of one image: Target/Control ratios and its own formulas, per lane or per group
-        of the chosen grouping set. Returns (results, messages)."""
-        res: Dict[str, np.ndarray] = {}
-        msgs = []
-        if not d.measurements:
-            return res, msgs
-        a, meas = self.basis_of(d)
-        ref = self.ref_of(d)
-        if self.auto_norm.isChecked():
-            controls = [i for i, r in enumerate(a.rows) if r.role == core.ROLE_CONTROL]
-            if controls:
-                c = controls[0]
-                for i, r in enumerate(a.rows):
-                    if r.role == core.ROLE_TARGET:
-                        v = core.normalize_to_control(a, meas, i, c, ref)
-                        if d.basis and not np.isfinite(v).any():
-                            continue  # this protein has no box in the grouping set
-                        res[f"{r.name}/{a.rows[c].name}"] = v
-            else:
-                # no internal control: plain band intensities (raw Net per lane)
-                for i, r in enumerate(a.rows):
-                    if r.role != core.ROLE_IGNORE:
-                        res[f"{r.name} (Net)"] = core.row_vector(a, meas, i)
-        variables = core.formula_variables(a, meas)
-        for f in a.formulas:
-            name = f.get("name") or f.get("expr")
-            expr = str(f.get("expr", "")).strip()
-            if not expr:
-                continue
-            try:
-                val = core.evaluate(expr, variables)
-                if f.get("normalize", "1") == "1" and np.ndim(val) == 1:
-                    val = core.scale_to_reference(val, ref)
-                res[name] = np.atleast_1d(np.asarray(val, float))
-            except Exception as e:
-                msgs.append(f"{name}: {e}")
-        return res, msgs
-
-    def recompute_results(self, *_):
-        self.results_title.setText(f"현재 이미지: {self.doc_key(self.cur)} · {self.doc.name}")
-        self.results, msgs = self.image_results(self.doc)
-        self.formula_msg.setText("\n".join(msgs) if msgs else FORMULA_HINT)
-        self.formula_msg.setStyleSheet("color: #c0392b; font-size: 11px;" if msgs else "color: #888; font-size: 11px;")
-        self.fill_series_rows()
-        self.fill_results_table()
-        self.replot()
-        if hasattr(self, "figure_editor") and self.tabs.currentIndex() != self.FIG_TAB:
-            self.figure_editor.dirty = True  # numbers in the figure may have changed
-
     @staticmethod
     def _fill_series_list(lst, names):
         prev = {lst.item(i).text(): lst.item(i).checkState() for i in range(lst.count())}
@@ -3732,41 +5292,6 @@ class MainWindow(QtWidgets.QMainWindow):
     @staticmethod
     def _checked(lst):
         return [lst.item(i).text() for i in range(lst.count()) if lst.item(i).checkState() == Qt.Checked]
-
-    def fill_results_table(self):
-        a, _ = self.basis_of(self.doc)
-        names = list(self.results)
-        t = self.results_table
-        n = a.n_lanes
-        t.clear()
-        t.setColumnCount(len(names) + 1)
-        t.setHorizontalHeaderLabels(["그룹" if self.doc.basis else "레인 그룹"] + names)
-        t.setRowCount(max(n, 1 if names else 0))
-        for i in range(n):
-            t.setItem(i, 0, QtWidgets.QTableWidgetItem(a.lane_labels[i] if i < len(a.lane_labels) else str(i + 1)))
-        for c, name in enumerate(names):
-            vals = self.results[name]
-            if vals.size == 1:
-                t.setItem(0, c + 1, QtWidgets.QTableWidgetItem(f"{vals[0]:.4g}"))
-                continue
-            for i in range(min(n, vals.size)):
-                it = QtWidgets.QTableWidgetItem("" if not np.isfinite(vals[i]) else f"{vals[i]:.4g}")
-                it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                t.setItem(i, c + 1, it)
-        t.resizeColumnsToContents()
-
-    def replot(self, *_):
-        a, _ = self.basis_of(self.doc)
-        series = {k: v for k, v in self.results.items() if self.series_on.get(k, True)}
-        # don't mix scalars and lane vectors in one chart
-        if any(np.size(v) > 1 for v in series.values()):
-            series = {k: v for k, v in series.items() if np.size(v) > 1}
-        if series and all(k.endswith(" (Net)") for k in series):
-            ylabel = "Net intensity (raw)"
-        else:
-            ylabel = "Relative intensity" if self.ref_of(self.doc) is not None else "Value"
-        labels = list(a.lane_labels)
-        self.plot.plot(series, labels, labels, self.by_condition.isChecked(), ylabel, self.show_points.isChecked())
 
     # ---------------------------------------------------------------- several images
     def lane_key_map(self) -> Dict[tuple, str]:
@@ -4145,6 +5670,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "multi_points": self.multi_points.isChecked(), "auto_lanes": self.auto_lanes.isChecked(),
                 "show_marker": self.show_marker.isChecked(), "ask_marker": self.ask_marker.isChecked(),
                 "auto_gel_crop": self.auto_gel_crop.isChecked(), "graph": dict(self.graph_opts),
+                "quant": {"ref_name": self.ref_name, "ctrl_name": self.ctrl_name, "formulas": self.formulas_all,
+                          "series_on": self.series_on, "excluded": [k for k, d in enumerate(self.docs)
+                                                                    if not getattr(d, "in_quant", True)]},
+                "detect_only_on_lines": self.only_on_lines.isChecked(),
             },
         }
 
@@ -4346,6 +5875,21 @@ class MainWindow(QtWidgets.QMainWindow):
                     w.blockSignals(True)
                     w.setChecked(bool(ui[key]))
                     w.blockSignals(False)
+            q = ui.get("quant") or {}
+            self.formulas_all = [dict(f) for f in q.get("formulas", [])]
+            self.series_on = dict(q.get("series_on", {}))
+            self.ctrl_name = q.get("ctrl_name")
+            self.ref_name = q.get("ref_name")
+            self._ref_default = "ref_name" not in q
+            if self._ref_default and docs:  # older projects: the first image's reference lane
+                d0 = docs[0]
+                r = d0.ref_lane
+                if r is not None and r < len(d0.analysis.lane_labels):
+                    self.ref_name, self._ref_default = d0.analysis.lane_labels[r], False
+            for k in q.get("excluded", []):
+                if k < len(docs):
+                    docs[k].in_quant = False
+            self.only_on_lines.setChecked(bool(ui.get("detect_only_on_lines", False)))
             self.set_graph_opts(ui.get("graph") or {})
             self.cur = min(int(ui.get("current_image", 0)), len(docs) - 1)
             self.refresh_doc_tabs()
@@ -4548,8 +6092,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except OSError:
             pass
 
-    def _image_filter(self) -> str:
-        order = [self.prefs["export"].get("image_format", "png")] + [k for k, _ in prefs.IMAGE_FORMATS]
+    def _image_filter(self, first: Optional[str] = None) -> str:
+        order = [first or self.prefs["export"].get("image_format", "png")] + [k for k, _ in prefs.IMAGE_FORMATS]
         seen, out = set(), []
         for k in order:
             if k not in seen:
@@ -4566,37 +6110,52 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.multi_plot if scope == "multi" else self.plot
 
     def graph_scope(self) -> str:
-        return "multi" if self.tabs.currentIndex() == 4 else "current"
+        return "multi" if getattr(self, "quant_win", None) is not None and self.quant_win.page() == "multi" else "current"
 
     def graph_data(self, scope: str = "current"):
-        """Only the numbers drawn in the graph: (header, rows, comment lines).
-        scope = 'current' (this image), 'all' (every open image, same graph items) or 'multi' (tab 5)."""
+        """Only the numbers drawn in the graph: (header, rows, comment lines). One row per value
+        (이미지, 항목, 그룹, 레인, 값), then mean / SD (SEM) / n per group (spec §9).
+        scope = 'current' (the images ticked in the quantification window), 'all' (every open
+        image) or 'multi' (여러 이미지)."""
         err = self.graph_opts.get("err", "sd")
         if scope == "multi":
             series = {k: self.multi_results[k] for k in self._checked(self.multi_series) if k in self.multi_results}
             header, rows = graph.summary_table(self.multi_keys, series, err)
-            notes = [f"# 5번 탭 여러 이미지 비교 · 기준 레인: {self.multi_ref or '없음'}"]
+            notes = [f"# 여러 이미지 비교 · 기준 레인: {self.multi_ref or '없음'}"]
             return header, rows, notes
-        docs = [self.doc] if scope == "current" else [d for d in self.loaded_docs() if d.measurements]
-        shown = [k for k in self.results if self.series_on.get(k, True)]
-        header, rows, notes = None, [], []
-        for d in docs:
-            res, _ = self.image_results(d)
-            series = {k: res[k] for k in shown if k in res and np.size(res[k]) > 1}
-            a, _ = self.basis_of(d)
-            h, r = graph.series_table(series, a.lane_labels, a.lane_labels, self.by_condition.isChecked(), err)
-            ref = self.ref_of(d)
-            notes.append(f"# {self.doc_key(self.docs.index(d))}: {d.name} · 짝짓기: "
-                         f"{('묶음 세트 ' + d.basis) if d.basis else '레인'} · 기준: "
-                         f"{a.lane_labels[ref] if ref is not None and ref < len(a.lane_labels) else '정규화 안 함'}")
-            if scope == "current":
-                header, rows = h, r
-            else:
-                header = ["이미지"] + (header[1:] if header else h)
-                cols = header[1:]
-                for row in r:
-                    rows.append([self.doc_key(self.docs.index(d))] + [row[h.index(c)] if c in h else "" for c in cols])
-        return header or ["레인", "레인 그룹"], rows, notes
+        if scope == "all":
+            pooled = []
+            for d in self.loaded_docs():
+                if d.measurements:
+                    res, _ = self.image_results(d)
+                    pooled.append((self.doc_key(self.docs.index(d)), res, list(self.basis_of(d)[0].lane_labels)))
+        else:
+            pooled = getattr(self, "_pooled", None) or self.quant_pooled()[0]
+        shown = set(self.shown_series()) or {n for _, res, _ in pooled for n in res}
+        by_cond = bool(self.graph_opts.get("by_condition", True))
+        header = ["이미지", "항목", "그룹", "레인", "값"]
+        rows, groups = [], {}
+        for key, res, labels in pooled:
+            for name, v in res.items():
+                if name not in shown or np.size(v) <= 1:
+                    continue
+                for i, val in enumerate(np.atleast_1d(v)):
+                    lab = labels[i] if i < len(labels) else str(i + 1)
+                    g = lab if by_cond else f"{key} {lab}"
+                    rows.append([key, name, lab, f"L{i + 1}", f"{val:.6g}" if np.isfinite(val) else ""])
+                    if np.isfinite(val):
+                        groups.setdefault((name, g), []).append(float(val))
+        lab_err = "SEM" if err == "sem" else "SD"
+        for (name, g), vals in groups.items():
+            m_, e_, n_ = graph.summary(vals, err)
+            rows.append(["", name, g, "평균", f"{m_:.6g}"])
+            rows.append(["", name, g, lab_err, f"{e_:.6g}" if n_ > 1 else ""])
+            rows.append(["", name, g, "n", str(n_)])
+        imgs = ", ".join(f"{k} {self.docs[int(k[1:]) - 1].name}" for k, _, _ in pooled)
+        ctrl = self.ctrl_name if self.ctrl_name else next((r.name for r in self.analysis.rows if r.role == core.ROLE_CONTROL), "없음")
+        basis = f"묶음 세트 {self.doc.basis}" if self.doc.basis else "레인 기준"
+        notes = [f"# 이미지: {imgs}", f"# Control: {ctrl} ({basis})", f"# 1.0 기준: {self.ref_name or '나누지 않음'}"]
+        return header, rows, notes
 
     def write_graph_csv(self, p: str, scope: str = "current"):
         header, rows, notes = self.graph_data(scope)
@@ -4608,6 +6167,26 @@ class MainWindow(QtWidgets.QMainWindow):
             w.writerow(header)
             w.writerows(rows)
 
+    def new_project(self):
+        if not self.maybe_save():
+            return
+        self.docs = [ImageDoc()]
+        self.cur = 0
+        self.big_groups, self.multi_formulas, self.formulas_all = [], [], []
+        self.ref_name, self.ctrl_name, self._ref_default = None, None, True
+        self.project_path = None
+        self.refresh_doc_tabs()
+        self.switch_doc(0)
+        self.mark_saved()
+        self.statusBar().showMessage("새 프로젝트")
+
+    def open_any(self):
+        """열기…: images and projects (several at once)."""
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, "열기 (이미지 · 프로젝트, 여러 개 가능)", "",
+            "이미지·프로젝트 (*.tif *.tiff *.png *.jpg *.jpeg *.blotproj *.json);;All files (*)")
+        self.open_paths(paths)
+
     def export_graph_csv(self):
         scope = self.graph_scope()
         p = self._save_path("그래프 데이터 CSV", "graph_data.csv", "CSV (*.csv)")
@@ -4615,12 +6194,39 @@ class MainWindow(QtWidgets.QMainWindow):
             self.write_graph_csv(p, scope)
             self.statusBar().showMessage(f"그래프에 쓰인 데이터를 저장했습니다: {p}")
 
-    def export_plot(self, canvas=None):
+    def export_plot(self, canvas=None, fmt: Optional[str] = None):
         canvas = canvas or self._graph_canvas(self.graph_scope())
-        p = self._save_path("그래프 저장", f"graph.{self.prefs['export'].get('image_format', 'png')}", self._image_filter())
+        fmt = fmt or self.prefs['export'].get('image_format', 'png')
+        p = self._save_path("그래프 저장", f"graph.{fmt}", self._image_filter(fmt))
         if p:
-            self.save_figure_file(canvas.fig, p, int(self.prefs["figure"].get("export_dpi", 600)))
+            self.write_graph_image(p, canvas)
             self.statusBar().showMessage(f"그래프 저장: {p}")
+
+    def write_graph_image(self, p: str, canvas=None, dpi: Optional[int] = None):
+        """The graph at its set size (그림 크기, mm)."""
+        canvas = canvas or self.plot
+        fig = canvas.fig
+        old = fig.get_size_inches().copy()
+        w, h = self.graph_opts.get("size_mm") or [90, 60]
+        fig.set_size_inches(w / 25.4, h / 25.4)
+        if canvas is self.plot:
+            self.replot()
+        else:
+            self.replot_multi()
+        fig.tight_layout()
+        try:
+            self.save_figure_file(fig, p, int(dpi or self.prefs["figure"].get("export_dpi", 600)))
+        finally:
+            fig.set_size_inches(*old)
+            canvas.canvas.draw_idle()
+
+    def export_graph_both(self):
+        p = self._save_path("그래프 데이터 + 이미지", "graph_data.csv", "CSV (*.csv)")
+        if p:
+            self.write_graph_csv(p, self.graph_scope())
+            img = os.path.splitext(p)[0].replace("_graph_data", "") + f"_graph.{self.prefs['export'].get('image_format', 'png')}"
+            self.write_graph_image(img, self._graph_canvas(self.graph_scope()))
+            self.statusBar().showMessage(f"저장했습니다: {p}, {img}")
 
     def _figure_ready(self) -> bool:
         ed = self.figure_editor
@@ -4651,6 +6257,9 @@ class MainWindow(QtWidgets.QMainWindow):
             figure.set_user_defaults(self.prefs["figure"])
             self.set_graph_opts({k: self.prefs["graph"][k] for k in ("kind", "err", "colors", "y0")})
             if dlg.apply_figure:
+                for key in ("font", "label_size", "tick_size", "legend_size", "title_size", "bold", "tick_len", "tick_dir"):
+                    self.graph_opts.pop(key, None)  # the graph takes the new defaults too
+                self.replot()
                 for d in self.docs:
                     if d.figure is not None:
                         figure.apply_look(d.figure)
@@ -4658,27 +6267,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("설정을 저장했습니다 — 새 그래프·Figure에 적용됩니다"
                                          + (" (열린 Figure에도 적용)" if dlg.apply_figure else ""))
 
-    def set_graph_opts(self, opts: dict):
-        for key, cb in (("kind", self.kind_combo), ("err", self.err_combo), ("colors", self.color_combo)):
-            if key in opts:
-                cb.blockSignals(True)
-                cb.setCurrentIndex(max(0, cb.findData(opts[key])))
-                cb.blockSignals(False)
-                self.graph_opts[key] = cb.currentData()
-        if "y0" in opts:
-            self.y0_check.blockSignals(True)
-            self.y0_check.setChecked(bool(opts["y0"]))
-            self.y0_check.blockSignals(False)
-            self.graph_opts["y0"] = bool(opts["y0"])
-        self.replot()
-        self.replot_multi()
-
     def export_overlay(self):
         if self.view.pix_item is None:
             return
         base = os.path.splitext(self.image_path)[0] + "_boxes.png" if self.image_path else "boxes.png"
         p, _ = QtWidgets.QFileDialog.getSaveFileName(self, "박스 표시 이미지 저장", base, "PNG (*.png)")
         if not p:
+            return
+        self.write_overlay(p)
+
+    def write_overlay(self, p: str):
+        """The blot with its boxes (to check the detection)."""
+        if self.view.pix_item is None:
             return
         self.view.scene().clearSelection()
         rect = self.view.pix_item.boundingRect()
@@ -4698,33 +6298,30 @@ class MainWindow(QtWidgets.QMainWindow):
 FORMULA_HINT = "'수식 추가…'에서 단백질·밴드를 목록에서 고르고 + − × ÷ ( ) 로 잇습니다. 예: pErk / Erk · Kras_DOX / Kras_DMSO"
 MULTI_FORMULA_HINT = "'수식 추가…'에서 이미지별 단백질·밴드·큰 그룹을 목록에서 고릅니다. 예: I2.Kras / I1.Kras"
 
-HELP_TEXT = """Blot Profiler 사용 순서
+HELP_TEXT = """Blot Profiler 1.0 사용 순서
 
-1. 검출 탭: TIF 파일을 열면 밴드를 자동으로 찾습니다. 여러 TIF를 열면 위쪽 탭(I1, I2 …)으로 전환합니다.
-   · 배경 제거 방법을 고르고(기본: Rolling ball) 민감도를 조절해 다시 검출할 수 있습니다.
+메인 창: 왼쪽 사이드바(이미지 · 단계 · 결과 창) | 가운데 이미지 | 오른쪽 속성창.
 
-2. 그룹 만들기: 이미지에서 밴드를 드래그로 선택한 뒤 우클릭
-   · 새 단백질(행) 그룹 만들기 → 이름 = 단백질 이름 (예: Vinculin, pErk)
-   · 새 레인(열) 그룹 만들기 → 이름 = 레인 이름 (예: DMSO, IgG 12h)
-     같은 단백질의 밴드를 여러 열에서 고르면 그 열들이 반복(평균±SD)이 됩니다.
-   · 밴드 ID = '단백질_레인' (이름이 겹치면 _2, _3 자동)
-   · 한 단백질 그룹의 박스는 같은 크기. 우클릭 → '박스 크기 조절 모드'에서 가장자리를 드래그 (Esc 종료).
+1. 검출: 이미지를 열면(파일 › 열기 또는 끌어다 놓기) 레인과 박스를 자동으로 찾습니다.
+   · 위쪽 도구: 선택 / 레인 선 / 단백질 선 / 마커 영역
+   · 레인 선(파랑): 빈 곳 클릭 = 새 선, 선 더블클릭 = 점 추가, 점 끌기 = 휘기, ⌫ = 지우기, 우클릭 = 메뉴
+   · 단백질 선(빨간 점선): 가로로 끌어 추가, 양끝 네모로 기울이기, 오른쪽 카드에서 어느 단백질인지 고름
+   · '선 기준으로 다시 검출': 그린 선을 기준으로 박스를 다시 찾습니다(빨간 선 위에서만 찾기 가능)
+   · 마커: 마커 영역을 끌어 정하고 영역 안을 클릭해 밴드 위치를 넣은 뒤, 첫 마커 크기 하나만 넣으면
+     나머지는 래더 순서로 채워집니다(칩을 눌러 고침).
 
-   · 밴드 ROI·그룹 저장/불러오기(검출 탭, 파일 메뉴): 박스와 그룹만 따로 저장해 다른 이미지에 적용합니다.
+2. 레인 / 단백질: 레인 이름과 역할(시료/마커/제외), 단백질 이름과 역할(Control/Target).
+   '＋ 새 단백질'로 박스 하나를 그리고 'ROI 박스 채우기'로 모든 레인에 같은 크기로 채웁니다.
+   박스: 클릭·드래그 선택, 끌어서 이동, 더블클릭 크기 수정, ⌫ 삭제, 우클릭 그룹·측정 묶음·병합.
 
-3. 단백질 / 레인 탭: 단백질의 역할(측정 Target / Control / 제외)과 박스 크기를 정합니다.
+정량·그래프 창: 밴드 값 / 정량 / 여러 이미지. 이미지를 체크해 함께 그리고, Control 짝짓기(레인 또는
+측정 묶음 세트), Control 단백질, 1.0 기준을 고릅니다. '＋ 수식 추가'로 사이드바에서 수식을 만듭니다.
+그래프는 PRISM 스타일이고 오른쪽 편집기에서 모양·시리즈·축·글꼴·범례를 바꿉니다.
 
-4. 정량 / 그래프 탭 (현재 이미지): Target ÷ Control 을 레인별로 계산하고 기준 레인을 1로 맞춥니다.
-   수식 추가…: 단백질 그룹·밴드는 목록에서 골라 넣고, + − × ÷ ( ) 와 숫자만 직접 입력합니다.
-   수식을 더블클릭하면 다시 편집합니다.
+Figure 창: 레인별 자르기 / Full blot, 왼쪽 추가 도구, 오른쪽 속성, 더블클릭으로 편집.
 
-5. 여러 이미지 탭: 이미지들의 그룹을 체크해 큰 그룹을 만듭니다.
-   · 레인 큰 그룹: 이미지마다 다른 레인 이름을 하나로 맞춤
-   · 단백질 큰 그룹: 여러 블롯의 값을 레인별 평균 ± SD
-   · 이미지 간 수식: 수식 창에서 이미지별 항목을 골라 만듭니다 (예: I2.Kras / I1.Kras)
-
-정량값(Net) = 박스 안 픽셀 intensity 합 − 배경.
-16-bit TIF 원본을 쓰면 가장 정확합니다 (스크린샷/JPEG는 포화와 압축 때문에 부정확할 수 있습니다).
+[ 확대   ] 축소   Space + 드래그: 화면 이동.  저장은 모두 파일 메뉴(내보내기… ⌘E, 설정… ⌘,).
+정량값(Net) = 박스 안 원본(raw) 픽셀 intensity 합 − 배경.
 """
 
 
@@ -4733,6 +6330,7 @@ class App(QtWidgets.QApplication):
 
     def __init__(self, argv):
         super().__init__(argv)
+        theme.apply(self)  # Apple HIG design system (desktop profile), see ui/theme.py
         self.window: Optional[MainWindow] = None
         self.pending: List[str] = []
 

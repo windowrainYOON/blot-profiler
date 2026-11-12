@@ -23,6 +23,9 @@ DEFAULTS = {
         "err_lw": 1.6,  # error bars
         "point_size": 34,
         "cap": 7,  # error bar cap length (points)
+        "tick_len": 6.0,  # tick length (points)
+        "tick_dir": "out",  # out · in
+        "title_size": 14.0,
         "kind": "bar_points",  # bar_points · points_mean · bars
         "err": "sd",  # sd · sem
         "colors": "bw",  # bw (PRISM default) · gray · color

@@ -1,0 +1,183 @@
+"""Controls of the 1.0 layout (spec §8): segmented choice, settings cards, switches,
+slider + number rows, value chips, a sidebar section list and a collapsible card."""
+
+from __future__ import annotations
+
+from typing import Iterable, List, Optional, Tuple
+
+from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6.QtCore import Qt
+
+from . import theme
+from .flow import FlowLayout
+
+
+class Segmented(QtWidgets.QWidget):
+    """One of 2–5 choices (segmented control): capsule buttons side by side."""
+
+    changed = QtCore.Signal(str)
+
+    def __init__(self, items: Iterable[Tuple[str, str]], parent=None, small: bool = False):
+        super().__init__(parent)
+        self.setObjectName("hig_segment")
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        self.group = QtWidgets.QButtonGroup(self)
+        self.group.setExclusive(True)
+        self.buttons = {}
+        for key, text in items:
+            b = QtWidgets.QPushButton(text)
+            b.setCheckable(True)
+            b.setFocusPolicy(Qt.TabFocus)
+            if small:
+                b.setStyleSheet("font-size: 12px; padding: 0 10px;")
+            self.group.addButton(b)
+            self.buttons[key] = b
+            lay.addWidget(b)
+            b.clicked.connect(lambda _=False, k=key: self.changed.emit(k))
+        if self.buttons:
+            next(iter(self.buttons.values())).setChecked(True)
+
+    def value(self) -> str:
+        return next((k for k, b in self.buttons.items() if b.isChecked()), "")
+
+    def set_value(self, key: str, emit: bool = False):
+        b = self.buttons.get(key)
+        if b is not None and not b.isChecked():
+            b.setChecked(True)
+            if emit:
+                self.changed.emit(key)
+
+
+def card(title: Optional[str] = None) -> Tuple[QtWidgets.QGroupBox, QtWidgets.QFormLayout]:
+    """A settings card (rounded inset group, title above, rows with hairlines)."""
+    g = QtWidgets.QGroupBox(title or "")
+    f = QtWidgets.QFormLayout(g)
+    f.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
+    return g, f
+
+
+def switch(text: str = "", checked: bool = False) -> QtWidgets.QCheckBox:
+    cb = QtWidgets.QCheckBox(text)
+    cb.setChecked(checked)
+    theme.switch(cb)
+    return cb
+
+
+def slider_row(spin: QtWidgets.QDoubleSpinBox, scale: int = 100) -> QtWidgets.QWidget:
+    """Continuous value (spec §8): slider + number field kept in step with ``spin``."""
+    sl = QtWidgets.QSlider(Qt.Horizontal)
+    sl.setRange(int(spin.minimum() * scale), int(spin.maximum() * scale))
+    sl.setValue(int(round(spin.value() * scale)))
+    sl.valueChanged.connect(lambda v: abs(spin.value() * scale - v) >= 1 and spin.setValue(v / scale))
+    spin.valueChanged.connect(lambda v: (sl.blockSignals(True), sl.setValue(int(round(v * scale))), sl.blockSignals(False)))
+    return theme.slider_field(sl, spin)
+
+
+def prominent(btn: QtWidgets.QPushButton) -> QtWidgets.QPushButton:
+    return theme.prominent(btn)
+
+
+def hint(text: str) -> QtWidgets.QLabel:
+    lab = QtWidgets.QLabel(text)
+    lab.setWordWrap(True)
+    theme.hint(lab)
+    return lab
+
+
+def section(text: str) -> QtWidgets.QLabel:
+    """Small grey header above a group of sidebar rows."""
+    lab = QtWidgets.QLabel(text)
+    lab.setStyleSheet("color: rgba(60,60,67,0.6); font-size: 11px; font-weight: 600; padding: 10px 10px 2px 10px;")
+    return lab
+
+
+class ChipRow(QtWidgets.QWidget):
+    """Values shown as chips (nested in a flow); a click emits the chip's index."""
+
+    clicked = QtCore.Signal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.flow = FlowLayout(self, spacing=4)
+        self.flow.setContentsMargins(0, 0, 0, 0)
+
+    def set_chips(self, texts: List[str], current: int = -1):
+        while self.flow.count():
+            w = self.flow.takeAt(0).widget()
+            if w is not None:
+                w.deleteLater()
+        for i, t in enumerate(texts):
+            b = QtWidgets.QPushButton(t)
+            b.setCheckable(True)
+            b.setChecked(i == current)
+            b.setStyleSheet("min-height: 22px; padding: 0 8px; font-size: 12px;")
+            b.clicked.connect(lambda _=False, i=i: self.clicked.emit(i))
+            self.flow.addWidget(b)
+        self.updateGeometry()
+
+
+class Collapsible(QtWidgets.QWidget):
+    """A card that opens and closes with its title (세부 설정)."""
+
+    def __init__(self, title: str, body: QtWidgets.QWidget, opened: bool = False, parent=None):
+        super().__init__(parent)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        self.btn = QtWidgets.QToolButton()
+        self.btn.setText(title)
+        self.btn.setCheckable(True)
+        self.btn.setChecked(opened)
+        self.btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn.setArrowType(Qt.DownArrow if opened else Qt.RightArrow)
+        self.btn.setStyleSheet("QToolButton { font-weight: 600; border: none; background: transparent; }")
+        self.btn.toggled.connect(self._toggle)
+        lay.addWidget(self.btn)
+        self.body = body
+        body.setVisible(opened)
+        lay.addWidget(body)
+
+    def _toggle(self, on):
+        self.btn.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
+        self.body.setVisible(on)
+
+
+class SideList(QtWidgets.QListWidget):
+    """Rows of the sidebar (selection = accent pill); a row may carry a grey note on the right."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustToContents)
+        self.setStyleSheet("QListWidget { background: transparent; border: none; }"
+                           "QListWidget::item { min-height: 26px; padding: 2px 8px; border-radius: 7px; }"
+                           "QListWidget::item:selected { background: #0066cc; color: white; }")
+
+    def set_rows(self, rows: List[Tuple[str, str]], current: int = -1):
+        self.blockSignals(True)
+        self.clear()
+        for text, note in rows:
+            it = QtWidgets.QListWidgetItem(f"{text}    {note}" if note else text)
+            it.setToolTip(text)
+            self.addItem(it)
+        if 0 <= current < self.count():
+            self.setCurrentRow(current)
+        self.blockSignals(False)
+        self.setFixedHeight(max(28, self.sizeHintForRow(0) * self.count() + 6) if self.count() else 28)
+
+
+def color_dot(color: str, size: int = 10) -> QtWidgets.QLabel:
+    lab = QtWidgets.QLabel()
+    lab.setFixedSize(size, size)
+    lab.setStyleSheet(f"background: {color}; border-radius: 3px;")
+    return lab
+
+
+def icon(name: str) -> QtGui.QIcon:
+    from .hig_widgets import icon as _icon  # noqa: PLC0415
+
+    return _icon(name, 16)

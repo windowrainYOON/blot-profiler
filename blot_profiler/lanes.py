@@ -108,12 +108,22 @@ def find_lanes(work: np.ndarray, sensitivity: float = 1.0) -> Tuple[List[float],
     return centres, pitch
 
 
+def line_x(line, y, H: float):
+    """x of a lane line at height ``y``: a slanted line (x0 at mid-height, slope) or a
+    polyline [[x, y], …] drawn by the user (straight beyond its ends)."""
+    if isinstance(line, dict):
+        line = line.get("points") or (line["x0"], line["slope"])
+    if isinstance(line, tuple):
+        x0, slope = line
+        return np.asarray(x0 + slope * (np.asarray(y, float) - H / 2.0), float)
+    return core.poly_x(line, y)
+
+
 def _strip(work: np.ndarray, line, half: int) -> np.ndarray:
     """Straightened lane: for each row y the columns around the lane line x(y)."""
     H, W = work.shape
-    x0, slope = line
     ys = np.arange(H)
-    xc = x0 + slope * (ys - H / 2.0)
+    xc = line_x(line, ys, H)
     offs = np.arange(-half, half + 1)
     cols = np.clip(np.round(xc[:, None] + offs[None, :]).astype(int), 0, W - 1)
     return work[ys[:, None], cols]
@@ -191,13 +201,24 @@ def _centroid_x(work, y, x_line, half):
 
 
 def detect(signal: np.ndarray, settings: Optional[core.DetectSettings] = None,
-           mode: str = core.MODE_WESTERN) -> core.Analysis:
+           mode: str = core.MODE_WESTERN, lane_lines=None, protein_lines=None,
+           only_on_lines: bool = False) -> core.Analysis:
     """Lane-first detection. Candidates and lane geometry are kept on the analysis
-    (``a.candidates``, ``a.lane_geom``) for suggestions and display."""
+    (``a.candidates``, ``a.lane_geom``) for suggestions and display.
+
+    ``lane_lines`` (polylines drawn or edited by the user) replace the lanes found
+    automatically; ``protein_lines`` ({row, x0, y0, x1, y1}) name the rows they cross,
+    and with ``only_on_lines`` the boxes are placed only where they meet the lanes."""
     st = settings or core.DetectSettings()
     work = core.detection_image(signal, st)
     H, W = work.shape
-    centres, pitch = find_lanes(work, st.sensitivity)
+    user_lines = [sorted([list(map(float, p)) for p in ln], key=lambda p: p[1]) for ln in (lane_lines or []) if len(ln) >= 2]
+    if user_lines:
+        user_lines.sort(key=lambda ln: float(np.mean([p[0] for p in ln])))
+        centres = [float(np.mean([p[0] for p in ln])) for ln in user_lines]
+        pitch = float(np.median(np.diff(centres))) if len(centres) > 1 else max(16.0, W / 8.0)
+    else:
+        centres, pitch = find_lanes(work, st.sensitivity)
     a = core.Analysis()
     a.method = "lane"
     if not centres:
@@ -206,10 +227,17 @@ def detect(signal: np.ndarray, settings: Optional[core.DetectSettings] = None,
     k = 4.0 / max(st.sensitivity, 1e-3)
 
     # typical lane noise (median over lanes) caps each lane's own estimate
-    noise_cap = float(np.median([_lane_profile(_strip(work, (cx, 0.0), half), pitch)[2] for cx in centres]))
+    noise_cap = float(np.median([_lane_profile(_strip(work, user_lines[i] if user_lines else (cx, 0.0), half), pitch)[2]
+                                 for i, cx in enumerate(centres)]))
     lanes = []
     counts = []
     for li, cx in enumerate(centres):
+        if user_lines:  # the user's lane line as it is
+            line = user_lines[li]
+            cands = _lane_bands(_strip(work, line, half), k, pitch, noise_cap)
+            counts.append(sum(1 for c in cands if c["snr"] >= k))
+            lanes.append({"line": line, "cands": cands})
+            continue
         line = (cx, 0.0)
         cands = _lane_bands(_strip(work, line, half), k, pitch, noise_cap)
         # slanted strip: fit the centre line to the band centroids, then search again along it
@@ -283,8 +311,10 @@ def detect(signal: np.ndarray, settings: Optional[core.DetectSettings] = None,
         order = [ri for ri in order if ri not in weak_rows]
 
     def lane_x(li, y):
-        x0l, sl = lanes[li]["line"]
-        return float(x0l + sl * (y - H / 2.0))
+        return float(line_x(lanes[li]["line"], y, H))
+
+    if protein_lines and only_on_lines:  # boxes only where the red lines cross the lanes
+        return _boxes_on_lines(a, lanes, protein_lines, lane_x, half, pitch, st, mode, H)
 
     box_w = max(4, int(round(0.8 * pitch)))
     for new_ri, ri in enumerate(order):
@@ -302,7 +332,7 @@ def detect(signal: np.ndarray, settings: Optional[core.DetectSettings] = None,
                     a.bands.append(core.Band(row=new_ri, lane=li, cx=lane_x(li, y), cy=y))
     a.lane_labels = [f"L{i + 1}" for i in range(n_lanes)]
     a.bands.sort(key=lambda b: (b.row, b.lane))
-    a.lane_geom = [{"x0": float(ln["line"][0]), "slope": float(ln["line"][1]), "half": int(half)} for ln in lanes]
+    a.lane_geom = [_geom(ln["line"], half) for ln in lanes]
     a.candidates = []
     for ri in weak_rows:
         for li, (c, s_) in rows[ri].items():
@@ -326,17 +356,84 @@ def detect(signal: np.ndarray, settings: Optional[core.DetectSettings] = None,
             if i not in ladset and i < len(a.lane_labels):
                 a.lane_labels[i] = f"L{i + 1}"
     _match_geometry(a, H)
+    if protein_lines:
+        name_rows_by_lines(a, protein_lines)
     return a
 
 
+def _geom(line, half) -> dict:
+    if isinstance(line, tuple):
+        return {"x0": float(line[0]), "slope": float(line[1]), "half": int(half)}
+    return {"points": [[float(x), float(y)] for x, y in line], "half": int(half)}
+
+
+def _boxes_on_lines(a, lanes, protein_lines, lane_x, half, pitch, st, mode, H) -> core.Analysis:
+    """One box per lane on every red protein line: the band nearest to the line in that lane
+    (or the crossing itself when the lane shows no band there)."""
+    all_h = [c["h"] for ln in lanes for c in ln["cands"]]
+    med_h = float(np.median(all_h)) if all_h else max(6.0, 0.03 * H)
+    tol = max(6.0, 0.8 * med_h)
+    box_w = max(4, int(round(0.8 * pitch)))
+    plines = sorted(protein_lines, key=lambda p: (p["y0"] + p["y1"]) / 2.0)
+    used = []
+    for pi, p in enumerate(plines):
+        name = core.unique_name(str(p.get("row") or f"P{pi + 1}"), used)
+        used.append(name)
+        hs, spots = [], []
+        for li in range(len(lanes)):
+            y0 = core.protein_line_y(p, lane_x(li, H / 2.0))
+            y0 = core.protein_line_y(p, lane_x(li, y0))
+            near = [c for c in lanes[li]["cands"] if abs(c["y"] - y0) <= tol]
+            c = min(near, key=lambda c: abs(c["y"] - y0)) if near else None
+            cy = float(c["y"]) if c else float(y0)
+            if c:
+                hs.append(c["h"])
+            spots.append((li, cy))
+        h = int(np.ceil(np.median(hs) if hs else med_h)) + 2 * st.pad
+        a.rows.append(core.Row(name=name, width=box_w, height=max(4, h)))
+        for li, cy in spots:
+            a.bands.append(core.Band(row=len(a.rows) - 1, lane=li, cx=lane_x(li, cy), cy=cy))
+    a.lane_labels = [f"L{i + 1}" for i in range(len(lanes))]
+    a.lane_geom = [_geom(ln["line"], half) for ln in lanes]
+    a.bands.sort(key=lambda b: (b.row, b.lane))
+    if mode == core.MODE_GEL:
+        for i, r in enumerate(a.rows):
+            if r.name.startswith("P"):
+                r.name = f"B{i + 1}"
+    return a
+
+
+def name_rows_by_lines(a: core.Analysis, protein_lines) -> None:
+    """Rows crossed by a named red line take its name (the nearest row within half a box)."""
+    used = set()
+    for p in protein_lines:
+        name = str(p.get("row") or "")
+        if not name:
+            continue
+        best, dist = None, None
+        for ri, r in enumerate(a.rows):
+            pts = [(b.cx, b.cy) for b in a.bands if b.row == ri]
+            if not pts or ri in used:
+                continue
+            d_ = float(np.median([abs(y - core.protein_line_y(p, x)) for x, y in pts]))
+            if d_ <= max(4.0, 0.75 * r.height) and (dist is None or d_ < dist):
+                best, dist = ri, d_
+        if best is not None:
+            used.add(best)
+            a.rows[best].name = core.unique_name(name, [r.name for i, r in enumerate(a.rows) if i != best])
+
+
 def lane_line_x(g: dict, y: float) -> float:
+    if g.get("points"):
+        return float(core.poly_x(g["points"], y))
     return float(g["x0"] + g["slope"] * (y - g.get("ymid", 0.0)))
 
 
 def _match_geometry(a: core.Analysis, H: int):
     """Keep one lane line per lane, in lane order (lanes without boxes may have been dropped)."""
     for g in a.lane_geom:
-        g["ymid"] = H / 2.0
+        if not g.get("points"):
+            g["ymid"] = H / 2.0
     if not a.bands or not a.lane_geom:
         return
     out = []
