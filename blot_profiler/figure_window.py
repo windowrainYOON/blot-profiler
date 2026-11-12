@@ -504,6 +504,17 @@ class PreviewLabel(QtWidgets.QLabel):
         qp.end()
 
 
+def _number_key(src, values):
+    """The source of a number row; rows made before 1.0 name ratios 'A/B' (now 'A ÷ B')."""
+    if src in values or not src or not str(src).startswith("res:"):
+        return src
+    name = str(src)[4:]
+    for cand in (name.replace("/", " ÷ "), name.replace(" ÷ ", "/")):
+        if f"res:{cand}" in values:
+            return f"res:{cand}"
+    return src
+
+
 class FigureEditor(QtWidgets.QWidget):
     """Figure editor for the image shown in the main window (see :meth:`set_doc`)."""
 
@@ -565,6 +576,11 @@ class FigureEditor(QtWidgets.QWidget):
         pv.setWidget(self.preview)
         self.preview_area = pv
         pv.viewport().installEventFilter(self)  # the preview follows the size of its pane
+        from .ui import controls as _controls
+
+        self.zoom_chip = _controls.ZoomChip(pv, lambda: self.zoom_preview(0.8), lambda: self.zoom_preview(1.25),
+                                            lambda: self.zoom_preview(1.0 / self._pzoom))
+        self.zoomChanged.connect(self.zoom_chip.set_zoom)
         self.size_label = QtWidgets.QLabel()
         pw = QtWidgets.QWidget()
         pl = QtWidgets.QVBoxLayout(pw)
@@ -613,10 +629,21 @@ class FigureEditor(QtWidgets.QWidget):
         self.props_tabs.addTab(self._build_props(), "선택한 대상")
         self.props_tabs.addTab(self._scrolled(whole), "그림 전체")
         self.props_tabs.setMinimumWidth(280)
-        split = QtWidgets.QSplitter()
+        from .ui.hig_widgets import PaneSplitter
+
+        def boxed(w, name):
+            box = QtWidgets.QWidget()
+            box.setObjectName(name)
+            box.setAttribute(Qt.WA_StyledBackground, True)
+            lay = QtWidgets.QVBoxLayout(box)
+            lay.setContentsMargins(12, 10, 12, 10)
+            lay.addWidget(w)
+            return box
+
+        split = PaneSplitter()  # add tools on the window's base | preview box | properties box
         split.addWidget(scroll)
-        split.addWidget(self.right)
-        split.addWidget(self.props_tabs)
+        split.addWidget(boxed(self.right, "hig_content"))
+        split.addWidget(boxed(self.props_tabs, "hig_inspector"))
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 2)
         split.setStretchFactor(2, 1)
@@ -1799,6 +1826,8 @@ class FigureEditor(QtWidgets.QWidget):
                 v = np.asarray(v, float)
                 if d.basis:  # per group of a grouping set: under the lanes of each group's target boxes
                     v = core.group_values_on_lanes(a, d.basis, v)
+                else:  # marker / excluded lanes are not in the results: keep every value under its own lane
+                    v = core.lanes_from_results(a, v)
                 out.append((f"res:{name}", name + (f" [{d.basis}]" if d.basis else ""), v))
         for ri, r in enumerate(a.rows):
             out.append((f"net:{r.name}", f"{r.name} (Net, raw)", core.row_vector(a, d.measurements, ri)))
@@ -1915,7 +1944,10 @@ class FigureEditor(QtWidgets.QWidget):
         out = []
         n_lanes = len(self.s["lanes"])
         for i, n in enumerate(self.s.get("numbers", [])):
-            v = values.get(n.get("source"))
+            key = _number_key(n.get("source"), values)
+            if key != n.get("source") and key in values:
+                n["source"] = key  # an older row now points at the renamed value
+            v = values.get(key)
             if v is None:
                 continue
             v = np.concatenate([v, np.full(max(0, n_lanes - v.size), np.nan)])[:n_lanes]
@@ -2049,14 +2081,14 @@ class FigureEditor(QtWidgets.QWidget):
         self.render()
         self.main.save_figure_file(self.fig, p, int(dpi or self.w_dpi.value()), tight=False)
 
-    def numbers_table(self):
+    def numbers_table(self):  # noqa: C901
         """The numbers rows of the figure as they are shown: (header, rows) per lane."""
         values = {key: v for key, _, v in self.number_sources()}
         lanes = self.s.get("lanes", [])
         header = ["레인", "레인 이름"]
         cols = []
         for n in self.s.get("numbers", []):
-            v = values.get(n.get("source"))
+            v = values.get(_number_key(n.get("source"), values))
             if v is None:
                 continue
             v = np.concatenate([v, np.full(max(0, len(lanes) - v.size), np.nan)])[: len(lanes)]
@@ -2108,7 +2140,9 @@ class FigureWindow(QtWidgets.QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, tb)
         self.setUnifiedTitleAndToolBarOnMac(True)
         self.sub = QtWidgets.QLabel()
-        self.sub.setStyleSheet("color: rgba(60,60,67,0.6); padding-left: 6px;")
+        from .ui import theme as _theme
+
+        _theme.hint(self.sub)
         tb.addWidget(self.sub)
         sp = QtWidgets.QWidget()
         sp.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
@@ -2119,13 +2153,6 @@ class FigureWindow(QtWidgets.QMainWindow):
         sp = QtWidgets.QWidget()
         sp.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         tb.addWidget(sp)
-        tb.addAction("−", lambda: editor.zoom_preview(0.8)).setToolTip("축소 ( ] )")
-        self.zoom_label = QtWidgets.QLabel("100%")
-        self.zoom_label.setFixedWidth(46)
-        self.zoom_label.setAlignment(Qt.AlignCenter)
-        tb.addWidget(self.zoom_label)
-        tb.addAction("+", lambda: editor.zoom_preview(1.25)).setToolTip("확대 ( [ )")
-        tb.addSeparator()
         b = QtWidgets.QToolButton()
         b.setText("내보내기")
         b.setPopupMode(QtWidgets.QToolButton.InstantPopup)
@@ -2138,8 +2165,9 @@ class FigureWindow(QtWidgets.QMainWindow):
         m.addAction("여러 개 골라서 내보내기…", main.open_export_dialog).setShortcut("Ctrl+E")
         b.setMenu(m)
         tb.addWidget(b)
+        editor.setObjectName("hig_sidebar")  # the window's base around the preview and properties boxes
+        editor.setAttribute(Qt.WA_StyledBackground, True)
         self.setCentralWidget(editor)
-        editor.zoomChanged.connect(lambda k: self.zoom_label.setText(f"{k * 100:.0f}%"))
 
     def set_layout(self, kind):
         self.editor.w_layout.setCurrentIndex(max(0, self.editor.w_layout.findData(kind)))

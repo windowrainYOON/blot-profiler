@@ -62,7 +62,7 @@ TOKENS = {
         'red': '#d70015', 'orange': '#ff8d28', 'green': '#248a3d', 'blue': '#0066cc',
         'gray': '#8e8e93', 'gray-3': '#c7c7cc', 'gray-5': '#e5e5ea',
         'background': '#ffffff', 'background-secondary': '#f2f2f7',
-        'region-base': '#ffffff', 'region-canvas': '#f5f5f7', 'region-box': '#ffffff',
+        'region-base': '#e3e3e8', 'region-canvas': '#f2f2f7', 'region-box': '#ffffff', 'region-inspector': '#f2f2f7',
         'background-tertiary': '#ffffff',
         'label': '#000000', 'label-secondary': '#3c3c4399', 'label-tertiary': '#3c3c434d',
         'placeholder': '#3c3c434d', 'separator': '#3c3c434a', 'separator-opaque': '#c6c6c8',
@@ -78,7 +78,7 @@ TOKENS = {
         'red': '#ff4245', 'orange': '#ff9230', 'green': '#30d158', 'blue': '#0091ff',
         'gray': '#8e8e93', 'gray-3': '#48484a', 'gray-5': '#2c2c2e',
         'background': '#000000', 'background-secondary': '#1c1c1e',
-        'region-base': '#0e0e10', 'region-canvas': '#18181b', 'region-box': '#1f1f22',
+        'region-base': '#262628', 'region-canvas': '#303032', 'region-box': '#1f1f22', 'region-inspector': '#3a3a3c',
         'background-tertiary': '#2c2c2e',
         'label': '#ffffff', 'label-secondary': '#ebebf599', 'label-tertiary': '#ebebf54d',
         'placeholder': '#ebebf54d', 'separator': '#54545899', 'separator-opaque': '#38383a',
@@ -165,16 +165,17 @@ INSPECTOR_MARGINS = (REGION_MARGIN,) * 4
 CONTENT_MARGINS = (REGION_MARGIN,) * 4
 SHADE_W = 96  # width of the (unused since v0.58) sidebar shade on the canvas
 REGION_GAP = 24  # gap-section: between a region's header and its content
-BOX_RADIUS = 0  # regions meet edge to edge (spec §1: tone, no boxes)
-BOX_GAP = 0  # no gap between the regions
+BOX_RADIUS = 16  # the floating canvas / inspector boxes
+BOX_GAP = 10  # space around them (window edge, between the boxes)
 # token name, or (white, alpha) for the see-through (glass) variant
 _REGIONS = {
     # inspector in the light grey of the pages (owner choice 2026-11-10: no white box)
-    # Blot Profiler 1.0 (spec §1): white sidebar, #f5f5f7 canvas, white inspector; tone, no lines
+    # Blot Profiler 1.0.1 (owner, after the Cytosol Viewer screenshot): the sidebar is the window's
+    # base; canvas and inspector float on it as rounded boxes
     ('light', False): {'sidebar': 'region-base', 'canvas': 'region-canvas',
-                       'inspector': 'region-box', 'shade': 0.0},
-    ('dark', False): {'sidebar': 'region-box', 'canvas': 'region-canvas',
-                      'inspector': 'region-box', 'shade': 0.0},
+                       'inspector': 'region-inspector', 'shade': 0.0},
+    ('dark', False): {'sidebar': 'region-base', 'canvas': 'region-canvas',
+                      'inspector': 'region-inspector', 'shade': 0.0},
     # glass: the sidebar adds no tint of its own, so it is the very material
     # the title bar shows (one colour from the window top down, v0.58.1)
     ('light', True): {'sidebar': 0.0, 'canvas': 0.55, 'inspector': 0.80, 'shade': 0.0},

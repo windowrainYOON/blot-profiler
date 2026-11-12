@@ -283,7 +283,7 @@ class BlotView(QtWidgets.QGraphicsView):
         self.setRenderHints(QtGui.QPainter.Antialiasing | QtGui.QPainter.SmoothPixmapTransform)
         self.setDragMode(QtWidgets.QGraphicsView.RubberBandDrag)
         self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
-        self.setBackgroundBrush(QtGui.QColor("#f5f5f7"))
+        self.setBackgroundBrush(theme.region_color("canvas"))
         self.setAcceptDrops(True)
         self.viewport().setAcceptDrops(True)
         self.pix_item: Optional[QtWidgets.QGraphicsPixmapItem] = None
@@ -454,6 +454,9 @@ class BlotView(QtWidgets.QGraphicsView):
     PROT_RED = "#d70015"
     MARK_ORANGE = "#ff9f0a"
     HIT = 7  # px
+
+    def refresh_theme(self):
+        self.setBackgroundBrush(theme.region_color("canvas"))
 
     def set_tool(self, tool: str):
         self.tool = tool
@@ -2094,8 +2097,9 @@ class MainWindow(QtWidgets.QMainWindow):
         il.addWidget(self.inspector)
         insp.setFixedWidth(372)
 
-        split = QtWidgets.QSplitter()
-        split.setHandleWidth(0)
+        from .ui.hig_widgets import PaneSplitter
+
+        split = PaneSplitter()  # sidebar = the window's base; canvas and inspector float as rounded boxes
         split.setChildrenCollapsible(False)
         self.split = split
         split.addWidget(self.sidebar)
@@ -2114,10 +2118,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.laneMenu.connect(self.show_lane_menu)
         self.view.proteinMenu.connect(self.show_protein_menu)
         self.view.toolHint.connect(lambda m: self.statusBar().showMessage(m))
-        self.view.zoomChanged.connect(lambda k: self.zoom_label.setText(f"{k * 100:.0f}%"))
+        self.zoom_chip = controls.ZoomChip(self.view, lambda: self.view.zoom(0.8), lambda: self.view.zoom(1.25), self.view.fit)
+        self.view.zoomChanged.connect(self.zoom_chip.set_zoom)
         self.set_step(0)
         self._build_menu()
-        self._build_toolbar()
         self.statusBar().showMessage("TIF 파일을 열어 시작하세요 (파일 → 열기 또는 창에 끌어다 놓기)")
         self.setAcceptDrops(True)
 
@@ -2868,40 +2872,29 @@ class MainWindow(QtWidgets.QMainWindow):
         act = m.addAction("설정…", self.open_settings)
         act.setShortcut(QtGui.QKeySequence.Preferences)
         act.setMenuRole(QtGui.QAction.NoRole)  # stays in the File menu on macOS too
-        fm = self.menuBar().addMenu("창")
-        fm.addAction("정량·그래프 창", self.open_quant_window).setShortcut("Ctrl+G")
-        fm.addAction("Figure 창", self.open_figure_window).setShortcut("Ctrl+Shift+F")
+        qm = self.menuBar().addMenu("정량·그래프")
+        qm.addAction("정량·그래프 창 열기", self.open_quant_window).setShortcut("Ctrl+G")
+        qm.addSeparator()
+        for key, text in (("bands", "밴드 값"), ("quant", "정량"), ("multi", "여러 이미지")):
+            qm.addAction(text, lambda k=key: self.open_quant_window(k))
+        qm.addSeparator()
+        qm.addAction("측정 다시 하기", lambda: self.quant_win.remeasure())
+        qm.addAction("이 그래프의 데이터 (CSV)…", self.export_graph_csv)
+        qm.addAction("그래프 이미지…", lambda: self.export_plot())
+        fg = self.menuBar().addMenu("Figure")
+        fg.addAction("Figure 창 열기", self.open_figure_window).setShortcut("Ctrl+Shift+F")
+        fg.addSeparator()
+        fg.addAction("레인별 자르기", lambda: (self.open_figure_window(), self.fig_win.layout_seg.set_value("rows", emit=True)))
+        fg.addAction("Full blot", lambda: (self.open_figure_window(), self.fig_win.layout_seg.set_value("full", emit=True)))
+        fg.addSeparator()
+        fg.addAction("Figure 이미지…", self.export_figure)
+        fg.addAction("Figure에 쓰인 데이터 (CSV)…", self.export_figure_numbers)
         v = self.menuBar().addMenu("보기")
         v.addAction("창에 맞추기", self.view.fit).setShortcut("Ctrl+0")
         v.addAction("확대", lambda: self.view.zoom(1.25)).setShortcut(QtGui.QKeySequence.ZoomIn)
         v.addAction("축소", lambda: self.view.zoom(0.8)).setShortcut(QtGui.QKeySequence.ZoomOut)
         h = self.menuBar().addMenu("도움말")
         h.addAction("사용법", self.show_help)
-
-    def _build_toolbar(self):
-        """Window toolbar (spec §1): zoom, the result windows."""
-        tb = QtWidgets.QToolBar("도구")
-        tb.setObjectName("mainBar")
-        tb.setMovable(False)
-        tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        tb.setIconSize(QtCore.QSize(16, 16))
-        sp = QtWidgets.QWidget()
-        sp.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
-        tb.addWidget(sp)
-        for text, tip, fn in (("−", "축소 ( ] )", lambda: self.view.zoom(0.8)),):
-            tb.addAction(text, fn).setToolTip(tip)
-        self.zoom_label = QtWidgets.QLabel("100%")
-        self.zoom_label.setFixedWidth(46)
-        self.zoom_label.setAlignment(Qt.AlignCenter)
-        tb.addWidget(self.zoom_label)
-        tb.addAction("+", lambda: self.view.zoom(1.25)).setToolTip("확대 ( [ )")
-        tb.addAction(controls.icon("fit"), "화면 맞춤", self.view.fit).setToolTip("화면 맞춤 (⌘0)")
-        tb.addSeparator()
-        tb.addAction("정량·그래프 창", self.open_quant_window).setToolTip("밴드 값 · 정량 그래프 · 여러 이미지 (새 창)")
-        tb.addAction("Figure 창", self.open_figure_window).setToolTip("논문용 Figure (새 창)")
-        self.addToolBar(Qt.TopToolBarArea, tb)
-        self.setUnifiedTitleAndToolBarOnMac(True)
-        self.main_bar = tb
 
     # ---------------------------------------------------------------- tab 1
     def _build_detect_tab(self):
@@ -3217,14 +3210,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_scroll = QtWidgets.QScrollArea()
         self.plot_scroll.setWidgetResizable(True)
         self.plot_scroll.setWidget(self.plot)
-        self.plot_scroll.setStyleSheet("QScrollArea { background: white; border-radius: 4px; }")
+        self.plot_scroll.setStyleSheet("QScrollArea { background: white; border-radius: 6px; }")
+        self.plot_scroll.setMinimumSize(460, 340)  # smaller and the axis titles would not fit
         gl.addWidget(self.plot_scroll, 1)
         self.graph_editor = self._build_graph_editor()
-        top = QtWidgets.QWidget()
-        tl = QtWidgets.QHBoxLayout(top)
-        tl.setContentsMargins(0, 0, 0, 0)
-        tl.addWidget(gw, 1)
-        tl.addWidget(self.graph_editor)
+        top = gw
 
         # data table
         bottom = QtWidgets.QWidget()
@@ -3255,12 +3245,17 @@ class MainWindow(QtWidgets.QMainWindow):
         canvas.setObjectName("hig_content")
         canvas.setAttribute(Qt.WA_StyledBackground, True)
         QtWidgets.QVBoxLayout(canvas).addWidget(right)
-        canvas.layout().setContentsMargins(0, 0, 0, 0)
-        root = QtWidgets.QSplitter(Qt.Horizontal)
-        root.setHandleWidth(0)
+        canvas.layout().setContentsMargins(4, 4, 4, 4)
+        from .ui.hig_widgets import PaneSplitter
+
+        root = PaneSplitter()  # sidebar on the base | graph + table box | editor box
+        root.setChildrenCollapsible(False)
         root.addWidget(side_scroll)
         root.addWidget(canvas)
+        root.addWidget(self.graph_editor)
+        root.setStretchFactor(0, 0)
         root.setStretchFactor(1, 1)
+        root.setStretchFactor(2, 0)
         self.results_title = QtWidgets.QLabel()  # (kept for older code paths)
         self.by_condition = QtWidgets.QCheckBox()
         self.by_condition.setChecked(True)

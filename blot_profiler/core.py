@@ -1022,6 +1022,28 @@ def basis_view(a: Analysis, meas: List[Measurement], sname: Optional[str]):
     return v, vm
 
 
+def kept_lanes(a: Analysis) -> Optional[List[int]]:
+    """Physical lanes kept in the results when marker / excluded lanes leave them (in order),
+    or None when every lane is kept."""
+    out = [i for i, r in enumerate(a.lane_roles[: a.n_lanes]) if r != LANE_SAMPLE]
+    if not out or a.ladder_row:
+        return None
+    return [i for i in range(a.n_lanes) if i not in out]
+
+
+def lanes_from_results(a: Analysis, values) -> np.ndarray:
+    """Values per result lane back on the physical lanes (blank where a lane left the results)."""
+    values = np.atleast_1d(np.asarray(values, float))
+    keep = kept_lanes(a)
+    if keep is None:
+        return values
+    out = np.full(a.n_lanes, np.nan)
+    for j, lane in enumerate(keep):
+        if j < values.size:
+            out[lane] = values[j]
+    return out
+
+
 def group_values_on_lanes(a: Analysis, sname: str, values) -> np.ndarray:
     """Group values of a set placed under the physical lanes of each group's target boxes
     (for numbers under the lanes in the figure)."""

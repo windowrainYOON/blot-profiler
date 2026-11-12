@@ -132,3 +132,40 @@ def test_windows_and_canvas_tools(tmp_path):
     w.figure_editor.render()
     texts = [t["key"] for t in w.figure_editor.preview.layout_["texts"]]
     assert any(k_.startswith("protein:") for k_ in texts)
+
+
+def test_figure_numbers_old_names_and_dropped_lanes():
+    from blot_profiler.figure_window import _number_key
+
+    values = {"res:P2 ÷ P1": 1, "net:P1": 2}
+    assert _number_key("res:P2/P1", values) == "res:P2 ÷ P1"
+    assert _number_key("net:P1", values) == "net:P1"
+    a = core.Analysis(rows=[core.Row("C", 10, 6)])
+    a.bands = [core.Band(0, l, 20 + 30 * l, 50) for l in range(4)]
+    a.ensure_lane_labels()
+    core.sync_lane_roles(a)
+    a.lane_roles[1] = core.LANE_EXCLUDE
+    out = core.lanes_from_results(a, [1.0, 3.0, 4.0])
+    assert np.isnan(out[1]) and list(out[[0, 2, 3]]) == [1.0, 3.0, 4.0]
+
+
+def test_graph_fits_small_canvas():
+    import matplotlib
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    from blot_profiler import graph
+
+    labels = ["DMSO", "DMSO", "Drug 1 µM", "Drug 1 µM", "Drug 10 µM", "Drug 10 µM"]
+    fig = Figure(figsize=(4.6, 3.4), dpi=100)
+    FigureCanvasAgg(fig)
+    graph.plot_series(fig, {"A ÷ B": np.arange(6) + 1.0, "C ÷ B": np.arange(6) * 0.5 + 1}, labels, labels, True,
+                      "Relative intensity", graph.style())
+    r = fig.canvas.get_renderer()
+    fig.draw(r)
+    fb = fig.bbox
+    ax = fig.axes[0]
+    for art in [ax.get_legend(), ax.yaxis.label] + list(ax.get_xticklabels()):
+        e = art.get_window_extent(r)
+        assert e.x0 >= fb.x0 - 1 and e.x1 <= fb.x1 + 1 and e.y0 >= fb.y0 - 1 and e.y1 <= fb.y1 + 1
+    assert matplotlib  # (imported for the backend)
