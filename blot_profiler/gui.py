@@ -24,6 +24,7 @@ from . import core  # noqa: E402
 from . import figure  # noqa: E402
 from . import project as projfile  # noqa: E402
 from . import lanes  # noqa: E402
+from . import graph, prefs  # noqa: E402
 from . import __version__  # noqa: E402
 
 
@@ -601,7 +602,7 @@ class PlotCanvas(QtWidgets.QWidget):
     def __init__(self, parent=None, aspect: Optional[float] = None):
         super().__init__(parent)
         self.aspect = aspect
-        self.fig = Figure(figsize=(4, 3) if aspect else (5, 3.5), tight_layout=True)
+        self.fig = Figure(figsize=(4, 3) if aspect else (5, 3.5))
         self.canvas = FigureCanvasQTAgg(self.fig)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         lay = QtWidgets.QVBoxLayout(self)
@@ -621,86 +622,25 @@ class PlotCanvas(QtWidgets.QWidget):
                 th = self.toolbar.sizeHint().height() if self.toolbar.isVisible() else 0
                 self.setFixedHeight(h + th)
 
+    style_fn = None  # () -> graph style (File → 설정 defaults + the sidebar choices)
+
+    def _style(self):
+        return self.style_fn() if self.style_fn else graph.style()
+
     def plot(self, series: Dict[str, np.ndarray], labels: List[str], conditions: List[str], by_condition: bool,
              ylabel: str, show_points: bool = True, title: str = ""):
-        self.fig.clear()
-        ax = self.fig.add_subplot(111)
-        if not series:
-            ax.text(0.5, 0.5, "표시할 결과가 없습니다", ha="center", va="center", transform=ax.transAxes)
-            ax.set_axis_off()
-            self.canvas.draw_idle()
-            return
-        names = list(series)
-        n_series = len(names)
-        width = 0.8 / n_series
-        colors = matplotlib.rcParams["axes.prop_cycle"].by_key()["color"]
-        xt_labels = None
-        for si, name in enumerate(names):
-            vals = np.atleast_1d(np.asarray(series[name], float))
-            color = colors[si % len(colors)]
-            if vals.size == 1:
-                x = np.array([0.0])
-                ax.bar(x + (si - (n_series - 1) / 2) * width, vals, width * 0.95, label=name, color=color)
-                xt_labels = xt_labels or ["값"]
-                continue
-            if by_condition:
-                cnames, means, sds, ns = core.condition_stats(vals, conditions, labels)
-                x = np.arange(len(cnames), dtype=float) + (si - (n_series - 1) / 2) * width
-                ax.bar(x, means, width * 0.95, yerr=np.where(np.array(ns) > 1, sds, 0), capsize=3, label=name, color=color, alpha=0.85)
-                if show_points:
-                    for ci, cn in enumerate(cnames):
-                        idx = [i for i in range(len(vals)) if ((conditions[i].strip() if i < len(conditions) else "") or labels[i]) == cn]
-                        pts = vals[idx]
-                        jitter = np.linspace(-width * 0.2, width * 0.2, len(pts)) if len(pts) > 1 else [0]
-                        ax.scatter(x[ci] + np.asarray(jitter), pts, s=12, color="k", zorder=3)
-                xt_labels = cnames
-            else:
-                x = np.arange(len(vals), dtype=float) + (si - (n_series - 1) / 2) * width
-                ax.bar(x, vals, width * 0.95, label=name, color=color)
-                xt_labels = labels[: len(vals)]
-        if xt_labels:
-            ax.set_xticks(np.arange(len(xt_labels)))
-            ax.set_xticklabels(xt_labels, rotation=45 if max(len(s) for s in xt_labels) > 6 else 0, ha="right" if max(len(s) for s in xt_labels) > 6 else "center")
-        ax.set_ylabel(ylabel)
-        if title:
-            ax.set_title(title)
-        ax.spines[["top", "right"]].set_visible(False)
-        if n_series > 1 or names[0]:
-            ax.legend(frameon=False, fontsize=8)
+        st = self._style()
+        if not show_points and st.get("kind") == "bar_points":
+            st["kind"] = "bars"
+        graph.plot_series(self.fig, series, labels, conditions, by_condition, ylabel, st, title)
         self.canvas.draw_idle()
-
 
     def plot_bars(self, keys: List[str], series: Dict[str, Dict[str, object]], ylabel: str, show_points: bool = True):
         """Bars over named lanes; ``series[name]`` has mean, sd (or None) and points (per-image values or None)."""
-        self.fig.clear()
-        ax = self.fig.add_subplot(111)
-        if not series or not keys:
-            ax.text(0.5, 0.5, "표시할 결과가 없습니다", ha="center", va="center", transform=ax.transAxes)
-            ax.set_axis_off()
-            self.canvas.draw_idle()
-            return
-        colors = matplotlib.rcParams["axes.prop_cycle"].by_key()["color"]
-        n_series = len(series)
-        width = 0.8 / n_series
-        scalar = all(np.size(s["mean"]) == 1 for s in series.values())
-        for si, (name, s) in enumerate(series.items()):
-            mean = np.atleast_1d(np.asarray(s["mean"], float))
-            x = np.arange(mean.size, dtype=float) + (si - (n_series - 1) / 2) * width
-            sd = s.get("sd")
-            yerr = None if sd is None else np.where(np.asarray(s["n"]) > 1, sd, 0)
-            ax.bar(x, mean, width * 0.95, yerr=yerr, capsize=3, label=name, color=colors[si % len(colors)], alpha=0.85)
-            pts = s.get("points")
-            if show_points and pts:
-                for pi, p in enumerate(pts):
-                    off = (pi - (len(pts) - 1) / 2) * width * 0.4 / max(len(pts), 1)
-                    ax.scatter(x[: len(p)] + off, p[: mean.size], s=12, color="k", zorder=3)
-        labels = ["값"] if scalar else list(keys)
-        ax.set_xticks(np.arange(len(labels)))
-        long = max(len(k) for k in labels) > 6
-        ax.set_xticklabels(labels, rotation=45 if long else 0, ha="right" if long else "center")
-        ax.set_ylabel(ylabel)
-        ax.spines[["top", "right"]].set_visible(False)
-        ax.legend(frameon=False, fontsize=8)
+        st = self._style()
+        if not show_points and st.get("kind") == "bar_points":
+            st["kind"] = "bars"
+        graph.plot_summary(self.fig, keys, series, ylabel, st)
         self.canvas.draw_idle()
 
 
@@ -721,23 +661,27 @@ def tokenize(expr: str) -> List[str]:
     return _TOKEN_RE.findall(expr or "")
 
 
-class FormulaDialog(QtWidgets.QDialog):
-    """Edit a formula without typing names.
+class FormulaEditor(QtWidgets.QWidget):
+    """Edit a formula without typing names (used in the graph sidebar and in a dialog).
 
     ``terms`` is ``[(category, [(label, token), ...]), ...]``; ``variables`` is
-    used for the live preview.
+    used for the live preview. ``validChanged`` tells whether the formula can be
+    used, ``submitted`` is Enter on a valid formula.
     """
 
-    def __init__(self, parent, title: str, terms, variables, formula: Optional[dict] = None):
+    validChanged = QtCore.Signal(bool)
+    submitted = QtCore.Signal()
+    QUICK = 16  # names of the first category (proteins) also as buttons
+
+    def __init__(self, parent, terms, variables, formula: Optional[dict] = None, compact: bool = False):
         super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setMinimumWidth(620)
         self.terms = [(c, items) for c, items in terms if items]
         self.variables = variables
         formula = formula or {}
         self.tokens: List[str] = tokenize(str(formula.get("expr", "")))
 
         lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
         f = QtWidgets.QFormLayout()
         self.name = QtWidgets.QLineEdit(str(formula.get("name", "")))
         f.addRow("이름", self.name)
@@ -748,38 +692,58 @@ class FormulaDialog(QtWidgets.QDialog):
         font = self.display.font()
         font.setPointSizeF(font.pointSizeF() * 1.3)
         self.display.setFont(font)
-        self.display.setPlaceholderText("아래에서 항목을 넣고, + - * / ( ) 는 키보드나 버튼으로 입력하세요")
+        self.display.setPlaceholderText("항목을 누르고, + - * / ( ) 와 숫자는 키보드나 버튼으로")
         self.display.installEventFilter(self)
         lay.addWidget(self.display)
 
+        if self.terms:  # proteins as buttons: one click puts the name in
+            cap = QtWidgets.QLabel(f"{self.terms[0][0]} — 눌러서 넣기")
+            cap.setStyleSheet("color: #555; font-size: 11px;")
+            lay.addWidget(cap)
+            grid = QtWidgets.QGridLayout()
+            cols = 3 if compact else 6
+            for i, (label, tok) in enumerate(self.terms[0][1][: self.QUICK]):
+                b = QtWidgets.QPushButton(label)
+                b.setFocusPolicy(Qt.NoFocus)
+                b.setToolTip(tok)
+                b.clicked.connect(lambda _=None, t=tok: self.push(t))
+                grid.addWidget(b, i // cols, i % cols)
+            lay.addLayout(grid)
         hb = QtWidgets.QHBoxLayout()
         for label, tok in (("+", "+"), ("−", "-"), ("×", "*"), ("÷", "/"), ("(", "("), (")", ")")):
             b = QtWidgets.QPushButton(label)
-            b.setFixedWidth(44)
+            b.setFixedWidth(34 if compact else 44)
             b.setFocusPolicy(Qt.NoFocus)
             b.clicked.connect(lambda _=None, t=tok: self.push(t))
             hb.addWidget(b)
-        hb.addSpacing(12)
-        b = QtWidgets.QPushButton("⌫ 지우기")
+        b = QtWidgets.QPushButton("⌫")
+        b.setToolTip("하나 지우기")
+        b.setFixedWidth(34 if compact else 44)
         b.setFocusPolicy(Qt.NoFocus)
         b.clicked.connect(self.pop)
         hb.addWidget(b)
-        b = QtWidgets.QPushButton("모두 지우기")
+        b = QtWidgets.QPushButton("C" if compact else "모두 지우기")
+        b.setToolTip("모두 지우기")
+        if compact:
+            b.setFixedWidth(34)
         b.setFocusPolicy(Qt.NoFocus)
         b.clicked.connect(self.clear)
         hb.addWidget(b)
         hb.addStretch(1)
         lay.addLayout(hb)
 
-        g = QtWidgets.QGroupBox("항목 넣기")
-        gl = QtWidgets.QHBoxLayout(g)
+        g = QtWidgets.QGroupBox("다른 항목 넣기 (밴드 값 등)")
+        gl = QtWidgets.QVBoxLayout(g) if compact else QtWidgets.QHBoxLayout(g)
         self.category = QtWidgets.QComboBox()
         for c, _ in self.terms:
             self.category.addItem(c)
         self.category.currentIndexChanged.connect(self.fill_terms)
         gl.addWidget(self.category)
         self.term = QtWidgets.QComboBox()
-        self.term.setMinimumWidth(220)
+        self.term.setMinimumWidth(80 if compact else 220)
+        if compact:
+            self.category.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            self.term.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         gl.addWidget(self.term, 1)
         b = QtWidgets.QPushButton("넣기")
         b.setDefault(False)
@@ -794,16 +758,9 @@ class FormulaDialog(QtWidgets.QDialog):
         self.preview = QtWidgets.QLabel()
         self.preview.setWordWrap(True)
         lay.addWidget(self.preview)
-        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        for btn in bb.buttons():
-            btn.setAutoDefault(False)
-        self.ok = bb.button(QtWidgets.QDialogButtonBox.Ok)
-        lay.addWidget(bb)
+        self.valid = False
         self.fill_terms()
         self.refresh()
-        self.display.setFocus()
 
     def fill_terms(self, *_):
         self.term.clear()
@@ -850,8 +807,8 @@ class FormulaDialog(QtWidgets.QDialog):
                 self.pop()
                 return True
             if key in (Qt.Key_Return, Qt.Key_Enter):
-                if self.ok.isEnabled():
-                    self.accept()
+                if self.valid:
+                    self.submitted.emit()
                 return True
             return True  # letters are not typed: pick names from the list
         return super().eventFilter(obj, e)
@@ -870,7 +827,7 @@ class FormulaDialog(QtWidgets.QDialog):
         self.display.setText(expr)
         if not expr:
             self.preview.setText("")
-            self.ok.setEnabled(False)
+            self._set_valid(False)
             return
         try:
             val = core.evaluate(expr, self.variables)
@@ -878,15 +835,45 @@ class FormulaDialog(QtWidgets.QDialog):
             shown = ", ".join("—" if not np.isfinite(v) else f"{v:.4g}" for v in vals[:10]) + (" …" if vals.size > 10 else "")
             self.preview.setText(f"미리보기: {shown}")
             self.preview.setStyleSheet("color: #2e7d32;")
-            self.ok.setEnabled(True)
+            self._set_valid(True)
         except Exception as e:
             self.preview.setText(f"미완성/오류: {e}")
             self.preview.setStyleSheet("color: #c0392b;")
-            self.ok.setEnabled(False)
+            self._set_valid(False)
+
+    def _set_valid(self, ok: bool):
+        self.valid = ok
+        self.validChanged.emit(ok)
 
     def result(self) -> dict:
         return {"name": self.name.text().strip() or self.expr(), "expr": self.expr(),
                 "normalize": "1" if self.normalize.isChecked() else "0"}
+
+
+class FormulaDialog(QtWidgets.QDialog):
+    """The formula editor in its own window (tab 5)."""
+
+    def __init__(self, parent, title: str, terms, variables, formula: Optional[dict] = None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(620)
+        lay = QtWidgets.QVBoxLayout(self)
+        self.editor = FormulaEditor(self, terms, variables, formula)
+        lay.addWidget(self.editor)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        for btn in bb.buttons():
+            btn.setAutoDefault(False)
+        self.ok = bb.button(QtWidgets.QDialogButtonBox.Ok)
+        self.ok.setEnabled(self.editor.valid)
+        self.editor.validChanged.connect(self.ok.setEnabled)
+        self.editor.submitted.connect(self.accept)
+        lay.addWidget(bb)
+        self.editor.display.setFocus()
+
+    def result(self) -> dict:
+        return self.editor.result()
 
 
 RAW_NOTE = ("※ 정량은 항상 원본 TIF의 raw intensity로 합니다. 표시 대비와 검출용 LUT는 정량에 쓰지 않고, "
@@ -1151,6 +1138,317 @@ class MarkerStepDialog(QtWidgets.QDialog):
             QtCore.QTimer.singleShot(0, lambda: self.set_path(urls[0]))
 
 
+class ExportDialog(QtWidgets.QDialog):
+    """File → 내보내기: choose what to save, in which form and where; several files at once."""
+
+    ITEMS = [("graph_csv", "그래프 데이터 (CSV)", "지금 그래프에 켜진 항목만 · 레인 값 + 그룹 평균·오차·n", "graph_data.csv"),
+             ("graph_img", "그래프 이미지", "지금 보이는 그래프 그대로", "graph.{fmt}"),
+             ("figure_img", "Figure 이미지", "6번 탭의 그림 (현재 이미지)", "figure.{fmt}"),
+             ("figure_csv", "Figure 숫자 데이터 (CSV)", "Figure의 숫자 줄에 들어간 값만", "figure_numbers.csv"),
+             ("results_csv", "전체 결과 (CSV)", "열린 모든 이미지의 모든 밴드·결과", "results.csv")]
+
+    def __init__(self, main):
+        super().__init__(main)
+        self.main = main
+        self.setWindowTitle("내보내기")
+        self.resize(1000, 620)
+        root = QtWidgets.QHBoxLayout(self)
+        left = QtWidgets.QVBoxLayout()
+        g = QtWidgets.QGroupBox("무엇을 내보낼까요?")
+        gl = QtWidgets.QVBoxLayout(g)
+        self.checks = {}
+        for key, name, sub, _ in self.ITEMS:
+            cb = QtWidgets.QCheckBox(name)
+            cb.setChecked(key in ("graph_csv", "graph_img"))
+            cb.setStyleSheet("font-weight: bold;")
+            cb.toggled.connect(self.refresh)
+            gl.addWidget(cb)
+            lab = QtWidgets.QLabel("      " + sub)
+            lab.setStyleSheet("color: #777;")
+            gl.addWidget(lab)
+            self.checks[key] = cb
+        left.addWidget(g)
+        g = QtWidgets.QGroupBox("어떻게")
+        f = QtWidgets.QFormLayout(g)
+        self.scope = QtWidgets.QComboBox()
+        self.scope.addItem(f"현재 이미지 ({main.doc_key(main.cur)})", "current")
+        self.scope.addItem("열린 모든 이미지 (그래프 데이터)", "all")
+        self.scope.addItem("5번 탭: 여러 이미지 비교 (그래프)", "multi")
+        self.scope.setCurrentIndex(max(0, self.scope.findData(main.graph_scope())))
+        self.scope.currentIndexChanged.connect(self.refresh)
+        f.addRow("그래프 범위", self.scope)
+        self.fmt = QtWidgets.QComboBox()
+        for k, text in prefs.IMAGE_FORMATS:
+            self.fmt.addItem(text, k)
+        self.fmt.setCurrentIndex(max(0, self.fmt.findData(main.prefs["export"].get("image_format", "png"))))
+        self.fmt.currentIndexChanged.connect(self.refresh)
+        f.addRow("이미지 형식", self.fmt)
+        self.dpi = _spin(72, 2400, int(main.prefs["figure"].get("export_dpi", 600)), 50, suffix=" dpi")
+        f.addRow("해상도", self.dpi)
+        hb = QtWidgets.QHBoxLayout()
+        self.folder = QtWidgets.QLineEdit(prefs.export_folder(main.prefs, main.image_path or ""))
+        hb.addWidget(self.folder, 1)
+        b = QtWidgets.QPushButton("폴더…")
+        b.clicked.connect(self.choose_folder)
+        hb.addWidget(b)
+        f.addRow("저장 위치", hb)
+        self.prefix = QtWidgets.QLineEdit(main._base_name())
+        self.prefix.textChanged.connect(self.refresh)
+        f.addRow("파일 이름 앞부분", self.prefix)
+        self.names = QtWidgets.QLabel()
+        self.names.setWordWrap(True)
+        self.names.setStyleSheet("color: #2e7d32;")
+        f.addRow(self.names)
+        left.addWidget(g)
+        left.addStretch(1)
+        bb = QtWidgets.QHBoxLayout()
+        bb.addStretch(1)
+        b = QtWidgets.QPushButton("취소")
+        b.clicked.connect(self.reject)
+        bb.addWidget(b)
+        self.go = QtWidgets.QPushButton()
+        self.go.setDefault(True)
+        self.go.setStyleSheet("font-weight: bold; padding: 5px 14px;")
+        self.go.clicked.connect(self.run)
+        bb.addWidget(self.go)
+        left.addLayout(bb)
+        root.addLayout(left, 5)
+        right = QtWidgets.QVBoxLayout()
+        self.preview_title = QtWidgets.QLabel()
+        self.preview_title.setStyleSheet("font-weight: bold;")
+        right.addWidget(self.preview_title)
+        self.table = QtWidgets.QTableWidget()
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        right.addWidget(self.table, 1)
+        self.note = QtWidgets.QLabel()
+        self.note.setWordWrap(True)
+        self.note.setStyleSheet("color: #777;")
+        right.addWidget(self.note)
+        root.addLayout(right, 6)
+        self.refresh()
+
+    def choose_folder(self):
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, "저장 폴더", self.folder.text())
+        if d:
+            self.folder.setText(d)
+
+    def files(self):
+        fmt = self.fmt.currentData()
+        pre = self.prefix.text().strip() or "blot"
+        return [(key, f"{pre}_{name.format(fmt=fmt)}") for key, _, _, name in self.ITEMS if self.checks[key].isChecked()]
+
+    def refresh(self, *_):
+        files = self.files()
+        self.names.setText("→ " + ", ".join(n for _, n in files) if files else "고른 항목이 없습니다")
+        self.go.setText(f"{len(files)}개 파일 내보내기")
+        self.go.setEnabled(bool(files))
+        m = self.main
+        if self.checks["graph_csv"].isChecked() or not self.checks["figure_csv"].isChecked():
+            header, rows, notes = m.graph_data(self.scope.currentData())
+            self.preview_title.setText(f"미리보기: {self.prefix.text().strip() or 'blot'}_graph_data.csv")
+            self.note.setText("맨 위에 주석(#) 줄로 남깁니다: " + " / ".join(n.lstrip("# ") for n in notes))
+        else:
+            header, rows = m.figure_editor.numbers_table() if m._figure_ready() else (["-"], [])
+            self.preview_title.setText(f"미리보기: {self.prefix.text().strip() or 'blot'}_figure_numbers.csv")
+            self.note.setText("Figure 숫자 줄의 표시 글자와 값입니다.")
+        t = self.table
+        t.clear()
+        t.setColumnCount(len(header))
+        t.setHorizontalHeaderLabels(header)
+        t.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            summary = row and row[0] == ""
+            for c, x in enumerate(row):
+                it = QtWidgets.QTableWidgetItem(str(x))
+                if summary:
+                    it.setBackground(QtGui.QColor("#f1f8e9"))
+                t.setItem(r, c, it)
+        t.resizeColumnsToContents()
+
+    def run(self):
+        m = self.main
+        folder = os.path.expanduser(self.folder.text().strip())
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError as e:
+            QtWidgets.QMessageBox.warning(self, "내보내기", f"폴더를 만들 수 없습니다: {e}")
+            return
+        files = [(k, os.path.join(folder, n)) for k, n in self.files()]
+        exist = [os.path.basename(p) for _, p in files if os.path.exists(p)]
+        if exist and QtWidgets.QMessageBox.question(self, "내보내기", "이미 있는 파일을 덮어쓸까요?\n" + "\n".join(exist)) \
+                != QtWidgets.QMessageBox.Yes:
+            return
+        scope, dpi, done, errors = self.scope.currentData(), self.dpi.value(), [], []
+        for key, p in files:
+            try:
+                if key == "graph_csv":
+                    m.write_graph_csv(p, scope)
+                elif key == "graph_img":
+                    m.save_figure_file(m._graph_canvas(scope).fig, p, dpi)
+                elif key == "figure_img":
+                    if not m._figure_ready():
+                        raise ValueError("Figure를 만들 수 없습니다")
+                    m.figure_editor.write_figure(p, dpi)
+                elif key == "figure_csv":
+                    if not m._figure_ready():
+                        raise ValueError("Figure를 만들 수 없습니다")
+                    m.figure_editor.write_numbers_csv(p)
+                elif key == "results_csv":
+                    m.write_results_csv(p)
+                done.append(os.path.basename(p))
+            except Exception as e:
+                errors.append(f"{os.path.basename(p)}: {e}")
+        m.prefs["export"]["image_format"] = self.fmt.currentData()
+        m.remember_folder(folder)
+        if errors:
+            QtWidgets.QMessageBox.warning(self, "내보내기", "일부를 저장하지 못했습니다:\n" + "\n".join(errors))
+        m.statusBar().showMessage(f"{len(done)}개 파일을 저장했습니다 ({folder}): " + ", ".join(done))
+        self.accept()
+
+
+class SettingsDialog(QtWidgets.QDialog):
+    """File → 설정: the default look of new graphs and figures, and export defaults."""
+
+    def __init__(self, main, current: dict):
+        super().__init__(main)
+        self.main = main
+        self.setWindowTitle("설정 — 그래프·Figure 기본 모양")
+        self.resize(1000, 640)
+        self.p = json.loads(json.dumps(current))
+        self.apply_figure = False
+        root = QtWidgets.QHBoxLayout(self)
+        left = QtWidgets.QVBoxLayout()
+        self.tabs = QtWidgets.QTabWidget()
+        left.addWidget(self.tabs, 1)
+        info = QtWidgets.QLabel("여기 값은 새로 만드는 그래프·Figure의 초기값입니다(이 컴퓨터에 저장). 이미 만든 Figure는 그대로이고, "
+                                "'저장하고 열린 Figure에도 적용'으로 열린 Figure도 바꿀 수 있습니다.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #777;")
+        left.addWidget(info)
+        bb = QtWidgets.QHBoxLayout()
+        b = QtWidgets.QPushButton("기본값으로 되돌리기")
+        b.clicked.connect(self.reset)
+        bb.addWidget(b)
+        bb.addStretch(1)
+        b = QtWidgets.QPushButton("저장하고 열린 Figure에도 적용")
+        b.clicked.connect(self.save_and_apply)
+        bb.addWidget(b)
+        b = QtWidgets.QPushButton("취소")
+        b.clicked.connect(self.reject)
+        bb.addWidget(b)
+        b = QtWidgets.QPushButton("저장")
+        b.setDefault(True)
+        b.setStyleSheet("font-weight: bold; padding: 5px 14px;")
+        b.clicked.connect(self.accept)
+        bb.addWidget(b)
+        left.addLayout(bb)
+        root.addLayout(left, 5)
+        right = QtWidgets.QVBoxLayout()
+        right.addWidget(QtWidgets.QLabel("<b>그래프 미리보기</b> (바꾸면 바로 반영)"))
+        self.canvas = PlotCanvas()
+        self.canvas.toolbar.setVisible(False)
+        self.canvas.style_fn = lambda: graph.style(self.p["graph"])
+        right.addWidget(self.canvas, 1)
+        root.addLayout(right, 4)
+        self.build()
+
+    def build(self):
+        self.tabs.clear()
+        g, fg, ex = self.p["graph"], self.p["figure"], self.p["export"]
+        w = QtWidgets.QWidget()
+        f = QtWidgets.QFormLayout(w)
+        f.addRow("글꼴", self._font(g, "font"))
+        for lab, key in (("축 제목 크기", "label_size"), ("눈금 글자 크기", "tick_size"), ("범례 글자 크기", "legend_size")):
+            f.addRow(lab, self._num(g, key, 4, 36, 0.5, 1, " pt"))
+        f.addRow(self._check(g, "bold", "글자 굵게"))
+        for lab, key in (("축 선 굵기", "axis_lw"), ("막대 테두리 굵기", "bar_lw"), ("오차 막대 굵기", "err_lw")):
+            f.addRow(lab, self._num(g, key, 0.2, 6, 0.1, 1, " pt"))
+        f.addRow("점 크기", self._num(g, "point_size", 2, 200, 2, 0, ""))
+        f.addRow("오차 막대 캡 길이", self._num(g, "cap", 0, 20, 1, 0, ""))
+        f.addRow("기본 형태", self._combo(g, "kind", prefs.GRAPH_KINDS))
+        f.addRow("오차 막대", self._combo(g, "err", prefs.ERRORS))
+        f.addRow("색", self._combo(g, "colors", prefs.COLOR_SCHEMES))
+        f.addRow(self._check(g, "y0", "Y축 0부터"))
+        self.tabs.addTab(self._scrolled(w), "그래프")
+        w = QtWidgets.QWidget()
+        f = QtWidgets.QFormLayout(w)
+        f.addRow("글꼴", self._font(fg, "font"))
+        for key, (label, _) in figure.FONT_CATEGORIES.items():
+            f.addRow(f"{label} 글자", self._num(fg["fonts"], key, 3, 36, 0.5, 1, " pt"))
+        f.addRow(self._check(fg, "label_bold", "단백질 이름(IB) 굵게"))
+        f.addRow("패널 테두리 굵기", self._num(fg, "frame_lw", 0, 3, 0.1, 1, " pt"))
+        f.addRow("그룹 막대 굵기", self._num(fg, "group_bar_lw", 0.2, 6, 0.1, 1, " pt"))
+        f.addRow("패널 폭", self._num(fg, "width_in", 1, 12, 0.1, 2, " in"))
+        f.addRow("패널 간격", self._num(fg, "panel_gap_in", 0, 1, 0.01, 2, " in"))
+        f.addRow("저장 해상도", self._num(fg, "export_dpi", 72, 2400, 50, 0, " dpi"))
+        self.tabs.addTab(self._scrolled(w), "Figure")
+        w = QtWidgets.QWidget()
+        f = QtWidgets.QFormLayout(w)
+        f.addRow("이미지 기본 형식", self._combo(ex, "image_format", prefs.IMAGE_FORMATS))
+        f.addRow("기본 저장 위치", self._combo(ex, "folder", prefs.FOLDERS))
+        self.tabs.addTab(self._scrolled(w), "내보내기")
+        self.preview()
+
+    @staticmethod
+    def _scrolled(w):
+        sc = QtWidgets.QScrollArea()
+        sc.setWidgetResizable(True)
+        sc.setFrameShape(QtWidgets.QFrame.NoFrame)
+        sc.setWidget(w)
+        return sc
+
+    def _num(self, d, key, lo, hi, step, dec, suffix):
+        sp = _spin(lo, hi, d.get(key, lo), step, dec if dec else None, suffix)
+        sp.valueChanged.connect(lambda v: (d.__setitem__(key, int(v) if not dec else float(v)), self.preview()))
+        return sp
+
+    def _check(self, d, key, text):
+        cb = QtWidgets.QCheckBox(text)
+        cb.setChecked(bool(d.get(key)))
+        cb.toggled.connect(lambda on: (d.__setitem__(key, on), self.preview()))
+        return cb
+
+    def _combo(self, d, key, items):
+        cb = QtWidgets.QComboBox()
+        for k, text in items:
+            cb.addItem(text, k)
+        cb.setCurrentIndex(max(0, cb.findData(d.get(key))))
+        cb.currentIndexChanged.connect(lambda _=None: (d.__setitem__(key, cb.currentData()), self.preview()))
+        return cb
+
+    def _font(self, d, key):
+        cb = QtWidgets.QComboBox()
+        cb.setEditable(True)
+        cb.addItems(["Arial", "Helvetica", "Helvetica Neue", "Times New Roman", "Calibri"])
+        cb.setCurrentText(str(d.get(key, "Arial")))
+        cb.currentTextChanged.connect(lambda t: (d.__setitem__(key, t), self.preview()))
+        return cb
+
+    def preview(self, *_):
+        m = self.main
+        series = {k: v for k, v in m.results.items() if m.series_on.get(k, True) and np.size(v) > 1}
+        if series:
+            a, _ = m.basis_of(m.doc)
+            labels = list(a.lane_labels)
+        else:  # nothing measured yet: example numbers
+            labels = ["Vehicle", "Vehicle", "Drug A", "Drug A", "Drug A", "Drug B", "Drug B", "Drug B"]
+            series = {"Target A / Control": np.array([1.0, 0.8, 1.5, 1.3, 1.2, 2.1, 1.8, 2.4]),
+                      "Target B / Control": np.array([1.0, 1.1, 0.7, 0.6, 0.9, 0.5, 0.4, 0.6])}
+        self.canvas.plot(series, labels, labels, True, "Relative intensity")
+
+    def reset(self):
+        self.p = prefs.defaults()
+        self.build()
+
+    def save_and_apply(self):
+        self.apply_figure = True
+        self.accept()
+
+    def result_prefs(self) -> dict:
+        return self.p
+
+
 class ImageDoc:
     """One opened blot image with its own boxes, settings and measurements."""
 
@@ -1205,6 +1503,8 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("Blot Profiler")
         self.resize(1400, 900)
+        self.prefs = prefs.load()  # File → 설정: default look of graphs/figures, export defaults
+        figure.set_user_defaults(self.prefs["figure"])
         self.docs: List[ImageDoc] = [ImageDoc()]
         self.cur = 0
         self.results: Dict[str, np.ndarray] = {}  # current image
@@ -1237,7 +1537,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self._scroll(self._build_detect_tab()), "1. 검출")
         self.tabs.addTab(self._scroll(self._build_rows_tab()), "2. 단백질 / 레인")
         self.tabs.addTab(self._scroll(self._build_bands_tab()), "3. 밴드")
-        self.tabs.addTab(self._build_results_tab(), "4. 정량 / 그래프")
+        self.RES_TAB = self.tabs.addTab(self._build_results_tab(), "4. 정량 / 그래프")
         self.tabs.addTab(self._build_multi_tab(), "5. 여러 이미지")
         from .figure_window import FigureEditor
 
@@ -1327,6 +1627,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._split_init = False
         self.setCentralWidget(split)
         self._build_menu()
+        self._build_toolbar()
         self.statusBar().showMessage("TIF 파일을 열어 시작하세요 (파일 → 열기 또는 창에 끌어다 놓기)")
         self.setAcceptDrops(True)
 
@@ -1440,10 +1741,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize_mode.setChecked(True)
 
     def export_figure(self):
-        ed = self.figure_editor
-        if ed.doc is not self.doc or ed.dirty:
-            ed.set_doc(self.doc)
-        ed.export()
+        if self._figure_ready():
+            self.figure_editor.export()
 
     def merge_selected(self):
         sel = self.view.selected_bands()
@@ -1477,12 +1776,18 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction("밴드 ROI·그룹 저장…", self.save_roi)
         m.addAction("밴드 ROI·그룹 불러오기 (현재 이미지에 적용)…", self.load_roi)
         m.addSeparator()
-        m.addAction("결과 CSV 내보내기…", self.export_csv)
-        m.addAction("그래프 저장 — 현재 이미지 (PNG/PDF/SVG)…", lambda: self.export_plot(self.plot))
-        m.addAction("그래프 저장 — 여러 이미지 (PNG/PDF/SVG)…", lambda: self.export_plot(self.multi_plot))
-        m.addAction("박스 표시 이미지 저장…", self.export_overlay)
+        m.addAction("내보내기… (여러 개를 한 번에)", self.open_export_dialog).setShortcut("Ctrl+E")
+        em = m.addMenu("바로 내보내기")
+        em.addAction("그래프 데이터 CSV (그래프에 쓰인 값만)…", self.export_graph_csv)
+        em.addAction("그래프 이미지…", lambda: self.export_plot())
+        em.addAction("Figure 이미지…", self.export_figure)
+        em.addAction("Figure 숫자 CSV (Figure에 들어간 숫자만)…", self.export_figure_numbers)
+        em.addAction("전체 결과 CSV (모든 밴드·결과)…", self.export_csv)
+        em.addAction("박스 표시 이미지…", self.export_overlay)
         m.addSeparator()
-        m.addAction("Figure 그림 저장 (PNG/TIFF/PDF/SVG)…", self.export_figure).setShortcut("Ctrl+E")
+        act = m.addAction("설정… (그래프·Figure 기본 모양)", self.open_settings)
+        act.setShortcut(QtGui.QKeySequence.Preferences)
+        act.setMenuRole(QtGui.QAction.NoRole)  # stays in the File menu on macOS too
         fm = self.menuBar().addMenu("Figure")
         fm.addAction("Figure 만들기 탭으로 (논문용 그림)", self.open_figure_window).setShortcut("Ctrl+Shift+F")
         v = self.menuBar().addMenu("보기")
@@ -1491,6 +1796,34 @@ class MainWindow(QtWidgets.QMainWindow):
         v.addAction("축소", lambda: self.view.zoom(0.8)).setShortcut(QtGui.QKeySequence.ZoomOut)
         h = self.menuBar().addMenu("도움말")
         h.addAction("사용법", self.show_help)
+
+    def _build_toolbar(self):
+        tb = QtWidgets.QToolBar("저장·내보내기")
+        tb.setObjectName("exportBar")
+        tb.setMovable(False)
+        tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        tb.setIconSize(QtCore.QSize(16, 16))
+        st = self.style()
+        items = [("프로젝트 저장", QtWidgets.QStyle.SP_DialogSaveButton, lambda: self.save_project(), "프로젝트 저장 (⌘S)"),
+                 None,
+                 ("그래프 데이터 CSV", QtWidgets.QStyle.SP_FileDialogDetailedView, self.export_graph_csv,
+                  "지금 그래프에 그려진 항목의 값만 CSV로 (레인 값 + 그룹 평균·오차·n)"),
+                 ("그래프 저장", QtWidgets.QStyle.SP_DesktopIcon, lambda: self.export_plot(), "보이는 그래프를 이미지로"),
+                 None,
+                 ("Figure 저장", QtWidgets.QStyle.SP_FileIcon, self.export_figure, "6번 탭의 Figure를 이미지로"),
+                 ("Figure 숫자 CSV", QtWidgets.QStyle.SP_FileDialogContentsView, self.export_figure_numbers,
+                  "Figure의 숫자 줄에 들어간 값만 CSV로"),
+                 None,
+                 ("내보내기…", QtWidgets.QStyle.SP_DialogApplyButton, self.open_export_dialog, "여러 개를 한 번에 (⌘E)")]
+        for it in items:
+            if it is None:
+                tb.addSeparator()
+                continue
+            text, icon, fn, tip = it
+            act = tb.addAction(st.standardIcon(icon), text, fn)
+            act.setToolTip(tip)
+        self.addToolBar(Qt.TopToolBarArea, tb)
+        self.export_bar = tb
 
     # ---------------------------------------------------------------- tab 1
     def _build_detect_tab(self):
@@ -1761,16 +2094,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------------------------------------------------------------- tab 4
     def _build_results_tab(self):
-        w = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout(w)
+        """Graph sidebar (normalisation, graph items, formulas, PRISM look) | graph and table."""
+        side = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(side)
         self.results_title = QtWidgets.QLabel()
-        self.results_title.setStyleSheet("font-weight: bold;")
+        self.results_title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self.results_title.setWordWrap(True)
         lay.addWidget(self.results_title)
         lay.addWidget(raw_note())
 
         g = QtWidgets.QGroupBox("Internal control 정규화")
         f = QtWidgets.QFormLayout(g)
-        self.auto_norm = QtWidgets.QCheckBox("측정(Target) 단백질 ÷ Control 단백질 자동 계산 (아래 기준의 레인/그룹마다)")
+        self.auto_norm = QtWidgets.QCheckBox("Target ÷ Control 자동 계산")
+        self.auto_norm.setToolTip("측정(Target) 단백질을 Control 단백질로 나눕니다 (아래 기준의 레인/그룹마다)")
         self.auto_norm.setChecked(True)
         self.auto_norm.toggled.connect(self.recompute_results)
         f.addRow(self.auto_norm)
@@ -1778,7 +2114,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.basis_combo.setToolTip("어떤 Control 박스로 어떤 Target 박스를 나눌지: 같은 레인끼리(기본), 또는 2번 탭에서 만든\n"
                                     "측정 묶음 세트의 그룹끼리. 결과·그래프·CSV·Figure 숫자가 이 기준을 따릅니다.")
         self.basis_combo.currentIndexChanged.connect(self.on_basis)
-        f.addRow("Control 짝짓기 기준", self.basis_combo)
+        f.addRow("짝짓기 기준", self.basis_combo)
         self.basis_msg = QtWidgets.QLabel()
         self.basis_msg.setWordWrap(True)
         f.addRow(self.basis_msg)
@@ -1788,50 +2124,110 @@ class MainWindow(QtWidgets.QMainWindow):
         f.addRow(self.ref_label, self.ref_lane)
         lay.addWidget(g)
 
-        g, self.formula_table, hb, self.formula_msg = self._formula_box(
-            "사용자 수식 (단백질 그룹 / 밴드 간 더하기·빼기·곱하기·나누기)", FORMULA_HINT)
-        self.formula_table.itemChanged.connect(self.on_formula_changed)
-        self.formula_table.cellDoubleClicked.connect(lambda r, c: self.edit_formula(r) if c == 1 else None)
-        for text, fn in (("수식 추가…", self.add_formula), ("수식 편집…", self.edit_formula), ("수식 삭제", self.delete_formula)):
-            b = QtWidgets.QPushButton(text)
-            b.clicked.connect(fn)
-            hb.addWidget(b)
-        hb.addStretch(1)
+        g = QtWidgets.QGroupBox("그래프 항목")
+        self.series_box = QtWidgets.QVBoxLayout(g)
+        self.series_box.setSpacing(2)
+        self.series_on: Dict[str, bool] = {}
         lay.addWidget(g)
 
+        g = QtWidgets.QGroupBox("수식")
+        fl = QtWidgets.QVBoxLayout(g)
+        self.add_formula_btn = QtWidgets.QPushButton("+ 수식 추가")
+        self.add_formula_btn.setStyleSheet("font-weight: bold; padding: 7px; color: #1565c0; background: #eef5ff;"
+                                           "border: 1px dashed #90caf9; border-radius: 4px;")
+        self.add_formula_btn.clicked.connect(lambda: self.open_formula_card())
+        fl.addWidget(self.add_formula_btn)
+        self.formula_card = QtWidgets.QFrame()
+        self.formula_card.setObjectName("formulaCard")
+        self.formula_card.setStyleSheet("#formulaCard { background: #eef5ff; border: 1px solid #90caf9; border-radius: 6px; }")
+        cl = QtWidgets.QVBoxLayout(self.formula_card)
+        self.formula_card_title = QtWidgets.QLabel()
+        self.formula_card_title.setStyleSheet("font-weight: bold;")
+        cl.addWidget(self.formula_card_title)
+        self.formula_editor_box = QtWidgets.QVBoxLayout()
+        cl.addLayout(self.formula_editor_box)
         hb = QtWidgets.QHBoxLayout()
-        self.by_condition = QtWidgets.QCheckBox("같은 레인 그룹 평균 ± SD")
-        self.by_condition.setToolTip("여러 열이 한 레인 그룹(반복)일 때 평균과 SD로 그립니다")
+        hb.addStretch(1)
+        b = QtWidgets.QPushButton("취소")
+        b.clicked.connect(self.close_formula_card)
+        hb.addWidget(b)
+        self.formula_ok = QtWidgets.QPushButton("그래프에 추가")
+        self.formula_ok.setStyleSheet("font-weight: bold;")
+        self.formula_ok.clicked.connect(self.accept_formula_card)
+        hb.addWidget(self.formula_ok)
+        cl.addLayout(hb)
+        self.formula_card.setVisible(False)
+        fl.addWidget(self.formula_card)
+        self.formula_editor: Optional[FormulaEditor] = None
+        self.formula_row: Optional[int] = None
+        self.formula_msg = QtWidgets.QLabel(FORMULA_HINT)
+        self.formula_msg.setWordWrap(True)
+        self.formula_msg.setStyleSheet("color: #888; font-size: 11px;")
+        fl.addWidget(self.formula_msg)
+        lay.addWidget(g)
+
+        g = QtWidgets.QGroupBox("그래프 모양 (PRISM 스타일)")
+        f = QtWidgets.QFormLayout(g)
+        gp = self.prefs["graph"]
+        self.graph_opts = {k: gp[k] for k in ("kind", "err", "colors", "y0")}
+        self.kind_combo, self.err_combo, self.color_combo = (QtWidgets.QComboBox() for _ in range(3))
+        for cb, items, key, label in ((self.kind_combo, prefs.GRAPH_KINDS, "kind", "형태"), (self.err_combo, prefs.ERRORS, "err", "오차 막대"),
+                                      (self.color_combo, prefs.COLOR_SCHEMES, "colors", "색")):
+            for k, text in items:
+                cb.addItem(text, k)
+            cb.setCurrentIndex(max(0, cb.findData(self.graph_opts[key])))
+            cb.currentIndexChanged.connect(lambda _=None, cb=cb, key=key: self.set_graph_opt(key, cb.currentData()))
+            f.addRow(label, cb)
+        self.y0_check = QtWidgets.QCheckBox("Y축 0부터")
+        self.y0_check.setChecked(bool(self.graph_opts["y0"]))
+        self.y0_check.toggled.connect(lambda on: self.set_graph_opt("y0", on))
+        f.addRow(self.y0_check)
+        self.by_condition = QtWidgets.QCheckBox("같은 레인 그룹은 평균 ± 오차 (반복 레인)")
+        self.by_condition.setToolTip("이름이 같은 레인(반복)을 묶어 평균과 오차 막대로 그리고, 점으로 각 레인을 보여 줍니다")
+        self.by_condition.setChecked(True)
         self.by_condition.toggled.connect(self.replot)
-        hb.addWidget(self.by_condition)
+        f.addRow(self.by_condition)
         self.show_points = QtWidgets.QCheckBox("개별 값 점 표시")
         self.show_points.setChecked(True)
         self.show_points.toggled.connect(self.replot)
-        hb.addWidget(self.show_points)
-        hb.addWidget(QtWidgets.QLabel("그래프 항목:"))
-        self.series_list = QtWidgets.QListWidget()
-        self.series_list.setMaximumHeight(60)
-        self.series_list.setFlow(QtWidgets.QListView.LeftToRight)
-        self.series_list.setWrapping(True)
-        self.series_list.itemChanged.connect(self.replot)
-        hb.addWidget(self.series_list, 1)
-        lay.addLayout(hb)
+        f.addRow(self.show_points)
+        lay.addWidget(g)
+        lay.addStretch(1)
+        side_scroll = self._scroll(side)
+        side_scroll.setMinimumWidth(390)
 
-        self.plot = PlotCanvas(aspect=0.75)  # 4:3, height follows the width
-        lay.addWidget(self.plot)
+        self.plot = PlotCanvas()
+        self.plot.style_fn = self.graph_style
         self.results_table = QtWidgets.QTableWidget(0, 0)
         self.results_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.results_table.setMinimumHeight(220)
-        lay.addWidget(self.results_table, 1)
-        return self._scroll(w)
+        right = QtWidgets.QSplitter(Qt.Vertical)
+        right.addWidget(self.plot)
+        right.addWidget(self.results_table)
+        right.setStretchFactor(0, 3)
+        right.setStretchFactor(1, 1)
+        root = QtWidgets.QSplitter(Qt.Horizontal)
+        root.addWidget(side_scroll)
+        root.addWidget(right)
+        root.setStretchFactor(1, 1)
+        root.setSizes([400, 900])
+        return root
+
+    def graph_style(self) -> dict:
+        return graph.style(self.prefs["graph"], **self.graph_opts)
+
+    def set_graph_opt(self, key, value):
+        self.graph_opts[key] = value
+        self.replot()
+        if hasattr(self, "multi_plot"):
+            self.replot_multi()
 
     # ---------------------------------------------------------------- figure window
     def open_figure_window(self):
         self.tabs.setCurrentIndex(self.FIG_TAB)
 
     def on_tab_changed(self, i):
-        """The figure tab gets the whole window width; the blot view returns on the other tabs."""
-        if i == self.FIG_TAB:
+        """The graph and figure tabs get the whole window width; the blot view returns on the other tabs."""
+        if i in (self.FIG_TAB, self.RES_TAB):
             if self._split_sizes is None:
                 self._split_sizes = self.split.sizes()
             total = sum(self.split.sizes())
@@ -1924,6 +2320,7 @@ class MainWindow(QtWidgets.QMainWindow):
         hb.addWidget(self.multi_series, 1)
         lay.addLayout(hb)
         self.multi_plot = PlotCanvas(aspect=0.75)
+        self.multi_plot.style_fn = self.graph_style
         lay.addWidget(self.multi_plot)
         self.multi_table = QtWidgets.QTableWidget(0, 0)
         self.multi_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
@@ -3082,7 +3479,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f["normalize"] = "1" if item.checkState() == Qt.Checked else "0"
 
     def fill_formulas(self):
-        self._fill_formula_table(self.formula_table, self.analysis.formulas)
+        self.fill_series_rows()
 
     def formula_terms(self):
         a = self.analysis
@@ -3092,42 +3489,114 @@ class MainWindow(QtWidgets.QMainWindow):
             ("밴드 (값 하나)", [(i, i) for i in ids]),
         ]
 
+    def fill_series_rows(self):
+        """Graph items: automatic Target ÷ Control series and the user's formulas, each with a checkbox."""
+        box = self.series_box
+        while box.count():
+            it = box.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        formulas = {str(f.get("name") or f.get("expr")): i for i, f in enumerate(self.analysis.formulas)}
+        if not self.results:
+            lab = QtWidgets.QLabel("결과가 없습니다 — 단백질 역할(Control/Target)을 정하거나 수식을 추가하세요")
+            lab.setWordWrap(True)
+            lab.setStyleSheet("color: #888;")
+            box.addWidget(lab)
+        for name in self.results:
+            row = QtWidgets.QWidget()
+            hl = QtWidgets.QHBoxLayout(row)
+            hl.setContentsMargins(0, 0, 0, 0)
+            cb = QtWidgets.QCheckBox(name)
+            cb.setChecked(self.series_on.get(name, True))
+            cb.toggled.connect(lambda on, n=name: (self.series_on.__setitem__(n, on), self.replot()))
+            hl.addWidget(cb, 1)
+            fi = formulas.get(name)
+            if fi is not None:
+                cb.setStyleSheet("color: #1565c0; font-weight: bold;")
+                f = self.analysis.formulas[fi]
+                sub = QtWidgets.QLabel("수식" + (" · 기준=1" if f.get("normalize", "1") == "1" else ""))
+                sub.setStyleSheet("color: #888; font-size: 11px;")
+                hl.addWidget(sub)
+                for text, tip, fn in (("✎", "수식 편집", lambda _=None, i=fi: self.open_formula_card(i)),
+                                      ("✕", "수식 삭제", lambda _=None, i=fi: self.delete_formula(i))):
+                    b = QtWidgets.QToolButton()
+                    b.setText(text)
+                    b.setToolTip(tip)
+                    b.clicked.connect(fn)
+                    hl.addWidget(b)
+            else:
+                sub = QtWidgets.QLabel("Net (Control 없음)" if name.endswith(" (Net)") else "자동: Target ÷ Control")
+                sub.setStyleSheet("color: #888; font-size: 11px;")
+                hl.addWidget(sub)
+            box.addWidget(row)
+
+    def open_formula_card(self, row: Optional[int] = None):
+        """The formula editor opens inside the sidebar (new formula, or ``row`` to edit)."""
+        a = self.analysis
+        if not self.measurements:
+            self.statusBar().showMessage("먼저 이미지를 열고 밴드를 검출하세요")
+            return
+        self.close_formula_card()
+        va, vm = self.basis_of(self.doc)
+        formula = dict(a.formulas[row]) if row is not None else {"name": f"수식{len(a.formulas) + 1}"}
+        self.formula_row = row
+        self.formula_editor = FormulaEditor(self.formula_card, self.formula_terms(), core.formula_variables(va, vm), formula,
+                                            compact=True)
+        self.formula_editor.validChanged.connect(self.formula_ok.setEnabled)
+        self.formula_editor.submitted.connect(self.accept_formula_card)
+        self.formula_editor_box.addWidget(self.formula_editor)
+        self.formula_ok.setEnabled(self.formula_editor.valid)
+        self.formula_ok.setText("저장" if row is not None else "그래프에 추가")
+        self.formula_card_title.setText("수식 편집" if row is not None else "새 수식")
+        self.formula_card.setVisible(True)
+        self.add_formula_btn.setVisible(False)
+        self.formula_editor.display.setFocus()
+
+    def close_formula_card(self):
+        if self.formula_editor is not None:
+            self.formula_editor.setParent(None)
+            self.formula_editor.deleteLater()
+            self.formula_editor = None
+        self.formula_card.setVisible(False)
+        self.add_formula_btn.setVisible(True)
+
+    def accept_formula_card(self):
+        ed = self.formula_editor
+        if ed is None or not ed.valid:
+            return
+        f = ed.result()
+        a = self.analysis
+        if self.formula_row is not None and self.formula_row < len(a.formulas):
+            a.formulas[self.formula_row] = f
+            msg = f"수식 '{f['name']}'을(를) 고쳤습니다"
+        else:
+            a.formulas.append(f)
+            msg = f"✓ '{f['name']}'을(를) 그래프에 추가했습니다"
+        self.series_on[f["name"]] = True
+        self.close_formula_card()
+        self.recompute_results()
+        self.statusBar().showMessage(msg)
+
     def _edit_formula_dialog(self, title, terms, variables, formula):
         dlg = FormulaDialog(self, title, terms, variables, formula)
         return dlg.result() if dlg.exec() == QtWidgets.QDialog.Accepted else None
 
     def add_formula(self):
-        a = self.analysis
-        f = self._edit_formula_dialog("수식 추가", self.formula_terms(), core.formula_variables(a, self.measurements),
-                                      {"name": f"수식{len(a.formulas) + 1}"})
-        if f:
-            a.formulas.append(f)
-            self.fill_formulas()
-            self.recompute_results()
+        self.open_formula_card()
 
     def edit_formula(self, row=None):
+        if row is not None and row is not False and row < len(self.analysis.formulas):
+            self.open_formula_card(row)
+
+    def delete_formula(self, row=None):
         a = self.analysis
-        if row is None or row is False:
-            rows = sorted({i.row() for i in self.formula_table.selectedIndexes()})
-            row = rows[0] if rows else None
-        if row is None or row >= len(a.formulas):
-            self.statusBar().showMessage("편집할 수식을 표에서 고르세요")
+        if row is None or row is False or row >= len(a.formulas):
             return
-        f = self._edit_formula_dialog("수식 편집", self.formula_terms(), core.formula_variables(a, self.measurements), a.formulas[row])
-        if f:
-            a.formulas[row] = f
-            self.fill_formulas()
-            self.recompute_results()
-
-    def delete_formula(self):
-        for r in sorted({i.row() for i in self.formula_table.selectedIndexes()}, reverse=True):
-            del self.analysis.formulas[r]
-        self.fill_formulas()
+        name = a.formulas[row].get("name")
+        del a.formulas[row]
+        self.close_formula_card()
         self.recompute_results()
-
-    def on_formula_changed(self, item):
-        self._formula_edit(self.analysis.formulas, item)
-        self.recompute_results()
+        self.statusBar().showMessage(f"수식 '{name}'을(를) 지웠습니다")
 
     # ---------------------------------------------------------------- measurement / results (current image)
     def measure_doc(self, d: ImageDoc):
@@ -3241,8 +3710,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.results_title.setText(f"현재 이미지: {self.doc_key(self.cur)} · {self.doc.name}")
         self.results, msgs = self.image_results(self.doc)
         self.formula_msg.setText("\n".join(msgs) if msgs else FORMULA_HINT)
-        self.formula_msg.setStyleSheet("color: #c0392b;" if msgs else "color: #888;")
-        self._fill_series_list(self.series_list, self.results)
+        self.formula_msg.setStyleSheet("color: #c0392b; font-size: 11px;" if msgs else "color: #888; font-size: 11px;")
+        self.fill_series_rows()
         self.fill_results_table()
         self.replot()
         if hasattr(self, "figure_editor") and self.tabs.currentIndex() != self.FIG_TAB:
@@ -3288,14 +3757,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def replot(self, *_):
         a, _ = self.basis_of(self.doc)
-        series = {k: self.results[k] for k in self._checked(self.series_list) if k in self.results}
+        series = {k: v for k, v in self.results.items() if self.series_on.get(k, True)}
         # don't mix scalars and lane vectors in one chart
         if any(np.size(v) > 1 for v in series.values()):
             series = {k: v for k, v in series.items() if np.size(v) > 1}
         if series and all(k.endswith(" (Net)") for k in series):
             ylabel = "Net intensity (raw)"
         else:
-            ylabel = "상대 intensity" if self.ref_of(self.doc) is not None else "정량값"
+            ylabel = "Relative intensity" if self.ref_of(self.doc) is not None else "Value"
         labels = list(a.lane_labels)
         self.plot.plot(series, labels, labels, self.by_condition.isChecked(), ylabel, self.show_points.isChecked())
 
@@ -3675,7 +4144,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "by_condition": self.by_condition.isChecked(), "show_points": self.show_points.isChecked(),
                 "multi_points": self.multi_points.isChecked(), "auto_lanes": self.auto_lanes.isChecked(),
                 "show_marker": self.show_marker.isChecked(), "ask_marker": self.ask_marker.isChecked(),
-                "auto_gel_crop": self.auto_gel_crop.isChecked(),
+                "auto_gel_crop": self.auto_gel_crop.isChecked(), "graph": dict(self.graph_opts),
             },
         }
 
@@ -3877,6 +4346,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     w.blockSignals(True)
                     w.setChecked(bool(ui[key]))
                     w.blockSignals(False)
+            self.set_graph_opts(ui.get("graph") or {})
             self.cur = min(int(ui.get("current_image", 0)), len(docs) - 1)
             self.refresh_doc_tabs()
             self.fill_multi_formulas()
@@ -3969,14 +4439,17 @@ class MainWindow(QtWidgets.QMainWindow):
         return docs, index
 
     def export_csv(self):
-        docs = self.loaded_docs()
-        if not any(d.measurements for d in docs):
+        if not any(d.measurements for d in self.loaded_docs()):
             self.statusBar().showMessage("내보낼 결과가 없습니다")
             return
-        base = os.path.splitext(self.image_path)[0] + "_quant.csv" if self.image_path else "quant.csv"
-        p, _ = QtWidgets.QFileDialog.getSaveFileName(self, "CSV 내보내기", base, "CSV (*.csv)")
-        if not p:
-            return
+        p = self._save_path("전체 결과 CSV 내보내기", "results.csv", "CSV (*.csv)")
+        if p:
+            self.write_results_csv(p)
+            self.statusBar().showMessage(f"저장했습니다: {p}")
+
+    def write_results_csv(self, p: str):
+        """Every band and every result of all open images (the full table)."""
+        docs = self.loaded_docs()
         with open(p, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
             w.writerow(["# Blot Profiler", __version__])
@@ -4054,14 +4527,151 @@ class MainWindow(QtWidgets.QMainWindow):
                     w.writerow([self.doc_key(self.docs.index(d)), fml.get("name"), fml.get("expr")])
         self.statusBar().showMessage(f"CSV 저장: {p}")
 
-    def export_plot(self, canvas=None):
-        if canvas is None:
-            canvas = self.multi_plot if self.tabs.currentIndex() == 4 else self.plot
-        base = os.path.splitext(self.image_path)[0] + "_plot.png" if self.image_path else "plot.png"
-        p, _ = QtWidgets.QFileDialog.getSaveFileName(self, "그래프 저장", base, "PNG (*.png);;PDF (*.pdf);;SVG (*.svg)")
+    # ---------------------------------------------------------------- exporting (toolbar, File → 내보내기)
+    def _base_name(self) -> str:
+        return os.path.splitext(os.path.basename(self.image_path))[0] if self.image_path else "blot"
+
+    def _save_path(self, title: str, suffix: str, filters: str) -> Optional[str]:
+        start = os.path.join(prefs.export_folder(self.prefs, self.image_path or ""), f"{self._base_name()}_{suffix}")
+        p, flt = QtWidgets.QFileDialog.getSaveFileName(self, title, start, filters)
+        if not p:
+            return None
+        if not os.path.splitext(p)[1]:
+            p += "." + flt.split("*.")[1].split()[0].rstrip(")") if "*." in flt else ""
+        self.remember_folder(os.path.dirname(p))
+        return p
+
+    def remember_folder(self, folder: str):
+        self.prefs["export"]["last_folder"] = folder
+        try:
+            prefs.save(self.prefs)
+        except OSError:
+            pass
+
+    def _image_filter(self) -> str:
+        order = [self.prefs["export"].get("image_format", "png")] + [k for k, _ in prefs.IMAGE_FORMATS]
+        seen, out = set(), []
+        for k in order:
+            if k not in seen:
+                seen.add(k)
+                out.append(f"{dict(prefs.IMAGE_FORMATS)[k]} (*.{k})")
+        return ";;".join(out)
+
+    @staticmethod
+    def save_figure_file(fig, p: str, dpi: int, tight: bool = True):
+        kw = {"pil_kwargs": {"compression": "tiff_lzw"}} if p.lower().endswith((".tif", ".tiff")) else {}
+        fig.savefig(p, dpi=dpi, facecolor="white", bbox_inches="tight" if tight else None, **kw)
+
+    def _graph_canvas(self, scope: str):
+        return self.multi_plot if scope == "multi" else self.plot
+
+    def graph_scope(self) -> str:
+        return "multi" if self.tabs.currentIndex() == 4 else "current"
+
+    def graph_data(self, scope: str = "current"):
+        """Only the numbers drawn in the graph: (header, rows, comment lines).
+        scope = 'current' (this image), 'all' (every open image, same graph items) or 'multi' (tab 5)."""
+        err = self.graph_opts.get("err", "sd")
+        if scope == "multi":
+            series = {k: self.multi_results[k] for k in self._checked(self.multi_series) if k in self.multi_results}
+            header, rows = graph.summary_table(self.multi_keys, series, err)
+            notes = [f"# 5번 탭 여러 이미지 비교 · 기준 레인: {self.multi_ref or '없음'}"]
+            return header, rows, notes
+        docs = [self.doc] if scope == "current" else [d for d in self.loaded_docs() if d.measurements]
+        shown = [k for k in self.results if self.series_on.get(k, True)]
+        header, rows, notes = None, [], []
+        for d in docs:
+            res, _ = self.image_results(d)
+            series = {k: res[k] for k in shown if k in res and np.size(res[k]) > 1}
+            a, _ = self.basis_of(d)
+            h, r = graph.series_table(series, a.lane_labels, a.lane_labels, self.by_condition.isChecked(), err)
+            ref = self.ref_of(d)
+            notes.append(f"# {self.doc_key(self.docs.index(d))}: {d.name} · 짝짓기: "
+                         f"{('묶음 세트 ' + d.basis) if d.basis else '레인'} · 기준: "
+                         f"{a.lane_labels[ref] if ref is not None and ref < len(a.lane_labels) else '정규화 안 함'}")
+            if scope == "current":
+                header, rows = h, r
+            else:
+                header = ["이미지"] + (header[1:] if header else h)
+                cols = header[1:]
+                for row in r:
+                    rows.append([self.doc_key(self.docs.index(d))] + [row[h.index(c)] if c in h else "" for c in cols])
+        return header or ["레인", "레인 그룹"], rows, notes
+
+    def write_graph_csv(self, p: str, scope: str = "current"):
+        header, rows, notes = self.graph_data(scope)
+        with open(p, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow([f"# Blot Profiler {__version__} · 그래프에 쓰인 데이터"])
+            for n in notes:
+                w.writerow([n])
+            w.writerow(header)
+            w.writerows(rows)
+
+    def export_graph_csv(self):
+        scope = self.graph_scope()
+        p = self._save_path("그래프 데이터 CSV", "graph_data.csv", "CSV (*.csv)")
         if p:
-            canvas.fig.savefig(p, dpi=300, bbox_inches="tight")
+            self.write_graph_csv(p, scope)
+            self.statusBar().showMessage(f"그래프에 쓰인 데이터를 저장했습니다: {p}")
+
+    def export_plot(self, canvas=None):
+        canvas = canvas or self._graph_canvas(self.graph_scope())
+        p = self._save_path("그래프 저장", f"graph.{self.prefs['export'].get('image_format', 'png')}", self._image_filter())
+        if p:
+            self.save_figure_file(canvas.fig, p, int(self.prefs["figure"].get("export_dpi", 600)))
             self.statusBar().showMessage(f"그래프 저장: {p}")
+
+    def _figure_ready(self) -> bool:
+        ed = self.figure_editor
+        if ed.doc is not self.doc or ed.dirty:
+            ed.set_doc(self.doc)
+        if not ed.ready():
+            self.statusBar().showMessage("Figure를 만들 이미지가 없습니다 (밴드를 먼저 검출하세요)")
+            return False
+        return True
+
+    def export_figure_numbers(self):
+        if not self._figure_ready():
+            return
+        p = self._save_path("Figure 숫자 CSV", "figure_numbers.csv", "CSV (*.csv)")
+        if p:
+            self.figure_editor.write_numbers_csv(p)
+            self.statusBar().showMessage(f"Figure에 들어간 숫자를 저장했습니다: {p}")
+
+    def open_export_dialog(self):
+        dlg = ExportDialog(self)
+        dlg.exec()
+
+    def open_settings(self):
+        dlg = SettingsDialog(self, self.prefs)
+        if dlg.exec() == QtWidgets.QDialog.Accepted:
+            self.prefs = dlg.result_prefs()
+            prefs.save(self.prefs)
+            figure.set_user_defaults(self.prefs["figure"])
+            self.set_graph_opts({k: self.prefs["graph"][k] for k in ("kind", "err", "colors", "y0")})
+            if dlg.apply_figure:
+                for d in self.docs:
+                    if d.figure is not None:
+                        figure.apply_look(d.figure)
+                self._figure_changed(self.doc)
+            self.statusBar().showMessage("설정을 저장했습니다 — 새 그래프·Figure에 적용됩니다"
+                                         + (" (열린 Figure에도 적용)" if dlg.apply_figure else ""))
+
+    def set_graph_opts(self, opts: dict):
+        for key, cb in (("kind", self.kind_combo), ("err", self.err_combo), ("colors", self.color_combo)):
+            if key in opts:
+                cb.blockSignals(True)
+                cb.setCurrentIndex(max(0, cb.findData(opts[key])))
+                cb.blockSignals(False)
+                self.graph_opts[key] = cb.currentData()
+        if "y0" in opts:
+            self.y0_check.blockSignals(True)
+            self.y0_check.setChecked(bool(opts["y0"]))
+            self.y0_check.blockSignals(False)
+            self.graph_opts["y0"] = bool(opts["y0"])
+        self.replot()
+        self.replot_multi()
 
     def export_overlay(self):
         if self.view.pix_item is None:
