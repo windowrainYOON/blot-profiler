@@ -728,6 +728,7 @@ class BlotView(QtWidgets.QGraphicsView):
                 q["x0"], q["y0"] = p.x(), p.y()
             else:
                 q["x1"], q["y1"] = p.x(), p.y()
+            q["user"] = True  # drawn or moved by hand: detection follows it from now on
             a.protein_lines[st["i"]] = q
         elif k == "pline_new":
             st["p1"] = p
@@ -2283,9 +2284,10 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(g)
 
         g, f = controls.card("단백질 선")
-        self.only_on_lines = controls.switch("", False)
-        self.only_on_lines.setToolTip("켜면 다시 검출할 때 빨간 선과 레인 선이 만나는 자리에만 박스를 놓습니다")
-        f.addRow("빨간 선 위에서만 찾기", self.only_on_lines)
+        self.extra_bands = controls.switch("", False)
+        self.extra_bands.setToolTip("빨간 선이 있으면 선 하나가 단백질 줄 하나가 되고, 박스는 레인마다 선 옆의 밴드에 맞춥니다.\n"
+                                    "켜면 빨간 선에서 떨어진 다른 밴드 줄도 자동으로 찾아 함께 넣습니다.")
+        f.addRow("빨간 선 밖의 밴드도 찾기", self.extra_bands)
         self.pline_box = QtWidgets.QVBoxLayout()
         f.addRow(self.pline_box)
         lay.addWidget(g)
@@ -2643,7 +2645,7 @@ class MainWindow(QtWidgets.QMainWindow):
         row = next((r.name for r in a.rows if r.name not in used), None)
         if row is None:
             row = core.unique_name(f"P{len(a.rows) + 1}", [r.name for r in a.rows] + list(used))
-        a.protein_lines.append({"row": row, "x0": x0, "y0": y0, "x1": x1, "y1": y1})
+        a.protein_lines.append({"row": row, "x0": x0, "y0": y0, "x1": x1, "y1": y1, "user": True})
         a.protein_lines.sort(key=lambda p: (p["y0"] + p["y1"]) / 2.0)
         self.view.rebuild_lines()
         self.refresh_lines_card()
@@ -2653,6 +2655,7 @@ class MainWindow(QtWidgets.QMainWindow):
         a = self.analysis
         if 0 <= i < len(a.protein_lines) and name and name != "(새 단백질)":
             a.protein_lines[i]["row"] = name
+            a.protein_lines[i]["user"] = True
             self.view.rebuild_lines()
             self.refresh_lines_card()
 
@@ -4717,11 +4720,13 @@ class MainWindow(QtWidgets.QMainWindow):
         user_bands = [(b.cx, b.cy, old.rows[b.row].name) for b in old.bands if getattr(b, "user", False)]
         self._tagged = ([(b.cx, b.cy, dict(b.tags)) for b in old.bands if b.tags],
                         [dict(g, groups=list(g["groups"])) for g in old.groupings])
-        if use_lines and not old.lane_lines:
+        # red protein lines: every line on '선 기준으로 다시 검출', the hand-drawn / moved ones otherwise
+        red = [dict(p) for p in old.protein_lines if use_lines or p.get("user")]
+        if use_lines and not old.lane_lines and not red:
             self.statusBar().showMessage("레인 선이 없습니다 — '레인 선 자동으로 찾기'나 레인 선 도구로 먼저 그리세요")
             return
-        if self.method_combo.currentData() == "lane" or use_lines:
-            self._detect_lane_first(corr, settings, old, user_bands, use_lines)
+        if self.method_combo.currentData() == "lane" or use_lines or red:
+            self._detect_lane_first(corr, settings, old, user_bands, use_lines and bool(old.lane_lines), red)
             return
         if self.doc.mode == core.MODE_GEL:
             a = core.detect_gel(corr, settings)
@@ -4757,16 +4762,18 @@ class MainWindow(QtWidgets.QMainWindow):
             "바로 '6. Figure 만들기'로 가거나, 밴드를 드래그로 선택 → 우클릭으로 그룹 이름·구성을 고치세요."
         )
 
-    def _detect_lane_first(self, corr, settings, old, user_bands, use_lines: bool = False):
+    def _detect_lane_first(self, corr, settings, old, user_bands, use_lines: bool = False, red=None):
         d = self.doc
-        if use_lines:
-            a = lanes.detect(corr, settings, d.mode, lane_lines=old.lane_lines, protein_lines=old.protein_lines,
-                             only_on_lines=self.only_on_lines.isChecked())
-        else:
-            a = lanes.detect(corr, settings, d.mode)
+        red = red or []
+        a = lanes.detect(corr, settings, d.mode, lane_lines=old.lane_lines if use_lines else None,
+                         protein_lines=red or None, only_on_lines=not self.extra_bands.isChecked())
         if d.mode != core.MODE_GEL:
+            role_of = {r.name: r.role for r in old.rows}
+            n_red = len(red)
             for i, r in enumerate(a.rows):  # keep the user's names and roles when re-detecting
-                if i < len(old.rows):
+                if i < n_red:  # a red-line row: named after its line, its role follows that name
+                    r.role = role_of.get(r.name, r.role)
+                elif not red and i < len(old.rows):
                     r.name = core.unique_name(old.rows[i].name, [x.name for x in a.rows[:i]])
                     r.role = old.rows[i].role
             if a.rows and not any(r.role == core.ROLE_CONTROL for r in a.rows):
@@ -4786,16 +4793,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if kept and a.method == "lane":
             core.auto_assign_lanes(a)
         self._restore_groups(a)
+        core.lines_from_analysis(a, corr.shape)
         if use_lines:  # the user's lines stay as they are
             a.lane_lines = [[list(q) for q in ln] for ln in old.lane_lines]
-            a.protein_lines = [dict(p) for p in old.protein_lines]
-        else:
-            core.lines_from_analysis(a, corr.shape)
+        if red:  # the red lines stay; rows found off them (빨간 선 밖의 밴드도 찾기) get a line of their own
+            names = {p.get("row") for p in red}
+            a.protein_lines = [dict(p) for p in red] + [p for p in a.protein_lines if p.get("row") not in names]
+            a.protein_lines.sort(key=lambda p: (p["y0"] + p["y1"]) / 2.0)
         if len(old.lane_roles) == a.n_lanes:
             a.lane_roles = list(old.lane_roles)
-        # tilt: corrected only by turning the whole image (and the marker with it)
+        # tilt: corrected only by turning the whole image (and the marker with it); not under drawn lines
         ang = lanes.tilt_angle(a)
-        if self.auto_tilt.isChecked() and not use_lines and not self._tilt_done and 0.3 <= abs(ang) <= 10:
+        if self.auto_tilt.isChecked() and not use_lines and not red and not self._tilt_done and 0.3 <= abs(ang) <= 10:
             self._tilt_done = True
             try:
                 self.set_transform(d, dict(d.transform, angle=round(float(d.transform.get("angle", 0.0)) + ang, 2)))
@@ -5689,7 +5698,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "quant": {"ref_name": self.ref_name, "ctrl_name": self.ctrl_name, "formulas": self.formulas_all,
                           "series_on": self.series_on, "excluded": [k for k, d in enumerate(self.docs)
                                                                     if not getattr(d, "in_quant", True)]},
-                "detect_only_on_lines": self.only_on_lines.isChecked(),
+                "detect_extra_bands": self.extra_bands.isChecked(),
             },
         }
 
@@ -5905,7 +5914,7 @@ class MainWindow(QtWidgets.QMainWindow):
             for k in q.get("excluded", []):
                 if k < len(docs):
                     docs[k].in_quant = False
-            self.only_on_lines.setChecked(bool(ui.get("detect_only_on_lines", False)))
+            self.extra_bands.setChecked(bool(ui.get("detect_extra_bands", False)))
             self.set_graph_opts(ui.get("graph") or {})
             self.cur = min(int(ui.get("current_image", 0)), len(docs) - 1)
             self.refresh_doc_tabs()

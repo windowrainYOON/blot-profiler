@@ -108,9 +108,10 @@ def test_windows_and_canvas_tools(tmp_path):
     QTest.mouseRelease(v.viewport(), QtCore.Qt.LeftButton, pos=p1)
     assert len(a.protein_lines) == m + 1
     # detect again along the lines
-    w.only_on_lines.setChecked(True)
+    w.extra_bands.setChecked(False)  # default: the red lines are the rows
     w.detect(use_lines=True)
     assert len(w.analysis.rows) == m + 1
+    assert {p["row"] for p in w.analysis.protein_lines} == {r.name for r in w.analysis.rows}
     # [ and ] zoom
     k = v.transform().m11()
     QTest.keyClick(v, QtCore.Qt.Key_BracketLeft)
@@ -169,3 +170,23 @@ def test_graph_fits_small_canvas():
         e = art.get_window_extent(r)
         assert e.x0 >= fb.x0 - 1 and e.x1 <= fb.x1 + 1 and e.y0 >= fb.y0 - 1 and e.y1 <= fb.y1 + 1
     assert matplotlib  # (imported for the backend)
+
+
+def test_red_lines_lead_detection():
+    """A red line a few px off a band row: the boxes snap to the bands; rows come from the lines
+    (named after them), and 'extra' adds the automatic rows away from every line."""
+    corr = _blot()
+    auto = lanes.detect(corr)
+    core.lines_from_analysis(auto, corr.shape)
+    assert len(auto.rows) >= 2
+    p = dict(auto.protein_lines[0], row="Vinculin")
+    true_y = [b.cy for b in auto.bands if b.row == 0]
+    off = 0.4 * auto.rows[0].height
+    p["y0"] += off
+    p["y1"] += off
+    a = lanes.detect(corr, protein_lines=[p], only_on_lines=True)
+    assert [r.name for r in a.rows] == ["Vinculin"]
+    ys = sorted(b.cy for b in a.bands)
+    assert abs(float(np.median(ys)) - float(np.median(true_y))) < 0.5 * off + 1.0  # snapped to the band, not the line
+    b = lanes.detect(corr, protein_lines=[p], only_on_lines=False)
+    assert b.rows[0].name == "Vinculin" and len(b.rows) == len(auto.rows)
