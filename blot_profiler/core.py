@@ -1522,7 +1522,30 @@ def combine_members(members: Sequence[np.ndarray], ref: Optional[int] = None):
 # --------------------------------------------------------------------------
 
 def default_transform() -> dict:
-    return {"rot90": 0, "angle": 0.0, "crop": None}
+    return {"rot90": 0, "angle": 0.0, "crop": None, "region": None, "region_tag": ""}
+
+
+def place_marker_region(marker: np.ndarray, m_reg, b_reg, shape) -> np.ndarray:
+    """A marker photo whose blot sits elsewhere than on the blot photo: its region ``m_reg``
+    (marker pixels) is scaled onto the blot region ``b_reg`` of a canvas the blot photo's
+    ``shape`` (filled with the marker's median), so the blot's region crop shows it."""
+    from scipy import ndimage as _ndi
+
+    H, W = shape
+    out = np.full((H, W), float(np.median(marker)), dtype=float)
+    mx0, my0, mx1, my1 = (int(round(v)) for v in m_reg)
+    bx0, by0, bx1, by1 = (int(round(v)) for v in b_reg)
+    mx0, mx1 = sorted((max(0, mx0), min(marker.shape[1], mx1)))
+    my0, my1 = sorted((max(0, my0), min(marker.shape[0], my1)))
+    bx0, bx1 = sorted((max(0, bx0), min(W, bx1)))
+    by0, by1 = sorted((max(0, by0), min(H, by1)))
+    if mx1 - mx0 < 2 or my1 - my0 < 2 or bx1 - bx0 < 2 or by1 - by0 < 2:
+        return out
+    part = marker[my0:my1, mx0:mx1].astype(float)
+    z = _ndi.zoom(part, ((by1 - by0) / part.shape[0], (bx1 - bx0) / part.shape[1]), order=1)
+    h, w = min(z.shape[0], by1 - by0), min(z.shape[1], bx1 - bx0)
+    out[by0:by0 + h, bx0:bx0 + w] = z[:h, :w]
+    return out
 
 
 def apply_transform(img: np.ndarray, tf: Optional[dict]) -> np.ndarray:
@@ -1535,6 +1558,14 @@ def apply_transform(img: np.ndarray, tf: Optional[dict]) -> np.ndarray:
     """
     if not tf:
         return img
+    reg = tf.get("region")  # 1.2: one blot of several on the photo, [x0, y0, x1, y1] in the file's pixels
+    if reg:
+        H0, W0 = img.shape[:2]
+        x0, y0, x1, y1 = (int(round(v)) for v in reg)
+        x0, x1 = sorted((max(0, min(W0, x0)), max(0, min(W0, x1))))
+        y0, y1 = sorted((max(0, min(H0, y0)), max(0, min(H0, y1))))
+        if x1 - x0 >= 8 and y1 - y0 >= 8:
+            img = img[y0:y1, x0:x1]
     out = np.rot90(img, k=int(tf.get("rot90", 0)) % 4)
     ang = float(tf.get("angle", 0.0) or 0.0)
     if abs(ang) > 1e-6:

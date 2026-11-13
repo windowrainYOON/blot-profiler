@@ -307,10 +307,34 @@ FONT_CATEGORIES = {  # key: (label, factor of the base font size)
 }
 
 
-def default_tier(kind: str, n_lanes: int = 0) -> dict:
+NEW_CELL = "–"  # a new name tier starts with this in every lane (visible, so it can be clicked)
+
+# patterns of 이 층 채우기 (key, menu text)
+TIER_FILLS = [("dash", "– 모두"), ("alt", "– + 번갈아"), ("pairs", "– – + + (두 칸씩)"), ("numbers", "1, 2, 3 …"),
+              ("copy", "아래 층 복사"), ("empty", "비우기")]
+
+
+def fill_texts(pattern: str, n: int, below: Optional[List[str]] = None) -> List[str]:
+    """Texts of ``n`` lanes for a fill pattern of a name tier."""
+    if pattern == "alt":
+        return ["–" if i % 2 == 0 else "+" for i in range(n)]
+    if pattern == "pairs":
+        return ["–" if (i // 2) % 2 == 0 else "+" for i in range(n)]
+    if pattern == "numbers":
+        return [str(i + 1) for i in range(n)]
+    if pattern == "copy":
+        below = list(below or [])
+        return (below + [""] * n)[:n]
+    if pattern == "empty":
+        return [""] * n
+    return [NEW_CELL] * n
+
+
+def default_tier(kind: str, n_lanes: int = 0, pattern: str = "dash") -> dict:
     t = {"kind": kind, "condition": "", "cond_side": "left", "rotation": 0, "italic": False}
     if kind == "lanes":
-        t["texts"] = [""] * n_lanes
+        t["texts"] = fill_texts(pattern, n_lanes)
+        t["condition"] = "Condition"
     else:
         t["groups"] = []
     return t
@@ -329,7 +353,7 @@ def _migrate(s: dict):
             g["groups"] = s["groups"]
             tiers.append(g)
         lane = default_tier("lanes")
-        lane.update(auto=True, rotation=int(s.get("lane_rotation", 0)))
+        lane.update(auto=True, rotation=int(s.get("lane_rotation", 0)), condition="")
         lane.pop("texts", None)
         tiers.append(lane)
         s["tiers"] = tiers
@@ -340,11 +364,12 @@ def _migrate(s: dict):
 def _sync_tiers(s: dict, n: int):
     for t in s["tiers"]:
         for k, v in default_tier(t.get("kind", "lanes")).items():
-            if k not in ("texts", "groups"):
+            if k not in ("texts", "groups", "condition"):
                 t.setdefault(k, v)
+        t.setdefault("condition", "")
         if t["kind"] == "lanes" and not t.get("auto"):
             texts = list(t.get("texts", []))[:n]
-            t["texts"] = texts + [""] * (n - len(texts))
+            t["texts"] = texts + [NEW_CELL] * (n - len(texts))
         elif t["kind"] == "groups":
             t["groups"] = [g for g in t.get("groups", []) if 0 <= int(g["first"]) <= int(g["last"]) < n]
 
@@ -603,7 +628,10 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
 
     # ---- header tiers
     y = 0.04
+    layout["tiers"] = []
+    layout["bars"] = []
     for ti, (t, h) in enumerate(zip(tiers, tier_h)):
+        layout["tiers"].append({"ti": ti, "kind": t["kind"], "y0": y, "y1": y + h, "auto": bool(t.get("auto"))})
         rot = float(t.get("rotation", 0))
         style = "italic" if t.get("italic") else "normal"
         bottom = y + h
@@ -626,6 +654,7 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
                 if not (np.isfinite(xs[a_]) and np.isfinite(xs[b_])):
                     continue
                 xa, xb = xs[a_] - 0.42 * pitch, xs[b_] + 0.42 * pitch
+                layout["bars"].append({"ti": ti, "gi": gi, "xa": xa, "xb": xb, "y": bar_y})
                 if t.get("bar", True):
                     hline(xa, xb, bar_y, bar_lw)
                 gx = (xa + xb) / 2
@@ -756,7 +785,8 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
         layout["texts"].append({"key": key, "cat": cat, "text": art.get_text(),
                                 "x0": bb.x0 / dpi, "x1": bb.x1 / dpi,
                                 "y0": total_h - bb.y1 / dpi, "y1": total_h - bb.y0 / dpi})
-    layout.update(size=(total_w, total_h), scale=scale, left=left, panel_w=panel_w, x0px=x0px, x1px=x1px)
+    layout.update(size=(total_w, total_h), scale=scale, left=left, panel_w=panel_w, x0px=x0px, x1px=x1px,
+                  lane_xs=[float(x) for x in xs], pitch=float(pitch))
     return layout
 
 

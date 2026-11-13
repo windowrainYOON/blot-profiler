@@ -79,6 +79,7 @@ def test_windows_and_canvas_tools(tmp_path):
     w.show()
     w.ask_marker.setChecked(False)
     w.load_image(str(tmp_path / "a.tif"))
+    w.detect(auto=True)  # 1.2: the window waits for drawn lines
     a = w.analysis
     assert a.lane_lines and a.protein_lines
     v = w.view
@@ -118,6 +119,7 @@ def test_windows_and_canvas_tools(tmp_path):
     assert v.transform().m11() > k
     # second image, quantification window: two images pooled by lane name
     w.load_image(str(tmp_path / "b.tif"))
+    w.detect(auto=True)  # 1.2: the window waits for drawn lines
     w.open_quant_window()
     pooled = w._pooled
     assert len(pooled) == 2
