@@ -56,6 +56,7 @@ def _make_session(w, folder):
     tifffile.imwrite(os.path.join(folder, "exp2.tif"), raw)
     w.ask_marker.setChecked(False)
     w.load_image(blot)
+    w.detect(auto=True)  # 1.2: the window waits for drawn lines
     assert w.set_marker(w.doc, os.path.join(folder, "exp1-Marker.tif"))
     a = w.analysis
     core.make_row_group(a, [b for b in a.bands if b.row == 0], "Vinculin")
@@ -75,6 +76,7 @@ def _make_session(w, folder):
     s["kda"] = [{"kda": 100, "y": 165.0}, {"kda": 40, "y": 390.0}]
     s["numbers"] = [{"source": "res:Kras G12D/Vinculin", "label": "Kras/Vin", "pos": "bottom", "decimals": 2, "rel_lane": 1}]
     w.load_image(os.path.join(folder, "exp2.tif"))
+    w.detect(auto=True)  # 1.2: the window waits for drawn lines
     w.refresh_multi()
     w.big_groups.append({"name": "Kras_all", "kind": "protein", "members": [[0, "Kras G12D"], [1, "P3"]], "value": "net"})
     w.multi_formulas.append({"name": "x", "expr": "I1.Vinculin / I2.P1", "normalize": "1"})

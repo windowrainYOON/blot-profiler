@@ -209,39 +209,142 @@ class ReferenceView(QtWidgets.QGraphicsView):
             self.fitInView(r, Qt.KeepAspectRatio)
 
 
-class PreviewLabel(QtWidgets.QLabel):
-    """Rendered figure.
+class MiniToolbar(QtWidgets.QFrame):
+    """Small floating bar above a selected text (mockup board 3): size −/+, bold, italic, angle."""
 
-    Edit mode: drag panel edges (crop), texts (offset) or the marker strip.
-    Right-click on a text: its own size/angle menu. Files dropped here are opened.
+    action = QtCore.Signal(str, object)  # ("size"|"bigger"|"smaller"|"bold"|"italic"|"rot"|"align", value)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("fig_minibar")
+        self.setStyleSheet(
+            "#fig_minibar { background: palette(base); border: 1px solid rgba(0,0,0,0.18); border-radius: 8px; }"
+            "#fig_minibar QToolButton { border: 0; border-radius: 5px; padding: 2px 6px; min-width: 18px; }"
+            "#fig_minibar QToolButton:checked { background: rgba(10,102,214,0.16); color: #0a66d6; }"
+            "#fig_minibar QToolButton:hover { background: rgba(0,0,0,0.06); }")
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(3, 3, 3, 3)
+        lay.setSpacing(1)
+
+        def btn(text, tip, fn, checkable=False):
+            b = QtWidgets.QToolButton()
+            b.setText(text)
+            b.setToolTip(tip)
+            b.setCheckable(checkable)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.clicked.connect(fn)
+            lay.addWidget(b)
+            return b
+
+        self.size_btn = btn("8 pt", "글자 크기", self._ask_size)
+        btn("A−", "작게 (⌘−)", lambda: self.action.emit("smaller", None))
+        btn("A+", "크게 (⌘+)", lambda: self.action.emit("bigger", None))
+        self._sep(lay)
+        self.bold_btn = btn("B", "굵게 (⌘B)", lambda on: self.action.emit("bold", on), True)
+        f = self.bold_btn.font()
+        f.setBold(True)
+        self.bold_btn.setFont(f)
+        self.italic_btn = btn("I", "기울임 (⌘I)", lambda on: self.action.emit("italic", on), True)
+        f = self.italic_btn.font()
+        f.setItalic(True)
+        self.italic_btn.setFont(f)
+        self._sep(lay)
+        self.rot_btn = QtWidgets.QToolButton()
+        self.rot_btn.setText("0° ↻")
+        self.rot_btn.setToolTip("각도")
+        self.rot_btn.setFocusPolicy(Qt.NoFocus)
+        self.rot_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        m = QtWidgets.QMenu(self.rot_btn)
+        for a in (0, 30, 45, 60, 90, -30, -45, -90):
+            m.addAction(f"{a}°", lambda a=a: self.action.emit("rot", float(a)))
+        self.rot_btn.setMenu(m)
+        lay.addWidget(self.rot_btn)
+        self.hide()
+
+    @staticmethod
+    def _sep(lay):
+        s = QtWidgets.QFrame()
+        s.setFixedSize(1, 16)
+        s.setStyleSheet("background: rgba(0,0,0,0.14);")
+        lay.addWidget(s)
+
+    def _ask_size(self):
+        v, ok = QtWidgets.QInputDialog.getDouble(self, "글자 크기", "크기 (pt):", self._size, 3.0, 72.0, 1)
+        if ok:
+            self.action.emit("size", float(v))
+
+    def set_state(self, st: dict):
+        self._size = float(st.get("size", 8.0))
+        self.size_btn.setText(f"{self._size:g} pt" + (" *" if st.get("mixed") else ""))
+        for b, k in ((self.bold_btn, "bold"), (self.italic_btn, "italic")):
+            b.blockSignals(True)
+            b.setChecked(bool(st.get(k)))
+            b.blockSignals(False)
+        self.rot_btn.setText(f"{float(st.get('rot', 0) or 0):g}° ↻")
+        self.adjustSize()
+
+
+class PreviewLabel(QtWidgets.QLabel):
+    """Rendered figure, edited directly like slides (mockup boards 1–3, 2-1; no edit mode).
+
+    Click: select a text, a lane cell, a tier (its ⋮⋮ grip), a panel or the marker strip.
+    Drag a text: move it; its corner squares: font size; the circle above it: angle.
+    Drag across lane cells (or across a panel): select several lanes; right-click for groups.
+    Drag a tier's grip up/down: move the whole tier. Drag on empty paper: select by rectangle.
+    Double-click, Enter or just typing: edit the text in place (several cells at once).
     """
 
     edited = QtCore.Signal(str, str, float)  # edge (top/bottom/left/right), protein, delta in inches
     textMoved = QtCore.Signal(str, float, float)  # key, dx, dy (inches)
     stripMoved = QtCore.Signal(float)  # dx (inches)
-    textMenu = QtCore.Signal(str, QtCore.QPoint)  # key, global position
-    modeToggled = QtCore.Signal(bool)
+    contextRequested = QtCore.Signal(dict, QtCore.QPoint)  # selection, global position
     filesDropped = QtCore.Signal(list)
-    objectSelected = QtCore.Signal(dict)  # {"kind": "text"|"strip"|"panel", "key"/"row": ...}
+    objectSelected = QtCore.Signal(dict)
+    textCommitted = QtCore.Signal(dict, str)  # selection (text / texts / cells), new text
+    textResized = QtCore.Signal(str, float)  # key, factor
+    textRotated = QtCore.Signal(str, float)  # key, angle (degrees, counter-clockwise)
+    groupResized = QtCore.Signal(int, int, int, int)  # tier, group, first lane, last lane
+    tierMoved = QtCore.Signal(int, int)  # tier index, new index
+    keyAction = QtCore.Signal(str, dict)  # "delete" | "bold" | "italic" | "bigger" | "smaller" | "dup", selection
+    toolAction = QtCore.Signal(str, object, dict)  # mini toolbar: action, value, selection
 
-    CURSORS = {"top": Qt.SizeVerCursor, "bottom": Qt.SizeVerCursor, "left": Qt.SizeHorCursor,
-               "right": Qt.SizeHorCursor, "text": Qt.SizeAllCursor, "strip": Qt.SizeHorCursor}
+    GRIP_W = 12
+    HANDLE = 7
+    BLUE = QtGui.QColor("#0a66d6")
+    PINK = QtGui.QColor("#ff2d78")
+    PAPER_PAD = 22  # white paper around the figure on the canvas; the tier grips sit in it
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAlignment(Qt.AlignCenter)
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
-        self.setFocusPolicy(Qt.ClickFocus)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.layout_ = {"panels": [], "texts": [], "strips": [], "size": (1.0, 1.0)}
-        self.edit_mode = False
-        self.drag = None  # (kind, target, start inches)
+        self.drag = None  # dict describing the drag in progress
         self.cur = None
         self.selected: Optional[dict] = None
+        self.hover = None  # (x, y, w, h) inches
         self._press = None
+        self._snap_x = None
+        self.text_getter = lambda sel: None  # set by the editor: current text of a selection (None = not editable)
+        self.style_getter = lambda sel: {}  # size / bold / italic / rot for the mini toolbar
+        self.editor = QtWidgets.QLineEdit(self)
+        self.editor.setObjectName("fig_inline")
+        self.editor.setFrame(False)
+        self.editor.setAlignment(Qt.AlignCenter)
+        self.editor.setStyleSheet("#fig_inline { background: white; color: black; border: 1.5px dashed #0a66d6; "
+                                  "padding: 0 2px; selection-background-color: rgba(10,102,214,0.35); }")
+        self.editor.hide()
+        self.editor.installEventFilter(self)
+        self._edit_sel = None
+        self.minibar = MiniToolbar(self)
+        self.minibar.action.connect(lambda a, v: self.selected and self.toolAction.emit(a, v, dict(self.selected)))
 
+    # ------------------------------------------------------------ geometry
     def set_layout(self, layout):
         self.layout_ = layout
+        self._place_overlays()
         self.update()
 
     def _k(self):
@@ -257,6 +360,90 @@ class PreviewLabel(QtWidgets.QLabel):
             return None
         return (pos.x() - ox) / k, (pos.y() - oy) / k
 
+    def to_screen(self, r) -> QtCore.QRectF:
+        k, ox, oy = self._k()
+        x, y, w, h = r
+        return QtCore.QRectF(ox + x * k, oy + y * k, w * k, h * k)
+
+    def texts(self):
+        return self.layout_.get("texts", [])
+
+    def text_by_key(self, key):
+        return next((t for t in self.texts() if t["key"] == key), None)
+
+    @staticmethod
+    def text_rect(t):
+        return (t["x0"], t["y0"], t["x1"] - t["x0"], t["y1"] - t["y0"])
+
+    def tiers(self):
+        return self.layout_.get("tiers", [])
+
+    def tier(self, ti):
+        return next((t for t in self.tiers() if t["ti"] == ti), None)
+
+    def lane_xs(self):
+        return self.layout_.get("lane_xs", [])
+
+    def pitch(self):
+        return float(self.layout_.get("pitch") or 0.2)
+
+    def cell_rect(self, ti, li):
+        t, xs = self.tier(ti), self.lane_xs()
+        if t is None or li >= len(xs) or not np.isfinite(xs[li]):
+            return None
+        w = 0.86 * self.pitch()
+        return (xs[li] - w / 2, t["y0"] + 0.01, w, t["y1"] - t["y0"] - 0.01)
+
+    def tier_rect(self, ti):
+        t, xs = self.tier(ti), [x for x in self.lane_xs() if np.isfinite(x)]
+        if t is None or not xs:
+            return None
+        x0, x1 = min(xs) - self.pitch() / 2, max(xs) + self.pitch() / 2
+        for tx in self.texts():
+            if tx["key"] == f"cond:{ti}":
+                x0, x1 = min(x0, tx["x0"]), max(x1, tx["x1"])
+        return (x0 - 0.02, t["y0"], x1 - x0 + 0.04, t["y1"] - t["y0"])
+
+    def grip_rect_screen(self, ti) -> Optional[QtCore.QRectF]:
+        t = self.tier(ti)
+        if t is None:
+            return None
+        k, ox, oy = self._k()
+        y0, y1 = oy + t["y0"] * k, oy + t["y1"] * k
+        h = max(14.0, y1 - y0 - 2)
+        cy = (y0 + y1) / 2
+        return QtCore.QRectF(ox - self.PAPER_PAD + 4, cy - h / 2, self.GRIP_W, h)
+
+    def lane_at(self, x_in) -> Optional[int]:
+        xs = self.lane_xs()
+        best = None
+        for li, x in enumerate(xs):
+            if np.isfinite(x) and abs(x - x_in) <= 0.5 * self.pitch():
+                if best is None or abs(x - x_in) < abs(xs[best] - x_in):
+                    best = li
+        return best
+
+    def nearest_lane(self, x_in) -> Optional[int]:
+        xs = [(li, x) for li, x in enumerate(self.lane_xs()) if np.isfinite(x)]
+        return min(xs, key=lambda q: abs(q[1] - x_in))[0] if xs else None
+
+    def cell_at(self, pos):
+        """(tier, lane) of a name-tier cell under ``pos``."""
+        p = self.to_in(pos)
+        if p is None:
+            return None
+        x, y = p
+        for t in self.tiers():
+            if t["kind"] == "lanes" and t["y0"] <= y <= t["y1"]:
+                li = self.lane_at(x)
+                if li is not None:
+                    return t["ti"], li
+        for tx in self.texts():  # rotated lane texts can stick out of their row
+            if tx["key"].startswith("lane:") and tx["x0"] <= x <= tx["x1"] and tx["y0"] <= y <= tx["y1"]:
+                _, ti, li = tx["key"].split(":")
+                return int(ti), int(li)
+        return None
+
     def hit_text(self, pos):
         p_in = self.to_in(pos)
         if p_in is None:
@@ -265,75 +452,105 @@ class PreviewLabel(QtWidgets.QLabel):
         x, y = p_in
         pad = 2.0 / k
         best = None
-        for t in self.layout_.get("texts", []):
+        for t in self.texts():
+            if t["key"].startswith("lane:"):
+                continue
             if t["x0"] - pad <= x <= t["x1"] + pad and t["y0"] - pad <= y <= t["y1"] + pad:
                 area = (t["x1"] - t["x0"]) * (t["y1"] - t["y0"])
                 if best is None or area < best[0]:
                     best = (area, t)
         return best[1] if best else None
 
-    def hit(self, pos):
-        """Panel edge, then text, then marker strip under ``pos``: (kind, target)."""
-        p_in = self.to_in(pos)
-        k, _, _ = self._k()
-        if p_in is None:
+    def hit_bar(self, pos):
+        p = self.to_in(pos)
+        if p is None:
             return None
-        x, y = p_in
-        tol = 6.0 / k
-        for p in self.layout_["panels"]:
-            xr = p["x_blot"] + self.layout_.get("panel_w", 0)
-            if p["x_blot"] - tol <= x <= xr + tol:
-                if abs(y - p["y"]) < tol:
-                    return "top", p
-                if abs(y - (p["y"] + p["h"])) < tol:
-                    return "bottom", p
-            if p["y"] - tol <= y <= p["y"] + p["h"] + tol:
-                if abs(x - p["x_blot"]) < tol:
-                    return "left", p
-                if abs(x - xr) < tol:
-                    return "right", p
-        t = self.hit_text(pos)
-        if t:
-            return "text", t
+        k, _, _ = self._k()
+        x, y = p
+        for b in self.layout_.get("bars", []):
+            if b["xa"] - 3 / k <= x <= b["xb"] + 3 / k and abs(y - b["y"]) <= 5 / k:
+                return b
+        return None
+
+    def hit_panel(self, pos):
+        p = self.to_in(pos)
+        if p is None:
+            return None
+        x, y = p
+        pw = self.layout_.get("panel_w", 0)
+        for pn in self.layout_["panels"]:
+            if pn["x_blot"] <= x <= pn["x_blot"] + pw and pn["y"] <= y <= pn["y"] + pn["h"]:
+                return pn
+        return None
+
+    def hit_strip(self, pos):
+        p = self.to_in(pos)
+        if p is None:
+            return None
+        x, y = p
         for st in self.layout_.get("strips", []):
             if st["x"] <= x <= st["x"] + st["w"] and st["y"] <= y <= st["y"] + st["h"]:
-                return "strip", st
+                return st
         return None
 
     def hit_object(self, pos) -> Optional[dict]:
-        """What a click at ``pos`` selects: a text, the marker strip or a protein panel."""
+        """What a click at ``pos`` selects."""
+        c = self.cell_at(pos)
+        if c:
+            return {"kind": "cells", "ti": c[0], "lanes": [c[1]]}
         t = self.hit_text(pos)
         if t:
             return {"kind": "text", "key": t["key"]}
-        p_in = self.to_in(pos)
-        if p_in is None:
-            return None
-        x, y = p_in
-        for st in self.layout_.get("strips", []):
-            if st["x"] <= x <= st["x"] + st["w"] and st["y"] <= y <= st["y"] + st["h"]:
-                return {"kind": "strip"}
-        pw = self.layout_.get("panel_w", 0)
-        for p in self.layout_["panels"]:
-            if p["x_blot"] <= x <= p["x_blot"] + pw and p["y"] <= y <= p["y"] + p["h"]:
-                return {"kind": "panel", "row": p["row"]}
+        b = self.hit_bar(pos)
+        if b:
+            return {"kind": "text", "key": f"group:{b['ti']}:{b['gi']}"}
+        if self.hit_strip(pos):
+            return {"kind": "strip"}
+        pn = self.hit_panel(pos)
+        if pn:
+            return {"kind": "panel", "row": pn["row"]}
         return None
 
+    # ------------------------------------------------------------ selection
     def select(self, sel: Optional[dict]):
+        self.finish_edit()
         self.selected = sel
+        self._place_overlays()
         self.update()
         if sel:
             self.objectSelected.emit(sel)
 
-    def _selected_rects(self):
-        sel = self.selected or {}
-        L = self.layout_
+    def _sel_keys(self, sel=None):
+        sel = sel if sel is not None else (self.selected or {})
         if sel.get("kind") == "text":
-            return [(t["x0"], t["y0"], t["x1"] - t["x0"], t["y1"] - t["y0"]) for t in L.get("texts", []) if t["key"] == sel["key"]]
-        if sel.get("kind") == "strip":
+            return [sel["key"]]
+        if sel.get("kind") == "texts":
+            return list(sel["keys"])
+        if sel.get("kind") == "cells":
+            return [f"lane:{sel['ti']}:{li}" for li in sel["lanes"]]
+        return []
+
+    def _selected_rects(self, sel=None):
+        sel = sel if sel is not None else (self.selected or {})
+        L = self.layout_
+        kind = sel.get("kind")
+        if kind in ("text", "texts"):
+            out = []
+            for key in self._sel_keys(sel):
+                t = self.text_by_key(key)
+                if t:
+                    out.append(self.text_rect(t))
+            return out
+        if kind == "cells":
+            return [r for r in (self.cell_rect(sel["ti"], li) for li in sel["lanes"]) if r]
+        if kind == "tier":
+            r = self.tier_rect(sel["ti"])
+            return [r] if r else []
+        if kind == "strip":
             return [(st["x"], st["y"], st["w"], st["h"]) for st in L.get("strips", [])]
-        if sel.get("kind") == "panel":
+        if kind == "panel":
             return [(p["x_blot"], p["y"], L.get("panel_w", 0), p["h"]) for p in L["panels"] if p["row"] == sel["row"]]
-        if sel.get("kind") == "blot":  # this image's panels as one block
+        if kind == "blot":
             own = [p for p in L.get("panels", []) if not p.get("doc")]
             if own:
                 y0 = min(p["y"] for p in own)
@@ -341,6 +558,200 @@ class PreviewLabel(QtWidgets.QLabel):
                 return [(own[0]["x_blot"], y0, L.get("panel_w", 0), y1 - y0)]
         return []
 
+    def _union_screen(self, rects) -> Optional[QtCore.QRectF]:
+        u = None
+        for r in rects:
+            q = self.to_screen(r)
+            u = q if u is None else u.united(q)
+        return u
+
+    def single_text(self):
+        sel = self.selected or {}
+        if sel.get("kind") == "text":
+            return self.text_by_key(sel["key"])
+        if sel.get("kind") == "cells" and len(sel["lanes"]) == 1:
+            return self.text_by_key(f"lane:{sel['ti']}:{sel['lanes'][0]}")
+        return None
+
+    def _place_overlays(self):
+        """The mini toolbar above the selected text(s) and the inline editor over them."""
+        sel = self.selected or {}
+        k, _, _ = self._k()
+        u = self._union_screen(self._selected_rects()) if k else None
+        show_bar = bool(u) and sel.get("kind") in ("text", "texts", "cells", "tier") and not self.drag
+        if show_bar:
+            self.minibar.set_state(self.style_getter(sel) or {})
+            self.minibar.adjustSize()
+            x = int(max(2, min(self.width() - self.minibar.width() - 2, u.left())))
+            y = int(u.top() - self.minibar.height() - (26 if self.single_text() is not None else 8))
+            if y < 2:
+                y = int(u.bottom() + 8)
+            self.minibar.move(x, y)
+            self.minibar.show()
+            self.minibar.raise_()
+        else:
+            self.minibar.hide()
+        if self.editor.isVisible() and u is not None:
+            self.editor.setGeometry(u.adjusted(-6, -3, 6, 3).toRect())
+
+    # ------------------------------------------------------------ in-place editing
+    def editable(self, sel=None) -> bool:
+        sel = sel or self.selected
+        return bool(sel) and sel.get("kind") in ("text", "texts", "cells") and self.text_getter(sel) is not None
+
+    def start_edit(self, initial: Optional[str] = None):
+        sel = self.selected
+        if not self.editable(sel):
+            return False
+        u = self._union_screen(self._selected_rects())
+        if u is None:
+            return False
+        cur = self.text_getter(sel) or ""
+        self._edit_sel = dict(sel)
+        self.editor.setText(cur if initial is None else initial)
+        f = self.editor.font()
+        k, _, _ = self._k()
+        st = self.style_getter(sel) or {}
+        f.setPixelSize(max(9, int(float(st.get("size", 8.0)) / 72.0 * k)))
+        f.setBold(bool(st.get("bold")))
+        self.editor.setFont(f)
+        r = u.adjusted(-6, -3, 6, 3)
+        r.setWidth(max(r.width(), 60))
+        self.editor.setGeometry(r.toRect())
+        self.editor.show()
+        self.editor.setFocus()
+        if initial is None:
+            self.editor.selectAll()
+        else:
+            self.editor.end(False)
+        self.minibar.hide()
+        self.update()
+        return True
+
+    def finish_edit(self, commit: bool = True):
+        if not self.editor.isVisible():
+            return
+        sel, self._edit_sel = self._edit_sel, None
+        text = self.editor.text()
+        self.editor.hide()
+        self.setFocus()
+        if commit and sel is not None and text != (self.text_getter(sel) or ""):
+            self.textCommitted.emit(sel, text)
+        self.update()
+
+    def move_cell(self, d: int):
+        """Tab / → in a name tier: the next cell (Shift+Tab / ←: the previous one)."""
+        sel = self.selected or {}
+        if sel.get("kind") != "cells" or not sel["lanes"]:
+            return False
+        n = len(self.lane_xs())
+        li = (max(sel["lanes"]) + 1) if d > 0 else (min(sel["lanes"]) - 1)
+        if 0 <= li < n:
+            self.select({"kind": "cells", "ti": sel["ti"], "lanes": [li]})
+            return True
+        return False
+
+    def move_tier_cell(self, d: int):
+        """↑ / ↓ in a name tier: the same lane in the name tier above / below."""
+        sel = self.selected or {}
+        if sel.get("kind") != "cells":
+            return False
+        lane_tiers = [t["ti"] for t in self.tiers() if t["kind"] == "lanes"]
+        if sel["ti"] not in lane_tiers:
+            return False
+        i = lane_tiers.index(sel["ti"]) + d
+        if 0 <= i < len(lane_tiers):
+            self.select({"kind": "cells", "ti": lane_tiers[i], "lanes": list(sel["lanes"])})
+            return True
+        return False
+
+    def eventFilter(self, obj, e):
+        if obj is self.editor:
+            if e.type() == QtCore.QEvent.KeyPress:
+                key = e.key()
+                if key in (Qt.Key_Return, Qt.Key_Enter):
+                    self.finish_edit()
+                    return True
+                if key == Qt.Key_Escape:
+                    self.finish_edit(commit=False)
+                    return True
+                if key in (Qt.Key_Tab, Qt.Key_Backtab):
+                    self.finish_edit()
+                    QtCore.QTimer.singleShot(0, lambda b=key == Qt.Key_Backtab: self.move_cell(-1 if b else 1)
+                                             and self.start_edit())
+                    return True
+            elif e.type() == QtCore.QEvent.FocusOut and self.editor.isVisible():
+                QtCore.QTimer.singleShot(0, lambda: self.editor.hasFocus() or self.finish_edit())
+        return super().eventFilter(obj, e)
+
+    def focusNextPrevChild(self, nxt):  # Tab moves between cells, not out of the preview
+        if (self.selected or {}).get("kind") == "cells":
+            return False
+        return super().focusNextPrevChild(nxt)
+
+    # ------------------------------------------------------------ handles
+    def _handle_points(self, r: QtCore.QRectF):
+        c = r.center()
+        return {"tl": r.topLeft(), "tr": r.topRight(), "bl": r.bottomLeft(), "br": r.bottomRight(),
+                "t": QtCore.QPointF(c.x(), r.top()), "b": QtCore.QPointF(c.x(), r.bottom()),
+                "l": QtCore.QPointF(r.left(), c.y()), "r": QtCore.QPointF(r.right(), c.y())}
+
+    def _text_frame(self, t) -> QtCore.QRectF:
+        return self.to_screen(self.text_rect(t)).adjusted(-3, -2, 3, 2)
+
+    def _rot_handle(self, t) -> QtCore.QPointF:
+        r = self._text_frame(t)
+        return QtCore.QPointF(r.center().x(), r.top() - 16)
+
+    def hit_handle(self, pos):
+        """A handle of the current selection (or a tier grip) under ``pos``."""
+        pf = QtCore.QPointF(pos)
+        near = lambda p, d=6.0: abs(p.x() - pf.x()) <= d and abs(p.y() - pf.y()) <= d  # noqa: E731
+        for t in self.tiers():
+            g = self.grip_rect_screen(t["ti"])
+            if g is not None and g.adjusted(-3, 0, 3, 0).contains(pf):
+                return {"type": "grip", "ti": t["ti"]}
+        sel = self.selected or {}
+        t = self.single_text()
+        if t is not None and sel.get("kind") == "text":
+            if near(self._rot_handle(t)):
+                return {"type": "rotate", "key": t["key"]}
+            for name, p in self._handle_points(self._text_frame(t)).items():
+                if name in ("tl", "tr", "bl", "br") and near(p):
+                    return {"type": "resize", "key": t["key"], "corner": name}
+        if sel.get("kind") == "text" and sel["key"].startswith("group:"):
+            _, ti, gi = sel["key"].split(":")
+            for b in self.layout_.get("bars", []):
+                if b["ti"] == int(ti) and b["gi"] == int(gi):
+                    k, ox, oy = self._k()
+                    for end, x in (("first", b["xa"]), ("last", b["xb"])):
+                        if near(QtCore.QPointF(ox + x * k, oy + b["y"] * k), 7):
+                            return {"type": "bar_end", "ti": b["ti"], "gi": b["gi"], "end": end}
+        if sel.get("kind") in ("panel", "blot"):
+            p_in = self.to_in(pos)
+            k, _, _ = self._k()
+            tol = 5.0 / k
+            x, y = p_in
+            pw = self.layout_.get("panel_w", 0)
+            rows = [p for p in self.layout_["panels"]
+                    if sel.get("kind") == "blot" and not p.get("doc") or p["row"] == sel.get("row")]
+            for p in rows:
+                xr = p["x_blot"] + pw
+                if p["x_blot"] - tol <= x <= xr + tol:
+                    if abs(y - p["y"]) < tol:
+                        return {"type": "edge", "edge": "top", "panel": p}
+                    if abs(y - (p["y"] + p["h"])) < tol:
+                        return {"type": "edge", "edge": "bottom", "panel": p}
+                if p["y"] - tol <= y <= p["y"] + p["h"] + tol:
+                    if abs(x - p["x_blot"]) < tol:
+                        return {"type": "edge", "edge": "left", "panel": p}
+                    if abs(x - xr) < tol:
+                        return {"type": "edge", "edge": "right", "panel": p}
+        return None
+
+    CURSORS = {"top": Qt.SizeVerCursor, "bottom": Qt.SizeVerCursor, "left": Qt.SizeHorCursor, "right": Qt.SizeHorCursor}
+
+    # ------------------------------------------------------------ mouse
     def mouseMoveEvent(self, e):
         if getattr(self, "_pan", None) is not None:
             sa = self._scroll_area()
@@ -353,91 +764,316 @@ class PreviewLabel(QtWidgets.QLabel):
         pos = e.position().toPoint()
         if self.drag:
             self.cur = pos
+            self._drag_move(pos)
             self.update()
-        elif self.edit_mode:
-            h = self.hit(pos)
-            if h:
-                self.setCursor(self.CURSORS[h[0]])
-            else:
-                self.unsetCursor()
+            return
+        h = self.hit_handle(pos)
+        if h:
+            cur = {"grip": Qt.OpenHandCursor, "rotate": Qt.CrossCursor, "bar_end": Qt.SizeHorCursor}.get(h["type"])
+            if h["type"] == "resize":
+                cur = Qt.SizeFDiagCursor if h["corner"] in ("tl", "br") else Qt.SizeBDiagCursor
+            if h["type"] == "edge":
+                cur = self.CURSORS[h["edge"]]
+            self.setCursor(cur)
         else:
-            self.setCursor(Qt.PointingHandCursor if self.hit_text(pos) else Qt.ArrowCursor)
+            obj = self.hit_object(pos)
+            self.setCursor(Qt.SizeAllCursor if obj and obj["kind"] == "text" else Qt.ArrowCursor)
+            rects = self._selected_rects(obj) if obj else []
+            hov = rects[0] if rects else None
+            if hov != self.hover:
+                self.hover = hov
+                self.update()
         super().mouseMoveEvent(e)
 
     def mousePressEvent(self, e):
+        self.setFocus()
         if getattr(self, "_space", False) and e.button() == Qt.LeftButton:  # Space + drag: move
             self._pan = e.globalPosition()
             return
-        if e.button() == Qt.LeftButton:
-            pos = e.position().toPoint()
-            self._press = pos
-            if self.edit_mode:
-                h = self.hit(pos)
-                if h:
-                    self.drag = (h[0], h[1], self.to_in(pos))
-                    self.cur = pos
-                    return
-            self.select(self.hit_object(pos))
+        if e.button() != Qt.LeftButton:
+            super().mousePressEvent(e)
             return
-        super().mousePressEvent(e)
+        self.finish_edit()
+        pos = e.position().toPoint()
+        self._press = pos
+        start = self.to_in(pos)
+        if start is None:
+            return
+        mods = e.modifiers()
+        h = self.hit_handle(pos)
+        if h:
+            if h["type"] == "grip":
+                self.select({"kind": "tier", "ti": h["ti"]})
+                self.setCursor(Qt.ClosedHandCursor)
+            self.drag = dict(h, start=start)
+            self.cur = pos
+            return
+        c = self.cell_at(pos)
+        sel = self.selected or {}
+        if c:
+            ti, li = c
+            if sel.get("kind") == "cells" and sel["ti"] == ti and (mods & (Qt.ShiftModifier | Qt.ControlModifier)):
+                lanes = set(sel["lanes"])
+                if mods & Qt.ControlModifier:
+                    lanes ^= {li}
+                else:
+                    a = sel.get("anchor", sel["lanes"][0])
+                    lanes = set(range(min(a, li), max(a, li) + 1))
+                self.select({"kind": "cells", "ti": ti, "lanes": sorted(lanes) or [li], "anchor": sel.get("anchor", li)})
+            else:
+                self.select({"kind": "cells", "ti": ti, "lanes": [li], "anchor": li})
+            self.drag = {"type": "cells", "ti": ti, "anchor": li, "start": start}
+            self.cur = pos
+            return
+        t = self.hit_text(pos)
+        if t:
+            keys = self._sel_keys()
+            if mods & Qt.ShiftModifier and sel.get("kind") in ("text", "texts"):
+                keys = sorted(set(keys) ^ {t["key"]})
+                self.select({"kind": "texts", "keys": keys} if len(keys) > 1 else
+                            {"kind": "text", "key": keys[0]} if keys else None)
+            elif t["key"] not in keys:
+                self.select({"kind": "text", "key": t["key"]})
+            self.drag = {"type": "move", "keys": self._sel_keys(), "start": start}
+            self.cur = pos
+            return
+        b = self.hit_bar(pos)
+        if b:
+            self.select({"kind": "text", "key": f"group:{b['ti']}:{b['gi']}"})
+            self.drag = {"type": "bar_move", "ti": b["ti"], "gi": b["gi"], "start": start}
+            self.cur = pos
+            return
+        if self.hit_strip(pos):
+            self.select({"kind": "strip"})
+            self.drag = {"type": "strip", "start": start}
+            self.cur = pos
+            return
+        pn = self.hit_panel(pos)
+        if pn:
+            self.select({"kind": "panel", "row": pn["row"]})
+            self.drag = {"type": "panel", "start": start}
+            self.cur = pos
+            return
+        self.select(None)
+        self.objectSelected.emit({})
+        self.drag = {"type": "band", "start": start}
+        self.cur = pos
+
+    def _lane_tier_for_panels(self):
+        """The name tier a lane drag across a panel selects (the one right above the blot)."""
+        lt = [t for t in self.tiers() if t["kind"] == "lanes"]
+        return lt[-1]["ti"] if lt else None
+
+    def _drag_move(self, pos):
+        d = self.drag
+        now = self.to_in(pos)
+        if now is None:
+            return
+        if d["type"] == "cells":
+            li = self.nearest_lane(now[0])
+            if li is not None:
+                a = d["anchor"]
+                self.selected = {"kind": "cells", "ti": d["ti"], "lanes": list(range(min(a, li), max(a, li) + 1)), "anchor": a}
+                self._place_overlays()
+        elif d["type"] == "panel":
+            if abs(pos.x() - self._press.x()) > 6 and self._lane_tier_for_panels() is not None:
+                a, b = self.nearest_lane(d["start"][0]), self.nearest_lane(now[0])
+                if a is not None and b is not None:
+                    d["lanes"] = True
+                    self.selected = {"kind": "cells", "ti": self._lane_tier_for_panels(),
+                                     "lanes": list(range(min(a, b), max(a, b) + 1)), "anchor": a}
+                    self._place_overlays()
+        elif d["type"] == "move":
+            self._snap_x = None
+            if len(d["keys"]) == 1:
+                t = self.text_by_key(d["keys"][0])
+                if t:
+                    k, _, _ = self._k()
+                    dx = now[0] - d["start"][0]
+                    cands = [p["x_blot"] for p in self.layout_["panels"]]
+                    cands += [p["x_blot"] + self.layout_.get("panel_w", 0) for p in self.layout_["panels"]]
+                    cands += [(o["x0"] + o["x1"]) / 2 for o in self.texts() if o["key"] != t["key"]]
+                    best = None
+                    for edge in (t["x0"], t["x1"], (t["x0"] + t["x1"]) / 2):
+                        for c in cands:
+                            gap = (c - (edge + dx)) * k
+                            if abs(gap) <= 5 and (best is None or abs(gap) < abs(best[0])):
+                                best = (gap, c, c - edge)
+                    if best and not (QtWidgets.QApplication.keyboardModifiers() & Qt.ControlModifier):
+                        self._snap_x = (best[1], best[2])
 
     def mouseReleaseEvent(self, e):
         if getattr(self, "_pan", None) is not None:
             self._pan = None
             return
-        if self.drag:
-            kind, target, start = self.drag
-            pos = e.position().toPoint()
-            end = self.to_in(pos)
-            self.drag = None
-            self.cur = None
-            self.update()
-            if end is None:
-                return
-            if self._press is not None and (pos - self._press).manhattanLength() < 4:
-                self.select(self.hit_object(pos))  # a click in edit mode selects
-                return
-            dx, dy = end[0] - start[0], end[1] - start[1]
-            if max(abs(dx), abs(dy)) < 1e-4:
-                return
-            if kind == "text":
-                self.textMoved.emit(target["key"], dx, dy)
-            elif kind == "strip":
-                self.stripMoved.emit(dx)
-            else:
-                self.edited.emit(kind, target["row"], dy if kind in ("top", "bottom") else dx)
+        if not self.drag or e.button() != Qt.LeftButton:
+            super().mouseReleaseEvent(e)
             return
-        super().mouseReleaseEvent(e)
+        d, self.drag = self.drag, None
+        pos = e.position().toPoint()
+        end = self.to_in(pos)
+        self.cur = None
+        snap, self._snap_x = self._snap_x, None
+        self.unsetCursor()
+        clicked = self._press is not None and (pos - self._press).manhattanLength() < 4
+        self._place_overlays()
+        self.update()
+        if end is None:
+            return
+        dx, dy = end[0] - d["start"][0], end[1] - d["start"][1]
+        typ = d["type"]
+        if typ in ("cells",) or (typ == "panel" and d.get("lanes")):
+            self.objectSelected.emit(self.selected or {})
+            return
+        if clicked:
+            return
+        if typ == "move":
+            if snap is not None:
+                dx = snap[1]
+            for key in d["keys"]:
+                self.textMoved.emit(key, dx, dy)
+        elif typ == "strip":
+            self.stripMoved.emit(dx)
+        elif typ == "edge":
+            self.edited.emit(d["edge"], d["panel"]["row"], dy if d["edge"] in ("top", "bottom") else dx)
+        elif typ == "resize":
+            t = self.text_by_key(d["key"])
+            if t:
+                cx, cy = (t["x0"] + t["x1"]) / 2, (t["y0"] + t["y1"]) / 2
+                d0 = max(1e-4, np.hypot(d["start"][0] - cx, d["start"][1] - cy))
+                d1 = np.hypot(end[0] - cx, end[1] - cy)
+                self.textResized.emit(d["key"], float(max(0.2, d1 / d0)))
+        elif typ == "rotate":
+            t = self.text_by_key(d["key"])
+            if t:
+                cx, cy = (t["x0"] + t["x1"]) / 2, (t["y0"] + t["y1"]) / 2
+                ang = -(np.degrees(np.arctan2(end[1] - cy, end[0] - cx)) + 90.0)
+                step = 15.0 if e.modifiers() & Qt.ShiftModifier else 5.0
+                ang = (round(ang / step) * step + 180.0) % 360.0 - 180.0
+                self.textRotated.emit(d["key"], float(ang))
+        elif typ == "bar_end":
+            li = self.nearest_lane(end[0])
+            b = next((b for b in self.layout_.get("bars", []) if b["ti"] == d["ti"] and b["gi"] == d["gi"]), None)
+            if li is not None and b is not None:
+                first, last = self.nearest_lane(b["xa"] + 0.42 * self.pitch()), self.nearest_lane(b["xb"] - 0.42 * self.pitch())
+                if d["end"] == "first":
+                    first = min(li, last)
+                else:
+                    last = max(li, first)
+                self.groupResized.emit(d["ti"], d["gi"], first, last)
+        elif typ == "bar_move":
+            b = next((b for b in self.layout_.get("bars", []) if b["ti"] == d["ti"] and b["gi"] == d["gi"]), None)
+            if b is not None:
+                shift = int(round(dx / max(self.pitch(), 1e-6)))
+                first = self.nearest_lane(b["xa"] + 0.42 * self.pitch())
+                last = self.nearest_lane(b["xb"] - 0.42 * self.pitch())
+                n = len(self.lane_xs())
+                if shift and first is not None and last is not None:
+                    shift = max(-first, min(n - 1 - last, shift))
+                    if shift:
+                        self.groupResized.emit(d["ti"], d["gi"], first + shift, last + shift)
+        elif typ == "grip":
+            n = self._tier_drop_index(end[1])
+            if n is not None:
+                to = n if n <= d["ti"] else n - 1  # insertion point -> new index
+                if to != d["ti"]:
+                    self.tierMoved.emit(d["ti"], to)
+        elif typ == "band":
+            x0, x1 = sorted((d["start"][0], end[0]))
+            y0, y1 = sorted((d["start"][1], end[1]))
+            keys = [t["key"] for t in self.texts() if t["x1"] >= x0 and t["x0"] <= x1 and t["y1"] >= y0 and t["y0"] <= y1]
+            lane_keys = [k_ for k_ in keys if k_.startswith("lane:")]
+            tis = {k_.split(":")[1] for k_ in lane_keys}
+            if keys and len(lane_keys) == len(keys) and len(tis) == 1:
+                ti = int(tis.pop())
+                self.select({"kind": "cells", "ti": ti, "lanes": sorted(int(k_.split(":")[2]) for k_ in lane_keys)})
+            elif len(keys) == 1:
+                self.select({"kind": "text", "key": keys[0]})
+            elif keys:
+                self.select({"kind": "texts", "keys": keys})
+
+    def _tier_drop_index(self, y) -> Optional[int]:
+        ts = self.tiers()
+        if not ts:
+            return None
+        return sum(1 for t in ts if (t["y0"] + t["y1"]) / 2 < y)  # tiers whose middle is above the drop point
 
     def mouseDoubleClickEvent(self, e):
         if e.button() == Qt.LeftButton:
-            sel = self.hit_object(e.position().toPoint())
-            if sel:  # double-click on an object: select it and start editing (drag to change)
-                self.select(sel)
-                if not self.edit_mode:
-                    self.modeToggled.emit(True)
-                return
+            obj = self.hit_object(e.position().toPoint())
+            if obj:
+                if obj["kind"] == "panel":
+                    return
+                self.select(obj)
+                if self.start_edit():
+                    return
         super().mouseDoubleClickEvent(e)
 
     def contextMenuEvent(self, e):
-        t = self.hit_text(e.pos())
-        if t:
-            self.textMenu.emit(t["key"], e.globalPos())
-            return
-        menu = QtWidgets.QMenu(self)
-        act = menu.addAction("편집 모드 (패널 가장자리·글자·마커 띠 드래그)")
-        act.setCheckable(True)
-        act.setChecked(self.edit_mode)
-        act.toggled.connect(self.modeToggled.emit)
-        menu.exec(e.globalPos())
+        self.finish_edit()
+        obj = self.hit_object(e.pos())
+        h = self.hit_handle(e.pos())
+        if h and h["type"] == "grip":
+            obj = {"kind": "tier", "ti": h["ti"]}
+        sel = self.selected or {}
+        inside = obj is not None and (
+            (obj["kind"] == "cells" and sel.get("kind") == "cells" and obj["ti"] == sel["ti"] and obj["lanes"][0] in sel["lanes"])
+            or (obj["kind"] == "text" and obj["key"] in self._sel_keys()))
+        if obj is not None and not inside:
+            self.select(obj)
+        self.contextRequested.emit(dict(self.selected or {}), e.globalPos())
 
+    # ------------------------------------------------------------ keys
     def keyPressEvent(self, e):
-        if e.key() == Qt.Key_Space and not e.isAutoRepeat():
+        key, mods = e.key(), e.modifiers()
+        sel = self.selected or {}
+        if key == Qt.Key_Space and not e.isAutoRepeat():
             self._space = True
             self.setCursor(Qt.OpenHandCursor)
             return
-        if e.key() == Qt.Key_Escape and self.edit_mode:
-            self.modeToggled.emit(False)
+        if key == Qt.Key_Escape:
+            self.select(None)
+            self.objectSelected.emit({})
+            return
+        cmd = bool(mods & Qt.ControlModifier)
+        if cmd and key in (Qt.Key_Up, Qt.Key_Down) and sel.get("kind") in ("tier", "cells"):
+            ti = sel["ti"]
+            to = ti - 1 if key == Qt.Key_Up else ti + 1
+            if 0 <= to < len(self.tiers()):
+                self.tierMoved.emit(ti, to)
+            return
+        if cmd and key in (Qt.Key_B, Qt.Key_I, Qt.Key_D, Qt.Key_G, Qt.Key_Plus, Qt.Key_Equal, Qt.Key_Minus):
+            act = {Qt.Key_B: "bold", Qt.Key_I: "italic", Qt.Key_D: "dup", Qt.Key_G: "group", Qt.Key_Plus: "bigger",
+                   Qt.Key_Equal: "bigger", Qt.Key_Minus: "smaller"}[key]
+            if sel:
+                self.keyAction.emit(act, dict(sel))
+            return
+        if key in (Qt.Key_Delete, Qt.Key_Backspace) and sel:
+            self.keyAction.emit("delete", dict(sel))
+            return
+        if key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_F2) and self.editable():
+            self.start_edit()
+            return
+        if sel.get("kind") == "cells":
+            if key == Qt.Key_Tab or (key == Qt.Key_Right and not cmd):
+                self.move_cell(1)
+                return
+            if key == Qt.Key_Backtab or (key == Qt.Key_Left and not cmd):
+                self.move_cell(-1)
+                return
+            if key in (Qt.Key_Up, Qt.Key_Down):
+                self.move_tier_cell(-1 if key == Qt.Key_Up else 1)
+                return
+        if sel.get("kind") in ("text", "texts") and key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+            step = (1.0 if mods & Qt.ShiftModifier else 0.1) / 25.4  # 0.1 mm, Shift: 1 mm
+            dx = {Qt.Key_Left: -step, Qt.Key_Right: step}.get(key, 0.0)
+            dy = {Qt.Key_Up: -step, Qt.Key_Down: step}.get(key, 0.0)
+            for k_ in self._sel_keys():
+                self.textMoved.emit(k_, dx, dy)
+            return
+        txt = e.text()
+        if txt and txt.isprintable() and not cmd and self.editable():  # just typing: replace the text
+            self.start_edit(initial=txt)
             return
         super().keyPressEvent(e)
 
@@ -468,7 +1104,29 @@ class PreviewLabel(QtWidgets.QLabel):
             e.acceptProposedAction()
             self.filesDropped.emit(paths)
 
-    PAPER_PAD = 18  # white paper around the figure on the canvas (mockup 1.0.1)
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._place_overlays()
+
+    # ------------------------------------------------------------ painting
+    def _outline(self, qp, r: QtCore.QRectF, color, width=1.5, style=Qt.SolidLine, fill=None, radius=2.0):
+        """Every outline sets its own brush: a brush left over from the previous shape once
+        painted the edit-mode guides white over the figure (1.1.0 bug)."""
+        qp.setPen(QtGui.QPen(color, width, style))
+        qp.setBrush(fill if fill is not None else Qt.NoBrush)
+        qp.drawRoundedRect(r, radius, radius)
+        qp.setBrush(Qt.NoBrush)
+
+    def _handle(self, qp, p: QtCore.QPointF, round_=False):
+        s = self.HANDLE
+        r = QtCore.QRectF(p.x() - s / 2, p.y() - s / 2, s, s)
+        qp.setPen(QtGui.QPen(self.BLUE, 1.5))
+        qp.setBrush(QtGui.QColor("white"))
+        if round_:
+            qp.drawEllipse(r)
+        else:
+            qp.drawRoundedRect(r, 1.5, 1.5)
+        qp.setBrush(Qt.NoBrush)
 
     def paintEvent(self, e):
         k, ox, oy = self._k()
@@ -490,47 +1148,125 @@ class PreviewLabel(QtWidgets.QLabel):
         if not k:
             return
         qp = QtGui.QPainter(self)
-        if self.selected:
-            blue = theme.color("blue")
-            qp.setRenderHint(QtGui.QPainter.Antialiasing)
-            for x, y, w_, h_ in self._selected_rects():  # blue outline with four corner dots (mockup board A)
-                r = QtCore.QRectF(ox + x * k - 3, oy + y * k - 3, w_ * k + 6, h_ * k + 6)
-                qp.setPen(QtGui.QPen(blue, 1.5))
+        qp.setRenderHint(QtGui.QPainter.Antialiasing)
+        qp.setBrush(Qt.NoBrush)
+        sel = self.selected or {}
+        editing = self.editor.isVisible()
+        # name-tier cells: faint dotted boxes so empty cells can be found (screen only, never exported)
+        faint = QtGui.QColor(0, 0, 0, 45)
+        for t in self.tiers():
+            if t["kind"] == "lanes" and not t.get("auto"):
+                for li in range(len(self.lane_xs())):
+                    r = self.cell_rect(t["ti"], li)
+                    if r:
+                        self._outline(qp, self.to_screen(r), faint, 1, Qt.DotLine, radius=1)
+        # tier grips (⋮⋮) in the paper margin
+        for t in self.tiers():
+            g = self.grip_rect_screen(t["ti"])
+            if g is None:
+                continue
+            on = sel.get("kind") == "tier" and sel["ti"] == t["ti"]
+            if on:
+                qp.setPen(Qt.NoPen)
+                qp.setBrush(self.BLUE)
+                qp.drawRoundedRect(g, 3, 3)
                 qp.setBrush(Qt.NoBrush)
-                qp.drawRoundedRect(r, 2, 2)
-                qp.setBrush(QtGui.QColor("white"))
-                for c in (r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight()):
-                    qp.drawRoundedRect(QtCore.QRectF(c.x() - 3.5, c.y() - 3.5, 7, 7), 2, 2)
-        if not self.edit_mode:
-            qp.end()
-            return
-        pw = self.layout_.get("panel_w", 0)
-        qp.setPen(QtGui.QPen(QtGui.QColor(120, 120, 120, 150), 1, Qt.DotLine))
-        for t in self.layout_.get("texts", []):
-            qp.drawRect(QtCore.QRectF(ox + t["x0"] * k, oy + t["y0"] * k, (t["x1"] - t["x0"]) * k, (t["y1"] - t["y0"]) * k))
-        qp.setPen(QtGui.QPen(QtGui.QColor("#1e88ff"), 1.5, Qt.DashLine))
-        for p in self.layout_["panels"]:
-            r = QtCore.QRectF(ox + p["x_blot"] * k, oy + p["y"] * k, pw * k, p["h"] * k)
-            qp.drawRect(r)
-            qp.setBrush(QtGui.QColor("#1e88ff"))
-            for hx, hy in ((r.center().x(), r.top()), (r.center().x(), r.bottom()), (r.left(), r.center().y()), (r.right(), r.center().y())):
-                qp.drawRect(QtCore.QRectF(hx - 3, hy - 3, 6, 6))
+            dot = QtGui.QColor("white") if on else QtGui.QColor(0, 0, 0, 70)
+            qp.setPen(Qt.NoPen)
+            qp.setBrush(dot)
+            for j in range(3):
+                for i in range(2):
+                    qp.drawEllipse(QtCore.QPointF(g.center().x() - 2.2 + 4.4 * i, g.center().y() - 4.5 + 4.5 * j), 1.1, 1.1)
             qp.setBrush(Qt.NoBrush)
-        if self.drag and self.cur is not None:
-            kind, target, start = self.drag
-            qp.setPen(QtGui.QPen(QtGui.QColor("#e65100"), 2))
-            if kind in ("top", "bottom"):
-                qp.drawLine(0, self.cur.y(), self.width(), self.cur.y())
-            elif kind in ("left", "right"):
-                qp.drawLine(self.cur.x(), 0, self.cur.x(), self.height())
-            else:
-                now = self.to_in(self.cur)
-                dx, dy = now[0] - start[0], now[1] - start[1]
-                if kind == "strip":
+        if self.hover and not self.drag and self.hover not in self._selected_rects():
+            self._outline(qp, self.to_screen(self.hover).adjusted(-2, -2, 2, 2), QtGui.QColor(0, 0, 0, 80), 1)
+        # selection
+        rects = self._selected_rects()
+        kind = sel.get("kind")
+        if kind == "cells":
+            for r in rects:
+                self._outline(qp, self.to_screen(r), self.BLUE, 1.5, fill=QtGui.QColor(10, 102, 214, 28), radius=2)
+        elif kind == "tier":
+            for r in rects:
+                self._outline(qp, self.to_screen(r).adjusted(-3, -2, 3, 2), self.BLUE, 1.5, radius=3)
+        elif kind in ("text", "texts"):
+            for key in self._sel_keys():
+                t = self.text_by_key(key)
+                if t is None:
+                    continue
+                fr = self._text_frame(t)
+                if editing:
+                    self._outline(qp, fr, self.BLUE, 1.5, Qt.DashLine, radius=1)
+                    continue
+                self._outline(qp, fr, self.BLUE, 1.5, radius=1)
+                if kind == "text":
+                    hp = self._handle_points(fr)
+                    rp = self._rot_handle(t)
+                    qp.setPen(QtGui.QPen(self.BLUE, 1.2))
+                    qp.drawLine(QtCore.QPointF(rp.x(), rp.y() + 4), hp["t"])
+                    self._handle(qp, rp, round_=True)
+                    for name in ("tl", "tr", "bl", "br"):
+                        self._handle(qp, hp[name])
+            if kind == "text" and sel["key"].startswith("group:"):
+                _, ti, gi = sel["key"].split(":")
+                for b in self.layout_.get("bars", []):
+                    if b["ti"] == int(ti) and b["gi"] == int(gi):
+                        for x in (b["xa"], b["xb"]):
+                            self._handle(qp, QtCore.QPointF(ox + x * k, oy + b["y"] * k))
+        elif rects:
+            for r in rects:
+                sr = self.to_screen(r).adjusted(-2, -2, 2, 2)
+                self._outline(qp, sr, self.BLUE, 1.5, radius=2)
+                if kind in ("panel", "blot"):
+                    for name in ("t", "b", "l", "r"):
+                        self._handle(qp, self._handle_points(sr)[name])
+        # drag feedback
+        d = self.drag
+        if d and self.cur is not None:
+            now = self.to_in(self.cur)
+            orange = QtGui.QColor("#e65100")
+            if d["type"] == "band" and now is not None:
+                r = QtCore.QRectF(QtCore.QPointF(ox + d["start"][0] * k, oy + d["start"][1] * k), QtCore.QPointF(self.cur)).normalized()
+                self._outline(qp, r, self.BLUE, 1, Qt.DashLine, fill=QtGui.QColor(10, 102, 214, 20), radius=0)
+            elif d["type"] == "edge":
+                qp.setPen(QtGui.QPen(orange, 2))
+                if d["edge"] in ("top", "bottom"):
+                    qp.drawLine(0, self.cur.y(), self.width(), self.cur.y())
+                else:
+                    qp.drawLine(self.cur.x(), 0, self.cur.x(), self.height())
+            elif d["type"] in ("move", "strip") and now is not None:
+                dx, dy = now[0] - d["start"][0], now[1] - d["start"][1]
+                if d["type"] == "strip":
                     dy = 0.0
-                r = (target["x0"], target["y0"], target["x1"] - target["x0"], target["y1"] - target["y0"]) if kind == "text" \
-                    else (target["x"], target["y"], target["w"], target["h"])
-                qp.drawRect(QtCore.QRectF(ox + (r[0] + dx) * k, oy + (r[1] + dy) * k, r[2] * k, r[3] * k))
+                    rs = [(st["x"], st["y"], st["w"], st["h"]) for st in self.layout_.get("strips", [])]
+                else:
+                    if self._snap_x is not None:
+                        dx = self._snap_x[1]
+                    rs = [self.text_rect(t) for t in (self.text_by_key(k_) for k_ in d["keys"]) if t]
+                for r in rs:
+                    self._outline(qp, self.to_screen((r[0] + dx, r[1] + dy, r[2], r[3])), orange, 1.5, Qt.DashLine, radius=1)
+                if self._snap_x is not None:
+                    qp.setPen(QtGui.QPen(self.PINK, 1))
+                    x = ox + self._snap_x[0] * k
+                    qp.drawLine(QtCore.QPointF(x, oy - self.PAPER_PAD + 4), QtCore.QPointF(x, oy + self.pixmap().height() + self.PAPER_PAD - 4))
+            elif d["type"] in ("bar_end", "bar_move") and now is not None:
+                qp.setPen(QtGui.QPen(orange, 2))
+                qp.drawLine(self.cur.x(), 0, self.cur.x(), self.height())
+            elif d["type"] == "grip" and now is not None:
+                to = self._tier_drop_index(now[1])
+                ts = self.tiers()
+                if ts and to is not None:
+                    y = ts[to]["y0"] if to < len(ts) else ts[-1]["y1"]
+                    xs = [x for x in self.lane_xs() if np.isfinite(x)]
+                    x0 = ox + (min(xs) - self.pitch() / 2) * k if xs else ox
+                    x1 = ox + (max(xs) + self.pitch() / 2) * k if xs else ox + self.pixmap().width()
+                    qp.setPen(QtGui.QPen(self.BLUE, 2))
+                    qp.drawLine(QtCore.QPointF(x0, oy + y * k), QtCore.QPointF(x1, oy + y * k))
+                    self._handle(qp, QtCore.QPointF(x0, oy + y * k), round_=True)
+                    tr = self.tier_rect(d["ti"])
+                    if tr:
+                        ghost = self.to_screen(tr).translated(0, self.cur.y() - self._press.y())
+                        self._outline(qp, ghost, self.BLUE, 1.5, fill=QtGui.QColor(255, 255, 255, 170), radius=3)
         qp.end()
 
 
@@ -588,7 +1324,7 @@ class FigureEditor(QtWidgets.QWidget):
         sl.addSpacing(6)
         sl.addWidget(_ctl.section("추가"))
         self.add_list = _ctl.SideList()
-        self.ADD_ROWS = [("lanes", "레인 이름 층"), ("groups", "그룹 막대 층"), ("cond", "조건 글자"),
+        self.ADD_ROWS = [("lanes", "이름 층 (위에 한 줄)"), ("groups", "그룹 막대"), ("cond", "조건 글자"),
                          ("kda", "마커 kDa 눈금"), ("number", "정량 숫자 줄"), ("image", "이미지 (끌어다 놓기)")]
         self.add_list.set_rows([(t, "") for _, t in self.ADD_ROWS])
         self.add_list.itemClicked.connect(lambda it: (self.add_from_list(self.ADD_ROWS[self.add_list.row(it)][0]),
@@ -634,10 +1370,18 @@ class FigureEditor(QtWidgets.QWidget):
         self.preview.edited.connect(self.on_crop_dragged)
         self.preview.textMoved.connect(self.on_text_moved)
         self.preview.stripMoved.connect(self.on_strip_moved)
-        self.preview.textMenu.connect(self.show_text_menu)
+        self.preview.contextRequested.connect(self.on_context_menu)
         self.preview.filesDropped.connect(self.on_files_dropped)
-        self.preview.objectSelected.connect(self.on_object_selected)
-        self.preview.modeToggled.connect(lambda on: self.w_editmode.setChecked(on))
+        self.preview.objectSelected.connect(lambda sel: self.on_object_selected(sel or None))
+        self.preview.textCommitted.connect(self.on_text_committed)
+        self.preview.textResized.connect(self.on_text_resized)
+        self.preview.textRotated.connect(lambda key, a: self.apply_style({"kind": "text", "key": key}, rot=a))
+        self.preview.groupResized.connect(self.on_group_resized)
+        self.preview.tierMoved.connect(self.move_tier_to)
+        self.preview.keyAction.connect(self.on_key_action)
+        self.preview.toolAction.connect(self.on_tool_action)
+        self.preview.text_getter = self.sel_text
+        self.preview.style_getter = self.sel_style
         pv = QtWidgets.QScrollArea()
         pv.setWidgetResizable(True)
         pv.setWidget(self.preview)
@@ -653,12 +1397,6 @@ class FigureEditor(QtWidgets.QWidget):
         pw = QtWidgets.QWidget()
         pl = QtWidgets.QVBoxLayout(pw)
         pl.setContentsMargins(0, 0, 0, 0)
-        self.w_editmode = QtWidgets.QCheckBox("편집 모드")
-        self.w_editmode.setToolTip("패널 위/아래 가장자리: 그 단백질 패널의 높이, 왼쪽/오른쪽: 모든 패널의 너비 (레인 정렬 유지).\n"
-                                   "글자: 끌어서 이동 (우클릭: 크기·각도). 마커 띠: 왼쪽으로 끌면 블롯과 간격이 생깁니다.\n"
-                                   "마커 띠와 kDa 눈금은 패널 범위를 따라갑니다. TIF를 미리보기에 끌어다 놓으면 이미지로 열립니다.")
-        self.w_editmode.toggled.connect(self.on_edit_mode)
-        _theme.switch(self.w_editmode)
         pl.addWidget(pv, 1)
         foot = QtWidgets.QHBoxLayout()
         foot.addWidget(self.size_label)
@@ -705,11 +1443,10 @@ class FigureEditor(QtWidgets.QWidget):
         self.pane_title = QtWidgets.QLabel("미리보기")
         self.pane_title.setStyleSheet("font-size: 15px; font-weight: 700;")
         head.addWidget(self.pane_title)
-        self.pane_hint = QtWidgets.QLabel("클릭: 선택 · 더블클릭: 편집 모드 · 끌기: 이동")
+        self.pane_hint = QtWidgets.QLabel("클릭: 선택 · 두 번 클릭/타이핑: 글자 고치기 · 레인 이름 긁기 → 우클릭: 그룹 · ⋮⋮ 끌기: 층 옮기기")
         self.pane_hint.setToolTip("그림의 대비는 보기용입니다. 정량값은 원본 raw intensity로 계산됩니다.")
         _theme.hint(self.pane_hint)
         head.addWidget(self.pane_hint, 1)
-        head.addWidget(self.w_editmode)
         self.view_seg = _ctl.Segmented([("preview", "미리보기"), ("ref", "마커 참고")], small=True)
         self.view_seg.changed.connect(lambda k: self.right.setCurrentIndex(1 if k == "ref" else 0))
         head.addWidget(self.view_seg)
@@ -839,7 +1576,7 @@ class FigureEditor(QtWidgets.QWidget):
         self.w_gel_label.setPlaceholderText("예: Myco PCR")
         self.w_gel_label.editingFinished.connect(lambda: self.set("gel_label", self.w_gel_label.text()))
         f.addRow("겔 왼쪽 라벨", self.w_gel_label)
-        hint = QtWidgets.QLabel("겔 전체 패널은 미리보기 편집 모드에서 가장자리를 끌어 자를 수 있습니다.")
+        hint = QtWidgets.QLabel("겔 전체 패널을 클릭하면 생기는 가장자리 네모를 끌어 자를 수 있습니다.")
         hint.setWordWrap(True)
         theme.hint(hint)
         f.addRow(hint)
@@ -1074,14 +1811,16 @@ class FigureEditor(QtWidgets.QWidget):
                     continue
                 objs.append((("" if multi else "   ") + (p.get("label") or p["row"]), tag if multi else "",
                              {"kind": "panel", "row": p["row"]}))
-        for ti, t in enumerate(s.get("tiers", [])):
+        for ti, t in enumerate(s.get("tiers", [])):  # ⋮⋮ rows: drag to change the order of the tiers
             if t.get("kind") == "lanes":
-                objs.append(("   레인 이름", own_tag if multi else "", {"kind": "text", "key": f"lane:{ti}:0"}))
-            elif t.get("groups"):
-                name = " · ".join(g.get("text", "") for g in t["groups"][:2])
-                objs.append((f"   그룹 막대 · {name}", "", {"kind": "text", "key": f"group:{ti}:0"}))
-            if (t.get("condition") or "").strip():
-                objs.append((f"   조건 글자 · {t['condition']}", "", {"kind": "text", "key": f"cond:{ti}"}))
+                if t.get("auto"):
+                    name = "레인 이름"
+                else:
+                    name = "이름 층 · " + ((t.get("condition") or "").strip() or
+                                          " ".join(x for x in figure.tier_texts(s, t)[:4] if x))
+            else:
+                name = "그룹 막대 · " + " · ".join(g.get("text", "") for g in t.get("groups", [])[:2])
+            objs.append((f"⋮⋮ {name}"[:40], own_tag if multi and t.get("auto") else "", {"kind": "tier", "ti": ti}))
         if any(k.get("kda") not in (None, "") for k in s.get("kda", [])):
             objs.append(("   kDa 눈금", "", {"kind": "text", "key": "kda:0"}))
         if self.doc is not None and getattr(self.doc, "marker", None) is not None and s.get("show_strip"):
@@ -1096,15 +1835,20 @@ class FigureEditor(QtWidgets.QWidget):
             it = self.obj_list.item(i)
             it.setData(Qt.UserRole, sel)
             fl = it.flags() & ~Qt.ItemIsDropEnabled
-            it.setFlags(fl | Qt.ItemIsDragEnabled if sel.get("kind") == "panel" else fl & ~Qt.ItemIsDragEnabled)
+            it.setFlags(fl | Qt.ItemIsDragEnabled if sel.get("kind") in ("panel", "tier") else fl & ~Qt.ItemIsDragEnabled)
 
     def _on_objects_moved(self):
         """Panel rows were dragged in 그림 안의 것: the panels follow the new order."""
-        order = []
+        order, tier_order = [], []
         for i in range(self.obj_list.count()):
             sel = self.obj_list.item(i).data(Qt.UserRole) or {}
             if sel.get("kind") == "panel":
                 order.append(sel["row"])
+            elif sel.get("kind") == "tier":
+                tier_order.append(sel["ti"])
+        tiers = self.s["tiers"]
+        if sorted(tier_order) == list(range(len(tiers))) and tier_order != sorted(tier_order):
+            self._set_tiers([tiers[i] for i in tier_order])
         by = {p["row"]: p for p in self.s["panels"]}
         moved = [by[r] for r in order if r in by]
         rest = [p for p in self.s["panels"] if p["row"] not in order]
@@ -1279,22 +2023,28 @@ class FigureEditor(QtWidgets.QWidget):
         if self.doc is None:
             return
         s = self.s
-        if what in ("lanes", "groups"):
-            self.cur_tier = 0
-            self.add_tier(what)
-            ti = 0
-            key = f"lane:{ti}:0" if what == "lanes" else f"group:{ti}:0"
-            self.load_from_settings()
-            self.select_from_key(key)
+        sel = self.preview.selected or {}
+        if what == "lanes":  # 이름 층: a new tier on top, every cell '–' (mockup board 2)
+            self.add_tier_at(sel["ti"] if sel.get("kind") in ("tier", "cells") else 0)
+            self.status("새 이름 층: 칸을 클릭하거나 긁어서 고른 뒤 바로 타이핑하세요. 왼쪽 ⋮⋮ 를 끌면 층이 통째로 옮겨집니다")
+        elif what == "groups":
+            if sel.get("kind") == "cells":
+                self.make_group(sel["ti"], sel["lanes"])
+                return
+            lane_tiers = [i for i, t in enumerate(s["tiers"]) if t["kind"] == "lanes"]
+            ti = lane_tiers[-1] if lane_tiers else 0
+            n = len(s["lanes"])
+            self.make_group(ti, list(range(min(2, n))))
+            self.status("레인 이름을 마우스로 긁어 고른 뒤 우클릭 › ‘그룹 막대로 묶기’ 로도 만들 수 있습니다")
         elif what == "cond":
             if not s["tiers"]:
-                self.cur_tier = 0
-                self.add_tier("lanes")
+                self.add_tier_at(0)
             t = s["tiers"][0]
             if not (t.get("condition") or "").strip():
                 t["condition"] = "Condition"
             self.load_from_settings()
             self.select_from_key("cond:0")
+            self.preview.start_edit()
         elif what == "kda":
             self.right.setCurrentIndex(1)
             self.status("마커 참고: 마커 밴드를 클릭하고 크기(kDa/bp)를 넣으세요")
@@ -1521,35 +2271,17 @@ class FigureEditor(QtWidgets.QWidget):
         self.schedule()
 
     def add_tier(self, kind):
-        tier = figure.default_tier(kind, len(self.s["lanes"]))
-        if kind == "groups":
+        i = self.add_tier_at(max(0, self.cur_tier), kind)
+        if kind == "groups" and self.s["lanes"]:
             n = len(self.s["lanes"])
-            tier["groups"] = [{"text": "Group", "first": 0, "last": max(0, min(1, n - 1))}] if n else []
-        # new tiers go above the selected one (headers usually grow upwards)
-        self.s["tiers"].insert(max(0, self.cur_tier), tier)
-        self.fill_tiers()
-        self.schedule()
+            self.s["tiers"][i]["groups"] = [{"text": "Group", "first": 0, "last": max(0, min(1, n - 1))}]
+            self.load_from_settings()
 
     def move_tier(self, d):
-        tiers = self.s["tiers"]
-        i, j = self.cur_tier, self.cur_tier + d
-        if 0 <= i < len(tiers) and 0 <= j < len(tiers):
-            tiers[i], tiers[j] = tiers[j], tiers[i]
-            self.cur_tier = j
-            self.fill_tiers()
-            self.schedule()
+        self.move_tier_to(self.cur_tier, self.cur_tier + d)
 
     def delete_tier(self):
-        tier = self.current_tier()
-        if tier is None:
-            return
-        if tier.get("auto"):
-            QtWidgets.QMessageBox.information(self, "층 삭제", "레인 그룹 이름 층은 지울 수 없습니다. 텍스트를 비우면 그림에서 사라집니다.")
-            return
-        del self.s["tiers"][self.cur_tier]
-        self.cur_tier = max(0, self.cur_tier - 1)
-        self.fill_tiers()
-        self.schedule()
+        self.delete_tier_at(self.cur_tier)
 
     # groups of the selected group tier
     def _lane_combo(self, value, on_change):
@@ -1660,33 +2392,464 @@ class FigureEditor(QtWidgets.QWidget):
         self.s["overrides"] = {}
         self.schedule()
 
+    # ------------------------------------------------------------ direct editing in the preview (1.2)
+    @staticmethod
+    def key_cat(key: str) -> str:
+        head = key.split(":")[0]
+        return {"numlabel": "number", "num": "number"}.get(head, head)
+
+    def sel_keys(self, sel) -> List[str]:
+        """Text keys a selection stands for (a tier: all its texts)."""
+        sel = sel or {}
+        kind = sel.get("kind")
+        if kind == "text":
+            return [sel["key"]]
+        if kind == "texts":
+            return list(sel["keys"])
+        if kind == "cells":
+            return [f"lane:{sel['ti']}:{li}" for li in sel["lanes"]]
+        if kind == "tier" and 0 <= sel["ti"] < len(self.s["tiers"]):
+            t = self.s["tiers"][sel["ti"]]
+            if t["kind"] == "lanes":
+                return [f"lane:{sel['ti']}:{li}" for li in range(len(self.s["lanes"]))]
+            return [f"group:{sel['ti']}:{gi}" for gi in range(len(t.get("groups", [])))]
+        return []
+
+    def sel_text(self, sel) -> Optional[str]:
+        """Current text of a selection for the in-place editor (None = not editable)."""
+        keys = self.sel_keys(sel) if (sel or {}).get("kind") in ("text", "texts", "cells") else []
+        vals = []
+        for key in keys:
+            try:
+                acc = self._text_access(key)
+            except (IndexError, KeyError, ValueError):
+                acc = None
+            if acc is None:
+                return None
+            vals.append(str(acc[0]()).replace("\n", "|"))
+        if not vals:
+            return None
+        return vals[0] if len(set(vals)) == 1 else ""
+
+    def on_text_committed(self, sel, text):
+        for key in self.sel_keys(sel):
+            acc = self._text_access(key)
+            if acc is not None:
+                acc[1](text)
+        self.load_from_settings()
+        self.preview.select(sel)
+        self.on_object_selected(sel)
+
+    def sel_style(self, sel) -> dict:
+        keys = self.sel_keys(sel)
+        if not keys:
+            return {}
+        st = [self._key_style(k) for k in keys]
+        out = dict(st[0])
+        out["mixed"] = len({x["size"] for x in st}) > 1
+        return out
+
+    def _key_style(self, key) -> dict:
+        s = self.s
+        cat = self.key_cat(key)
+        o = s["overrides"].get(key, {})
+        head, *rest = key.split(":")
+        tier = s["tiers"][int(rest[0])] if head in ("lane", "group", "cond") and rest and int(rest[0]) < len(s["tiers"]) else {}
+        bold_default = cat == "protein" and s.get("label_bold", True)
+        rot = o.get("rot")
+        if rot is None and head in ("lane", "group"):
+            rot = tier.get("rotation", 0)
+        return {"size": float(o.get("size") or s["fonts"].get(cat, s.get("font_size", 8.0))),
+                "bold": bool(o.get("bold", bold_default)), "italic": bool(o.get("italic", tier.get("italic", False))),
+                "rot": float(rot or 0)}
+
+    def apply_style(self, sel, **kw):
+        """size / bold / italic / rot for every text of a selection (a tier's angle is the tier's)."""
+        if (sel or {}).get("kind") == "tier" and "rot" in kw:
+            self.s["tiers"][sel["ti"]]["rotation"] = int(round(kw.pop("rot")))
+        for key in self.sel_keys(sel):
+            o = self.s["overrides"].setdefault(key, {})
+            for k_, v in kw.items():
+                if k_ == "rot" and not v:
+                    o.pop("rot", None)
+                else:
+                    o[k_] = v
+            if not o:
+                self.s["overrides"].pop(key, None)
+        self.render()
+        self.preview.select(sel)
+        self.on_object_selected(sel)
+
+    def on_tool_action(self, act, value, sel):
+        st = self.sel_style(sel)
+        size = float(st.get("size", 8.0))
+        if act == "size":
+            self.apply_style(sel, size=float(value))
+        elif act in ("bigger", "smaller"):
+            self.apply_style(sel, size=max(3.0, size + (0.5 if act == "bigger" else -0.5)))
+        elif act in ("bold", "italic"):
+            self.apply_style(sel, **{act: bool(value)})
+        elif act == "rot":
+            self.apply_style(sel, rot=float(value))
+
+    def on_text_resized(self, key, factor):
+        size = self._key_style(key)["size"]
+        self.apply_style({"kind": "text", "key": key}, size=max(3.0, round(size * factor * 2) / 2))
+
+    def on_key_action(self, act, sel):
+        kind = sel.get("kind")
+        if act in ("bold", "italic"):
+            self.apply_style(sel, **{act: not self.sel_style(sel).get(act)})
+        elif act in ("bigger", "smaller"):
+            self.on_tool_action(act, None, sel)
+        elif act == "dup" and kind in ("tier", "cells"):
+            self.duplicate_tier(sel["ti"])
+        elif act == "group" and kind == "cells":
+            self.make_group(sel["ti"], sel["lanes"])
+        elif act == "delete":
+            self.delete_selection(sel)
+
+    def delete_selection(self, sel):
+        s = self.s
+        kind = sel.get("kind")
+        if kind == "tier":
+            self.delete_tier_at(sel["ti"])
+            return
+        if kind == "panel":
+            p = next((p for p in s["panels"] if p["row"] == sel["row"]), None)
+            if p is not None:
+                p["show"] = False
+                self.preview.select(None)
+                self.load_from_settings()
+                self.status(f"'{p.get('label') or p['row']}' 패널을 그림에서 숨겼습니다 (왼쪽 칩으로 다시 켭니다)")
+            return
+        groups_gone = []
+        for key in self.sel_keys(sel):
+            head, *rest = key.split(":")
+            if head == "group":
+                groups_gone.append((int(rest[0]), int(rest[1])))
+                continue
+            if head == "protein":
+                p = next((p for p in s["panels"] if p["row"] == key.split(":", 1)[1]), None)
+                if p is not None:
+                    p["show"] = False
+                continue
+            acc = self._text_access(key)
+            if acc is not None:
+                acc[1]("")
+        for ti, gi in sorted(groups_gone, reverse=True):
+            del s["tiers"][ti]["groups"][gi]
+        self.preview.select(sel if kind == "cells" else None)
+        self.load_from_settings()
+
+    # ---- tiers
+    def _set_tiers(self, new: list):
+        """Replace the tier list; per-text adjustments (keyed by tier index) follow their tier."""
+        old = self.s["tiers"]
+        where = {id(t): i for i, t in enumerate(new)}
+        remap = {i: where.get(id(t)) for i, t in enumerate(old)}
+        ov = {}
+        for key, o in self.s["overrides"].items():
+            head, *rest = key.split(":")
+            if head in ("lane", "group", "cond") and rest:
+                j = remap.get(int(rest[0]))
+                if j is None:
+                    continue
+                key = ":".join([head, str(j)] + rest[1:])
+            ov[key] = o
+        self.s["overrides"] = ov
+        self.s["tiers"] = new
+
+    def add_tier_at(self, i: int, kind: str = "lanes", pattern: str = "dash"):
+        tiers = list(self.s["tiers"])
+        below = None
+        if pattern == "copy" and i < len(tiers) and tiers[i]["kind"] == "lanes":
+            below = figure.tier_texts(self.s, tiers[i])
+        tier = figure.default_tier(kind, len(self.s["lanes"]), pattern)
+        if below is not None:
+            tier["texts"] = figure.fill_texts("copy", len(self.s["lanes"]), below)
+        i = max(0, min(i, len(tiers)))
+        tiers.insert(i, tier)
+        self._set_tiers(tiers)
+        self.cur_tier = i
+        self.load_from_settings()
+        sel = {"kind": "tier", "ti": i}
+        self.preview.select(sel)
+        self.on_object_selected(sel)
+        return i
+
+    def fill_tier(self, ti: int, pattern: str, lanes: Optional[List[int]] = None):
+        t = self.s["tiers"][ti]
+        if t["kind"] != "lanes":
+            return
+        n = len(self.s["lanes"])
+        below = figure.tier_texts(self.s, self.s["tiers"][ti + 1]) if ti + 1 < len(self.s["tiers"]) and \
+            self.s["tiers"][ti + 1]["kind"] == "lanes" else [l.get("text", "") for l in self.s["lanes"]]
+        vals = figure.fill_texts(pattern, n, below)
+        lanes = list(range(n)) if lanes is None else lanes
+        for j, li in enumerate(sorted(lanes)):
+            v = vals[li] if pattern in ("copy", "dash", "empty") else vals[j] if j < len(vals) else ""
+            if t.get("auto"):
+                self.s["lanes"][li]["text"] = v
+            else:
+                t["texts"][li] = v
+        self.load_from_settings()
+
+    def move_tier_to(self, ti: int, to: int):
+        tiers = list(self.s["tiers"])
+        if not (0 <= ti < len(tiers)) or not (0 <= to < len(tiers)) or ti == to:
+            return
+        t = tiers.pop(ti)
+        tiers.insert(to, t)
+        self._set_tiers(tiers)
+        self.cur_tier = to
+        self.load_from_settings()
+        sel = {"kind": "tier", "ti": to}
+        self.preview.select(sel)
+        self.on_object_selected(sel)
+        self.status(f"층을 {'위' if to < ti else '아래'}로 옮겼습니다")
+
+    def duplicate_tier(self, ti: int):
+        import copy as _copy
+
+        tiers = list(self.s["tiers"])
+        t = _copy.deepcopy(tiers[ti])
+        t.pop("auto", None)
+        if t["kind"] == "lanes":
+            t["texts"] = figure.tier_texts(self.s, tiers[ti])
+        tiers.insert(ti + 1, t)
+        self._set_tiers(tiers)
+        self.load_from_settings()
+        self.preview.select({"kind": "tier", "ti": ti + 1})
+        self.on_object_selected({"kind": "tier", "ti": ti + 1})
+
+    def delete_tier_at(self, ti: int):
+        tiers = list(self.s["tiers"])
+        if not (0 <= ti < len(tiers)):
+            return
+        if tiers[ti].get("auto"):
+            self.status("레인 이름 층은 지울 수 없습니다. 칸을 비우면 그림에서 사라집니다")
+            return
+        del tiers[ti]
+        self._set_tiers(tiers)
+        self.cur_tier = max(0, ti - 1)
+        self.preview.select(None)
+        self.on_object_selected(None)
+        self.load_from_settings()
+
+    # ---- groups
+    def make_group(self, ti: int, lanes: List[int], text: str = "Group"):
+        """그룹 막대로 묶기: a bar over the chosen lanes, in the group tier right above (a new one
+        when there is none or the lanes are taken there); its text is edited at once."""
+        if not lanes:
+            return
+        first, last = min(lanes), max(lanes)
+        tiers = list(self.s["tiers"])
+        above = ti - 1
+        free = above >= 0 and tiers[above]["kind"] == "groups" and all(
+            int(g["last"]) < first or int(g["first"]) > last for g in tiers[above].get("groups", []))
+        if not free:
+            tier = figure.default_tier("groups", len(self.s["lanes"]))
+            tiers.insert(ti, tier)
+            self._set_tiers(tiers)
+            above = ti
+        groups = self.s["tiers"][above].setdefault("groups", [])
+        groups.append({"text": text, "first": first, "last": last})
+        groups.sort(key=lambda g: int(g["first"]))
+        gi = next(i for i, g in enumerate(groups) if int(g["first"]) == first and int(g["last"]) == last)
+        self.load_from_settings()
+        self.render()
+        sel = {"kind": "text", "key": f"group:{above}:{gi}"}
+        self.preview.select(sel)
+        self.on_object_selected(sel)
+        self.preview.start_edit()
+        self.status("그룹 이름을 바로 입력하세요 (Enter로 확정). 막대 끝 네모를 끌면 범위가 바뀝니다")
+
+    def on_group_resized(self, ti, gi, first, last):
+        try:
+            g = self.s["tiers"][ti]["groups"][gi]
+        except (IndexError, KeyError):
+            return
+        g["first"], g["last"] = int(first), int(last)
+        self.load_from_settings()
+        self.render()
+        sel = {"kind": "text", "key": f"group:{ti}:{gi}"}
+        self.preview.select(sel)
+        self.on_object_selected(sel)
+
+    def number_cells(self, ti, lanes):
+        t = self.s["tiers"][ti]
+        for j, li in enumerate(sorted(lanes)):
+            if t.get("auto"):
+                self.s["lanes"][li]["text"] = str(j + 1)
+            else:
+                t["texts"][li] = str(j + 1)
+        self.load_from_settings()
+
+    def ask_same_text(self, sel):
+        v, ok = QtWidgets.QInputDialog.getText(self, "같은 글자 넣기", "고른 칸에 넣을 글자:", text=self.sel_text(sel) or "")
+        if ok:
+            self.on_text_committed(sel, v)
+
+    # ---- context menu (right-click)
+    def on_context_menu(self, sel, gpos):
+        if self.doc is None:
+            return
+        kind = sel.get("kind")
+        menu = QtWidgets.QMenu(self)
+        lanes_lab = lambda ls: ", ".join(  # noqa: E731
+            str(self.s["lanes"][i].get("label", i + 1)) for i in ls[:6]) + (" …" if len(ls) > 6 else "")
+        if kind == "cells":
+            ti, ls = sel["ti"], sel["lanes"]
+            t = menu.addAction(f"레인 {len(ls)}개 ({lanes_lab(ls)})")
+            t.setEnabled(False)
+            a = menu.addAction("그룹 막대로 묶기", lambda: self.make_group(ti, ls))
+            a.setShortcut(QtGui.QKeySequence("Ctrl+G"))
+            menu.addAction("위에 이름 층 추가", lambda: self.add_tier_at(ti))
+            menu.addAction("같은 글자 넣기…", lambda: self.ask_same_text(sel))
+            menu.addAction("번호 매기기 (1, 2, 3 …)", lambda: self.number_cells(ti, ls))
+            sub = menu.addMenu("이 칸들 채우기")
+            for pat, label in figure.TIER_FILLS:
+                sub.addAction(label, lambda pat=pat: self.fill_tier(ti, pat, ls))
+            menu.addSeparator()
+            menu.addAction("글자 크기…", lambda: self._ask_sel_size(sel))
+            menu.addAction("칸 비우기", lambda: self.delete_selection(sel))
+        elif kind == "tier":
+            ti = sel["ti"]
+            tier = self.s["tiers"][ti]
+            if tier["kind"] == "lanes":
+                sub = menu.addMenu("이 층 채우기")
+                for pat, label in figure.TIER_FILLS:
+                    sub.addAction(label, lambda pat=pat: self.fill_tier(ti, pat))
+            menu.addAction("위에 이름 층 추가", lambda: self.add_tier_at(ti))
+            menu.addSeparator()
+            a = menu.addAction("한 층 위로", lambda: self.move_tier_to(ti, ti - 1))
+            a.setEnabled(ti > 0)
+            a = menu.addAction("한 층 아래로", lambda: self.move_tier_to(ti, ti + 1))
+            a.setEnabled(ti + 1 < len(self.s["tiers"]))
+            menu.addAction("층 복제", lambda: self.duplicate_tier(ti))
+            a = menu.addAction("층 삭제", lambda: self.delete_tier_at(ti))
+            a.setEnabled(not tier.get("auto"))
+        elif kind in ("text", "texts"):
+            keys = self.sel_keys(sel)
+            info = self._text_info(keys[0]) or {"text": keys[0]}
+            t = menu.addAction(f"'{info['text'][:24]}'" + (f" 외 {len(keys) - 1}개" if len(keys) > 1 else ""))
+            t.setEnabled(False)
+            if self.sel_text(sel) is not None:
+                menu.addAction("글자 고치기\tEnter", self.preview.start_edit)
+            menu.addAction("글자 크기…", lambda: self._ask_sel_size(sel))
+            st = self.sel_style(sel)
+            menu.addAction(f"각도… ({st.get('rot', 0):g}°)", lambda: self._ask_sel_rot(sel))
+            if any(self.s["overrides"].get(k) for k in keys):
+                menu.addAction("이 글자 조절 모두 초기화", lambda: (
+                    [self.s["overrides"].pop(k, None) for k in keys], self.render()))
+            if kind == "text" and keys[0].startswith("group:"):
+                _, ti, gi = keys[0].split(":")
+                tier = self.s["tiers"][int(ti)]
+                menu.addSeparator()
+                a = menu.addAction("막대 표시")
+                a.setCheckable(True)
+                a.setChecked(bool(tier.get("bar", True)))
+                a.toggled.connect(lambda on: (tier.__setitem__("bar", on), self.render()))
+                menu.addAction("이 그룹 지우기", lambda: self.delete_selection(sel))
+            cat = self.key_cat(keys[0])
+            if cat in figure.FONT_CATEGORIES:
+                menu.addSeparator()
+                label = figure.FONT_CATEGORIES[cat][0]
+                menu.addAction(f"'{label}' 전체 글자 크기… ({self.s['fonts'].get(cat, 8):g} pt)", lambda: self._ask_cat_size(cat))
+        elif kind == "panel":
+            menu.addAction("이 패널 그림에서 숨기기", lambda: self.delete_selection(sel))
+        else:
+            menu.addAction("위에 이름 층 추가", lambda: self.add_tier_at(0))
+        menu.exec(gpos)
+
+    def _ask_sel_size(self, sel):
+        v, ok = QtWidgets.QInputDialog.getDouble(self, "글자 크기", "크기 (pt):", float(self.sel_style(sel).get("size", 8.0)),
+                                                 3.0, 72.0, 1)
+        if ok:
+            self.apply_style(sel, size=float(v))
+
+    def _ask_sel_rot(self, sel):
+        v, ok = QtWidgets.QInputDialog.getDouble(self, "글자 각도", "각도 (도, 반시계 방향 +):",
+                                                 float(self.sel_style(sel).get("rot", 0)), -180.0, 180.0, 0)
+        if ok:
+            self.apply_style(sel, rot=float(v))
+
+    # ---- inspector cards for the new selections
+    def _props_cells(self, sel):
+        ti, ls = sel["ti"], sel["lanes"]
+        f = self._p_box(f"이름 층 {ti + 1} · 칸 {len(ls)}개")
+        e = QtWidgets.QLineEdit(self.sel_text(sel) or "")
+        e.setPlaceholderText("여러 값" if len(ls) > 1 else "")
+        e.setToolTip("'|' = 줄바꿈. 고른 칸 모두에 들어갑니다")
+        e.editingFinished.connect(lambda: e.text() != (self.sel_text(sel) or "") and self.on_text_committed(sel, e.text()))
+        f.addRow("내용", e)
+        self._props_style(f, sel)
+        hb = QtWidgets.QHBoxLayout()
+        b = QtWidgets.QPushButton("그룹 막대로 묶기")
+        b.clicked.connect(lambda: self.make_group(ti, ls))
+        hb.addWidget(b)
+        b = QtWidgets.QPushButton("위에 이름 층 추가")
+        b.clicked.connect(lambda: self.add_tier_at(ti))
+        hb.addWidget(b)
+        f.addRow(hb)
+        self._props_tier_card(ti)
+
+    def _props_style(self, f, sel):
+        st = self.sel_style(sel)
+        sp = _spin(3.0, 72.0, float(st.get("size", 8.0)), 0.5, 1, " pt")
+        sp.valueChanged.connect(lambda v: self.apply_style(sel, size=float(v)))
+        f.addRow("글자 크기", sp)
+        hb = QtWidgets.QHBoxLayout()
+        for key, label in (("bold", "굵게"), ("italic", "기울임")):
+            c = QtWidgets.QCheckBox(label)
+            c.setChecked(bool(st.get(key)))
+            c.toggled.connect(lambda on, key=key: self.apply_style(sel, **{key: on}))
+            hb.addWidget(c)
+        hb.addStretch(1)
+        f.addRow(hb)
+
+    def _props_texts(self, sel):
+        f = self._p_box(f"글자 {len(sel['keys'])}개")
+        theme_lab = QtWidgets.QLabel("여러 개를 골랐습니다. 공통 속성만 바꿉니다.")
+        theme_lab.setWordWrap(True)
+        theme.hint(theme_lab)
+        f.addRow(theme_lab)
+        self._props_style(f, sel)
+
+    def _props_tier_card(self, ti):
+        t = self.s["tiers"][ti]
+        kind = "이름 층" if t["kind"] == "lanes" else "그룹 막대 층"
+        f = self._p_box(f"{kind} {ti + 1}" + (" (레인 이름)" if t.get("auto") else ""))
+        self._p_line(f, "조건 이름", t.get("condition", ""), lambda v: t.__setitem__("condition", v))
+        self._p_combo(f, "조건 위치", [("왼쪽", "left"), ("오른쪽", "right")], t.get("cond_side", "left"),
+                      lambda v: t.__setitem__("cond_side", v))
+        self._p_combo(f, "회전 (층 전체)", [(f"{r}°", r) for r in self.ROTATIONS], int(t.get("rotation", 0)),
+                      lambda v: t.__setitem__("rotation", v))
+        self._p_check(f, "기울임 (층 전체)", t.get("italic"), lambda on: t.__setitem__("italic", on))
+        if t["kind"] == "lanes":
+            cb = QtWidgets.QComboBox()
+            cb.addItem("채우기…", None)
+            for pat, label in figure.TIER_FILLS:
+                cb.addItem(label, pat)
+            cb.activated.connect(lambda i: cb.itemData(i) and self.fill_tier(ti, cb.itemData(i)))
+            f.addRow("이 층 채우기", cb)
+        else:
+            self._p_check(f, "막대 표시", t.get("bar", True), lambda on: t.__setitem__("bar", on))
+        hb = QtWidgets.QHBoxLayout()
+        for label, fn, ok in (("한 층 위", lambda: self.move_tier_to(ti, ti - 1), ti > 0),
+                              ("한 층 아래", lambda: self.move_tier_to(ti, ti + 1), ti + 1 < len(self.s["tiers"])),
+                              ("복제", lambda: self.duplicate_tier(ti), True),
+                              ("삭제", lambda: self.delete_tier_at(ti), not t.get("auto"))):
+            b = QtWidgets.QPushButton(label)
+            b.setEnabled(ok)
+            b.clicked.connect(fn)
+            hb.addWidget(b)
+        f.addRow(hb)
+
     # ------------------------------------------------------------ per-text edits in the preview
     def _text_info(self, key):
         return next((t for t in self.preview.layout_.get("texts", []) if t["key"] == key), None)
-
-    def show_text_menu(self, key, gpos):
-        info = self._text_info(key) or {"cat": "lane", "text": key}
-        cat = info["cat"]
-        o = self.s["overrides"].get(key, {})
-        size = float(o.get("size") or self.s["fonts"].get(cat, 8.0))
-        menu = QtWidgets.QMenu(self)
-        title = menu.addAction(f"'{info['text'][:24]}'")
-        title.setEnabled(False)
-        menu.addAction(f"이 글자 크기… ({size:g} pt)", lambda: self._ask_text_size(key, size))
-        menu.addAction(f"이 글자 각도… ({float(o.get('rot') or 0):g}°)", lambda: self._ask_text_rot(key, o))
-        if o.get("dx") or o.get("dy"):
-            menu.addAction("위치 되돌리기", lambda: self._override(key, dx=None, dy=None))
-        if o:
-            menu.addAction("이 글자 조절 모두 초기화", lambda: self._override(key, clear=True))
-        menu.addSeparator()
-        label = figure.FONT_CATEGORIES.get(cat, (cat,))[0]
-        menu.addAction(f"'{label}' 전체 글자 크기… ({self.s['fonts'].get(cat, 8):g} pt)", lambda: self._ask_cat_size(cat))
-        menu.addSeparator()
-        act = menu.addAction("편집 모드 (글자·패널·마커 띠 드래그)")
-        act.setCheckable(True)
-        act.setChecked(self.preview.edit_mode)
-        act.toggled.connect(self.w_editmode.setChecked)
-        menu.exec(gpos)
 
     def _override(self, key, clear=False, **kw):
         ov = self.s["overrides"]
@@ -1935,12 +3098,24 @@ class FigureEditor(QtWidgets.QWidget):
             return
         s = self.s
         kind = sel["kind"]
-        if kind == "text":
+        if kind == "cells":
+            if len(sel["lanes"]) == 1:
+                self._props_text(f"lane:{sel['ti']}:{sel['lanes'][0]}")
+                self._props_tier_card(sel["ti"])
+            else:
+                self._props_cells(sel)
+        elif kind == "tier":
+            if 0 <= sel["ti"] < len(s["tiers"]):
+                self._props_tier_card(sel["ti"])
+        elif kind == "texts":
+            self._props_texts(sel)
+        elif kind == "text":
             key = sel["key"]
             self._props_text(key)
             head, *rest = key.split(":")
             if head in ("lane", "group", "cond"):
                 self._props_tier(int(rest[0]), int(rest[1]) if head == "group" else None)
+                self._props_tier_card(int(rest[0]))
             elif head == "protein":
                 self._props_panel(key.split(":", 1)[1])
             elif head == "kda":
@@ -2032,25 +3207,14 @@ class FigureEditor(QtWidgets.QWidget):
         f.addRow(b)
 
     def _props_tier(self, ti, gi=None):
+        """The selected group's lanes (the tier itself: _props_tier_card)."""
         t = self.s["tiers"][ti]
-        kind = "레인별 이름" if t["kind"] == "lanes" else "그룹 막대"
-        f = self._p_box(f"층 {ti + 1} ({kind})")
-        self._p_line(f, "조건 설명", t.get("condition", ""), lambda v: t.__setitem__("condition", v))
-        self._p_combo(f, "설명 위치", [("왼쪽", "left"), ("오른쪽", "right")], t.get("cond_side", "left"),
-                      lambda v: t.__setitem__("cond_side", v))
-        self._p_combo(f, "회전", [(f"{r}°", r) for r in self.ROTATIONS], int(t.get("rotation", 0)),
-                      lambda v: t.__setitem__("rotation", v))
-        self._p_check(f, "기울임 (층 전체)", t.get("italic"), lambda on: t.__setitem__("italic", on))
-        if t["kind"] == "groups":
-            self._p_check(f, "막대 표시", t.get("bar", True), lambda on: t.__setitem__("bar", on))
-            if gi is not None and gi < len(t["groups"]):
-                g = t["groups"][gi]
-                lanes = [(f"{i + 1}: {l.get('text', '').replace('|', ' ')}", i) for i, l in enumerate(self.s["lanes"])]
-                self._p_combo(f, "이 그룹 시작 레인", lanes, int(g["first"]), lambda v: g.__setitem__("first", min(v, g["last"])))
-                self._p_combo(f, "이 그룹 끝 레인", lanes, int(g["last"]), lambda v: g.__setitem__("last", max(v, g["first"])))
-        b = QtWidgets.QPushButton("왼쪽 '레인 위 층' 표에서 이 층 열기")
-        b.clicked.connect(lambda: (setattr(self, "cur_tier", ti), self.fill_tiers()))
-        f.addRow(b)
+        if t["kind"] == "groups" and gi is not None and gi < len(t["groups"]):
+            g = t["groups"][gi]
+            f = self._p_box("그룹 범위 (막대 끝 네모를 끌어도 됩니다)")
+            lanes = [(f"{i + 1}: {l.get('text', '').replace('|', ' ')}", i) for i, l in enumerate(self.s["lanes"])]
+            self._p_combo(f, "시작 레인", lanes, int(g["first"]), lambda v: g.__setitem__("first", min(v, g["last"])))
+            self._p_combo(f, "끝 레인", lanes, int(g["last"]), lambda v: g.__setitem__("last", max(v, g["first"])))
 
     def _props_panel(self, row):
         if row == figure.GEL_ROW:
@@ -2076,7 +3240,7 @@ class FigureEditor(QtWidgets.QWidget):
         self._p_num(f, "위 여백", int(p.get("pad_top", 0)), -500, 2000, 1, None, " px", lambda v: p.__setitem__("pad_top", int(v)))
         self._p_num(f, "아래 여백", int(p.get("pad_bottom", 0)), -500, 2000, 1, None, " px",
                     lambda v: p.__setitem__("pad_bottom", int(v)))
-        lab = QtWidgets.QLabel("패널 너비(좌우 여백)는 모든 패널이 함께 씁니다: 왼쪽 '모양'에서 바꾸거나 편집 모드에서 가장자리를 끄세요.")
+        lab = QtWidgets.QLabel("패널 너비(좌우 여백)는 모든 패널이 함께 씁니다: 패널을 클릭한 뒤 왼쪽·오른쪽 가장자리 네모를 끌어도 됩니다.")
         lab.setWordWrap(True)
         theme.hint(lab)
         f.addRow(lab)
@@ -2268,17 +3432,6 @@ class FigureEditor(QtWidgets.QWidget):
         self._p_combo(f, "기준 레인 = 1", lanes, n.get("rel_lane"), lambda v: n.__setitem__("rel_lane", v))
 
     # ------------------------------------------------------------ crop editing in the preview
-    def on_edit_mode(self, on):
-        self.preview.edit_mode = bool(on)
-        if not on:
-            self.preview.unsetCursor()
-        else:
-            self.right.setCurrentIndex(0)
-            self.preview.setFocus()
-        self.preview.update()
-        self.status("편집 모드: 패널 가장자리(크기), 글자(위치), 마커 띠(간격)를 드래그하세요. 글자 우클릭: 크기·각도"
-                    if on else "편집 모드를 끝냈습니다")
-
     def on_crop_dragged(self, edge, row, d_in):
         """A panel edge was dragged by ``d_in`` inches in the preview."""
         scale = self.preview.layout_.get("scale") or 0

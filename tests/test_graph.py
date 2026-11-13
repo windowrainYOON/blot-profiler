@@ -78,6 +78,7 @@ def test_export_dialog_writes_only_graph_data(tmp_path):
     w = gui.MainWindow()
     w.ask_marker.setChecked(False)
     w.load_image(str(p))
+    w.detect(auto=True)  # 1.2: the window waits for drawn lines
     for i in range(1, len(w.analysis.rows)):
         w.set_row_role(i, core.ROLE_TARGET)
     w.recompute_results()
