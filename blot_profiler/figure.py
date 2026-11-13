@@ -57,6 +57,9 @@ FIGURE_DEFAULTS = {
     "kda_side": "left",
     "strip_gap_in": 0.0,  # space between the marker strip and the blot
     "strip_dy": 0,  # vertical offset of the marker crop (marker pixels), if the marker photo is shifted
+    "image_gap_pt": 6.0,  # extra space where the next panel comes from another image (multi-blot)
+    "lane_match": "name",  # multi-blot: other images' lanes by lane name ("name") or position ("order")
+    "show_src": True,  # multi-blot: small grey source tag (I1, I2 …) under each protein name
     "layout": "rows",  # "rows": one crop per protein (western) · "full": the whole gel as one panel (DNA gel)
     "gel_crop": None,  # [x0, y0, x1, y1] of the full-gel panel (None = around all bands)
     "gel_label": "",  # text left of the full-gel panel
@@ -104,7 +107,8 @@ def sync_settings(s: dict, a: core.Analysis, shape) -> dict:
     """
     for k, v in FIGURE_DEFAULTS.items():
         s.setdefault(k, copy.deepcopy(v))
-    old = {p["row"]: p for p in s.get("panels", [])}
+    prev = s.get("panels", [])
+    old = {p["row"]: p for p in prev if not p.get("doc")}
     panels = []
     for ri, r in enumerate(a.rows):
         p = old.get(r.name)
@@ -112,6 +116,18 @@ def sync_settings(s: dict, a: core.Analysis, shape) -> dict:
             pad = int(round(0.6 * r.height))
             p = {"row": r.name, "show": True, "label": f"IB: {r.name}", "pad_top": pad, "pad_bottom": pad}
         panels.append(p)
+    # panels from other images (multi-blot) keep their place among this image's panels
+    if any(p.get("doc") for p in prev):
+        result, used = [], 0
+        for p in prev:
+            if p.get("doc"):
+                result.append(p)
+            elif used < len(panels):
+                result.append(panels[used])
+                used += 1
+        at = max((i for i, q in enumerate(result) if not q.get("doc")), default=-1) + 1
+        result[at:at] = panels[used:]
+        panels = result
     s["panels"] = panels
     a.ensure_lane_labels()
     lanes = []
@@ -183,8 +199,11 @@ def default_gel_crop(a: core.Analysis, shape) -> List[int]:
     return [max(0, x0 - m), max(0, y0 - m), min(W, x1 + m), min(H, y1 + m)]
 
 
-def layout_panels(a: core.Analysis, s: dict, shape):
-    """(panels [(panel settings, row index, y0, y1)], x0px, x1px) for either layout."""
+def layout_panels(a: core.Analysis, s: dict, shape, sources: Optional[dict] = None):
+    """(panels [(panel settings, row index, y0, y1)], x0px, x1px) for either layout.
+
+    ``sources`` ({doc id: {"signal", "analysis", "tag"}}) are the other open images a
+    multi-blot figure takes panels from; without it those panels are left out."""
     H, W = shape
     if s.get("layout") == "full":
         x0, y0, x1, y1 = s.get("gel_crop") or default_gel_crop(a, shape)
@@ -194,7 +213,7 @@ def layout_panels(a: core.Analysis, s: dict, shape):
             x0, y0, x1, y1 = default_gel_crop(a, shape)
         return [({"row": GEL_ROW, "label": s.get("gel_label", ""), "show": True}, -1, y0, y1)], x0, x1
     x0, x1 = crop_x(a, s, W)
-    return panel_rows(a, s, H), x0, x1
+    return panel_rows(a, s, H, sources), x0, x1
 
 
 def _full_blot_names(a: core.Analysis, s: dict):
@@ -213,11 +232,35 @@ def _full_blot_names(a: core.Analysis, s: dict):
     return out
 
 
-def panel_rows(a: core.Analysis, s: dict, height: int):
-    """[(panel settings, row index, y0, y1)] for the panels that are shown."""
+MISSING = -2  # row index of a panel whose image is not open
+
+
+def panel_rows(a: core.Analysis, s: dict, height: int, sources: Optional[dict] = None):
+    """[(panel settings, row index, y0, y1)] for the panels that are shown.  A panel from
+    another image (``doc``) is measured in that image; one whose image is not open gets
+    the row index MISSING (drawn as a grey placeholder)."""
     out = []
     names = {r.name: i for i, r in enumerate(a.rows)}
     for p in s["panels"]:
+        if p.get("doc"):
+            if sources is None or not p.get("show", True):
+                continue
+            src = sources.get(p["doc"])
+            if src is None:
+                out.append((p, MISSING, 0, 0))
+                continue
+            sa = src["analysis"]
+            ri = next((i for i, r in enumerate(sa.rows) if r.name == p.get("src_row")), None)
+            ext = _row_extent(sa, ri) if ri is not None else None
+            if ext is None:
+                out.append((p, MISSING, 0, 0))
+                continue
+            sh = src["signal"].shape[0]
+            y0 = max(0, ext[0] - int(p.get("pad_top", 0)))
+            y1 = min(sh, ext[1] + int(p.get("pad_bottom", 0)))
+            if y1 > y0:
+                out.append((p, ri, y0, y1))
+            continue
         ri = names.get(p["row"])
         if ri is None or not p.get("show", True):
             continue
@@ -325,14 +368,78 @@ def _text_h(text: str, fs: float, rot: float) -> float:
     return _text_w(text, fs) * math.sin(r) + h * math.cos(r)
 
 
+def default_lane_map(n_fig: int, n_src: int) -> List[Optional[int]]:
+    """순서대로: figure column i shows the other image's lane i (None = 빈 칸)."""
+    return [i if i < n_src else None for i in range(n_fig)]
+
+
+def match_lanes(a: core.Analysis, src: core.Analysis, how: str = "name") -> List[Optional[int]]:
+    """Source lane of every figure column.  "name": the lane with the same lane name (the
+    k-th 'DMSO' of the figure takes the k-th 'DMSO' of the other image); "order": by position."""
+    a.ensure_lane_labels()
+    src.ensure_lane_labels()
+    if how == "order":
+        return default_lane_map(a.n_lanes, src.n_lanes)
+    pools = {}
+    for j, lab in enumerate(src.lane_labels[:src.n_lanes]):
+        pools.setdefault(lab.strip().lower(), []).append(j)
+    out = []
+    for lab in a.lane_labels[:a.n_lanes]:
+        pool = pools.get(lab.strip().lower())
+        out.append(pool.pop(0) if pool else None)
+    return out
+
+
+def panel_lane_map(a: core.Analysis, s: dict, p: dict, src: core.Analysis) -> List[Optional[int]]:
+    return p.get("lane_map") or match_lanes(a, src, s.get("lane_match", "name"))
+
+
+def lane_pitch(a: core.Analysis) -> float:
+    c = [x for x in lane_centres(a) if np.isfinite(x)]
+    return float(np.median(np.diff(sorted(c)))) if len(c) > 1 else 0.0
+
+
+def foreign_strip(src_sig: np.ndarray, src_a: core.Analysis, y0: int, y1: int, lane_map, own_centres,
+                  x0px: int, x1px: int, k: float) -> np.ndarray:
+    """A panel cut from another image, laid out on this figure's columns: every figure column
+    shows its mapped source lane (scaled by ``k`` = source pitch / own pitch, so the lane
+    spacing matches); columns without a lane are NaN (drawn white)."""
+    width = max(1, x1px - x0px)
+    out = np.full((max(1, y1 - y0), width), np.nan)
+    own = np.asarray(own_centres, float)
+    valid = [i for i, c in enumerate(own) if np.isfinite(c)]
+    if not valid:
+        return out
+    src_c = lane_centres(src_a)
+    xs = np.arange(width, dtype=float) + x0px
+    cv = own[valid]
+    col = np.asarray(valid)[np.argmin(np.abs(xs[:, None] - cv[None, :]), axis=1)]
+    block = src_sig[y0:y1].astype(float)
+    W2 = block.shape[1]
+    for x in range(width):
+        i = int(col[x])
+        j = lane_map[i] if i < len(lane_map) else None
+        if j is None or j >= len(src_c) or not np.isfinite(src_c[j]):
+            continue
+        sx = src_c[j] + (xs[x] - own[i]) * k
+        if 0 <= sx < W2 - 1:
+            f = int(sx)
+            t = sx - f
+            out[:, x] = (1 - t) * block[:, f] + t * block[:, f + 1]
+    return out
+
+
 def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[np.ndarray] = None,
-           numbers: Optional[List[dict]] = None) -> dict:
+           numbers: Optional[List[dict]] = None, sources: Optional[dict] = None, preview: bool = False) -> dict:
     """Draw the figure into the matplotlib ``fig`` (it is cleared and resized).
 
     ``numbers`` are resolved number rows: ``{label, texts (one per lane), pos}``
     with ``pos`` "top", "bottom", "above:<protein>" or "below:<protein>".
     Returns the layout (inches from the top-left): panels, the marker strip and
     every text with its key and bounding box, for interactive editing.
+
+    ``sources`` are the other open images for panels taken from them (multi-blot figure);
+    ``preview`` adds their grey source tags (I1, I2 …), which are never exported.
     """
     from matplotlib.backends.backend_agg import FigureCanvasAgg
 
@@ -350,7 +457,7 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
     ov = s.get("overrides", {})
     family = [s.get("font") or "Arial", "AppleGothic", "DejaVu Sans"]
     weight = "bold" if s.get("label_bold", True) else "normal"
-    panels, x0px, x1px = layout_panels(a, s, (H, W))
+    panels, x0px, x1px = layout_panels(a, s, (H, W), sources)
     if not panels:
         fig.set_size_inches(3, 1)
         fig.text(0.5, 0.5, "표시할 단백질 패널이 없습니다", ha="center", va="center")
@@ -363,6 +470,8 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
 
     def fsize(key, cat):
         o = ov.get(key, {})
+        if cat == "src":  # the source tag: a little smaller than the protein name
+            return float(o.get("size") or 0.7 * fonts.get("protein", s["font_size"]))
         return float(o.get("size") or fonts.get(cat, s["font_size"]))
 
     show_strip = bool(s.get("show_strip")) and marker is not None and s["strip_x1"] > s["strip_x0"]
@@ -395,6 +504,28 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
     left = 0.04 + label_w + kda_l + strip_w + strip_gap  # x of the blot panels
     total_w = left + panel_w + kda_r + right_w + 0.08
     gap = float(s["panel_gap_in"])
+    own_pitch = lane_pitch(a)
+    multi = bool(sources) and any(p.get("doc") for p, *_ in panels)
+    image_gap = float(s.get("image_gap_pt", 6.0)) / 72.0
+    MISSING_H = 0.22
+
+    def k_of(p, ri):
+        """Source pitch / own pitch of a panel from another image (1 for this image's own)."""
+        if not p.get("doc") or ri == MISSING or not sources or own_pitch <= 0:
+            return 1.0
+        sp = lane_pitch(sources[p["doc"]]["analysis"])
+        return sp / own_pitch if sp > 0 else 1.0
+
+    def panel_h(it):
+        p, ri, y0, y1 = it
+        if ri == MISSING:
+            return MISSING_H
+        return (y1 - y0) * scale / k_of(p, ri) * float(p.get("height_k", 1.0))
+
+    def panel_gap(prev_p, p):
+        if prev_p is None:
+            return gap
+        return gap + (image_gap if (prev_p.get("doc") or "") != (p.get("doc") or "") else 0.0)
 
     # header tier heights
     bar_gap, bar_lw = 0.035, float(s.get("group_bar_lw", 2.2))
@@ -425,9 +556,11 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             if n.get("pos") == "bottom" or (n.get("pos", "").split(":", 1)[-1] not in shown and n.get("pos") != "top")]
     body = 0.0
     prev = None
+    prev_p = None
     for kind, it in seq:
         if kind == "panel":
-            body += (gap if prev == "panel" else 0.02 if prev == "num" else 0.0) + (it[3] - it[2]) * scale
+            body += (panel_gap(prev_p, it[0]) if prev == "panel" else 0.02 if prev == "num" else 0.0) + panel_h(it)
+            prev_p = it[0]
         else:
             body += num_h + (0.02 if prev == "panel" else 0.0)
         prev = kind
@@ -513,6 +646,7 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
     ref_all = src[:, x0px:x1px]
     y = 0.04 + header_h
     prev = None
+    prev_p = None
     for kind, it in seq:
         if kind == "num":
             ni, n = it
@@ -527,14 +661,62 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             prev = kind
             continue
         p, ri, y0, y1 = it
-        y += gap if prev == "panel" else 0.02 if prev == "num" else 0.0
-        h = (y1 - y0) * scale
-        crop = src[y0:y1, x0px:x1px]
-        disp = _stretch(crop, s["lo_pct"], s["hi_pct"], s["gamma"], None if s.get("per_panel", True) else ref_all)
-        ax = fig.add_axes([left / total_w, (total_h - y - h) / total_h, panel_w / total_w, h / total_h])
+        y += panel_gap(prev_p, p) if prev == "panel" else 0.02 if prev == "num" else 0.0
+        prev_p = p
+        h = panel_h(it)
+        foreign = bool(p.get("doc"))
+        sx0 = left - strip_gap - strip_w
+        if ri == MISSING:  # its image is not open: a grey placeholder keeps the place
+            ax = fig.add_axes([left / total_w, (total_h - y - h) / total_h, panel_w / total_w, h / total_h])
+            ax.set_facecolor("#ececec")
+            ax.text(0.5, 0.5, "이미지를 열면 보입니다", ha="center", va="center", fontsize=6, color="#6e6e73",
+                    transform=ax.transAxes, family=family)
+            _frame(ax, s["frame_lw"])
+            side_text(f"protein:{p['row']}", "protein", prot_side, y + h / 2, p["label"], weight=weight)
+            layout["panels"].append({"row": p["row"], "doc": p.get("doc"), "x": left, "x_blot": left, "y": y,
+                                     "w": panel_w, "h": h, "y0": y0, "y1": y1})
+            y += h
+            prev = kind
+            continue
+        if foreign:
+            src_d = sources[p["doc"]]
+            lmap = panel_lane_map(a, s, p, src_d["analysis"])
+            crop = foreign_strip(src_d["signal"], src_d["analysis"], y0, y1, lmap, centres, x0px, x1px, k_of(p, ri))
+            ok = np.isfinite(crop)
+            ref = crop[ok] if ok.any() else np.zeros(1)
+            if not p.get("auto_range", True):
+                ref = src_d["signal"]
+            disp = _stretch(np.where(ok, crop, np.median(ref)), s["lo_pct"], s["hi_pct"],
+                            float(p.get("gamma", s["gamma"])), ref)
+            disp[~ok] = 0.0  # 빈 칸: white
+        else:
+            crop = src[y0:y1, x0px:x1px]
+            disp = _stretch(crop, s["lo_pct"], s["hi_pct"], s["gamma"], None if s.get("per_panel", True) else ref_all)
+        px0, pw_ = left, panel_w
+        if foreign and p.get("missing") == "cut":  # 잘라내기: the frame spans only the matched lanes
+            lmap = panel_lane_map(a, s, p, sources[p["doc"]]["analysis"])
+            cols = [i for i, j in enumerate(lmap) if j is not None and i < len(xs) and np.isfinite(xs[i])]
+            if cols:
+                xa = max(left, xs[cols[0]] - 0.5 * pitch)
+                xb = min(left + panel_w, xs[cols[-1]] + 0.5 * pitch)
+                c0, c1 = int(round((xa - left) / scale)), int(round((xb - left) / scale))
+                disp = disp[:, max(0, c0):max(c0 + 1, c1)]
+                px0, pw_ = xa, max(xb - xa, 0.01)
+        ax = fig.add_axes([px0 / total_w, (total_h - y - h) / total_h, pw_ / total_w, h / total_h])
         ax.imshow(1.0 - disp, cmap="gray", vmin=0, vmax=1, aspect="auto", interpolation="antialiased")
         _frame(ax, s["frame_lw"])
-        sx0 = left - strip_gap - strip_w
+        if multi and s.get("show_src", True):  # source tag under the protein name (출처 표시)
+            tag = sources[p["doc"]]["tag"] if foreign else sources.get("__own__", {}).get("tag", "")
+            if tag:
+                side_text(f"src:{p['row']}", "src", prot_side, y + h / 2 + fsize(f"protein:{p['row']}", "protein") / 72.0 * 0.95,
+                          tag, color="#8e8e93")
+        if foreign:  # marker strip and kDa ticks belong to the top image only
+            side_text(f"protein:{p['row']}", "protein", prot_side, y + h / 2, p["label"], weight=weight)
+            layout["panels"].append({"row": p["row"], "doc": p.get("doc"), "x": left, "x_blot": left, "y": y,
+                                     "w": panel_w, "h": h, "y0": y0, "y1": y1})
+            y += h
+            prev = kind
+            continue
         if show_strip:
             mcrop = marker_crop(marker, y0 + int(s.get("strip_dy", 0)), y1 + int(s.get("strip_dy", 0)),
                                 s["strip_x0"], s["strip_x1"])

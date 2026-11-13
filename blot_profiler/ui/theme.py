@@ -62,9 +62,10 @@ TOKENS = {
         'red': '#d70015', 'orange': '#ff8d28', 'green': '#248a3d', 'blue': '#0066cc',
         'gray': '#8e8e93', 'gray-3': '#c7c7cc', 'gray-5': '#e5e5ea',
         'background': '#ffffff', 'background-secondary': '#f2f2f7',
-        'region-base': '#e3e3e8', 'region-canvas': '#f2f2f7', 'region-box': '#ffffff', 'region-inspector': '#f2f2f7',
+        'region-base': '#ececec', 'region-canvas': '#f6f6f6', 'region-box': '#ffffff', 'region-inspector': '#fbfbfb',
+        'region-card': '#ffffff',
         'background-tertiary': '#ffffff',
-        'label': '#000000', 'label-secondary': '#3c3c4399', 'label-tertiary': '#3c3c434d',
+        'label': '#1d1d1f', 'label-secondary': '#3c3c4399', 'label-tertiary': '#3c3c4373',
         'placeholder': '#3c3c434d', 'separator': '#3c3c434a', 'separator-opaque': '#c6c6c8',
         'fill': '#78788033', 'fill-secondary': '#78788029', 'fill-tertiary': '#7676801f',
         'fill-quaternary': '#74748014', 'link': '#0066cc', 'on-accent': '#ffffff',
@@ -75,12 +76,13 @@ TOKENS = {
         'status-neutral-tint': '#8e8e9329',
     },
     'dark': {
-        'red': '#ff4245', 'orange': '#ff9230', 'green': '#30d158', 'blue': '#0091ff',
+        'red': '#ff4245', 'orange': '#ff9230', 'green': '#30d158', 'blue': '#0a84ff',
         'gray': '#8e8e93', 'gray-3': '#48484a', 'gray-5': '#2c2c2e',
         'background': '#000000', 'background-secondary': '#1c1c1e',
-        'region-base': '#262628', 'region-canvas': '#303032', 'region-box': '#1f1f22', 'region-inspector': '#3a3a3c',
+        'region-base': '#1e1e1e', 'region-canvas': '#2c2c2c', 'region-box': '#393939', 'region-inspector': '#393939',
+        'region-card': '#454545',
         'background-tertiary': '#2c2c2e',
-        'label': '#ffffff', 'label-secondary': '#ebebf599', 'label-tertiary': '#ebebf54d',
+        'label': '#f5f5f7', 'label-secondary': '#ebebf5a6', 'label-tertiary': '#ebebf580',
         'placeholder': '#ebebf54d', 'separator': '#54545899', 'separator-opaque': '#38383a',
         'fill': '#7878805c', 'fill-secondary': '#78788052', 'fill-tertiary': '#7676803d',
         'fill-quaternary': '#7676802e', 'link': '#0984ff', 'on-accent': '#ffffff',
@@ -167,6 +169,8 @@ SHADE_W = 96  # width of the (unused since v0.58) sidebar shade on the canvas
 REGION_GAP = 24  # gap-section: between a region's header and its content
 BOX_RADIUS = 16  # the floating canvas / inspector boxes
 BOX_GAP = 10  # space around them (window edge, between the boxes)
+INSPECTOR_W = 356  # the inspector box (mockup: cards with 12 px around them)
+INSPECTOR_BOX_MARGINS = (12, 6, 4, 10)  # inside the inspector box; the scroll bar takes the right side
 # token name, or (white, alpha) for the see-through (glass) variant
 _REGIONS = {
     # inspector in the light grey of the pages (owner choice 2026-11-10: no white box)
@@ -434,6 +438,12 @@ def unify(page: QWidget):
             lay.setContentsMargins(0, 0, 0, 0)
         forms(lay)
     forms(root)
+    from PySide6.QtWidgets import QComboBox  # noqa: PLC0415
+
+    for cb in page.findChildren(QComboBox):  # long choices elide; they never widen the inspector box
+        if cb.sizeAdjustPolicy() == QComboBox.SizeAdjustPolicy.AdjustToContentsOnFirstShow:
+            cb.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            cb.setMinimumContentsLength(8)
 
 
 SETTINGS_ROW_H = 30  # every settings row of a card the same height (owner rule 2026-11-04)
@@ -527,7 +537,7 @@ def show_rows(form: QFormLayout, widgets, visible: bool):
             w.setVisible(visible)
 
 
-SETTINGS_FIELD_W = 140  # hig-settings__control--field: every input / stepper of a card
+SETTINGS_FIELD_W = 112  # hig-settings__control--field: every input / stepper of a card
 
 
 def _field_width(w):
@@ -888,6 +898,14 @@ class _Polisher(QObject):
     the FormRow rule for narrow containers."""
 
     def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.Show:
+            from PySide6.QtWidgets import QScrollArea  # noqa: PLC0415
+
+            if isinstance(obj, QScrollArea) and obj.widget() is not None:
+                # QScrollArea.setWidget turns the page's autoFillBackground on: an opaque square
+                # sheet (the window colour) over the rounded box it sits in
+                obj.widget().setAutoFillBackground(False)
+                obj.viewport().setAutoFillBackground(False)
         if ev.type() == QEvent.Type.Polish and isinstance(obj, QAbstractSpinBox) \
                 and not obj.property('hig_num'):
             # stepper: the value starts at the leading edge (owner rule

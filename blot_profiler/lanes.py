@@ -207,8 +207,11 @@ def detect(signal: np.ndarray, settings: Optional[core.DetectSettings] = None,
     (``a.candidates``, ``a.lane_geom``) for suggestions and display.
 
     ``lane_lines`` (polylines drawn or edited by the user) replace the lanes found
-    automatically; ``protein_lines`` ({row, x0, y0, x1, y1}) name the rows they cross,
-    and with ``only_on_lines`` the boxes are placed only where they meet the lanes."""
+    automatically.  ``protein_lines`` ({row, x0, y0, x1, y1}) give the rows: one row per red
+    line, named after it, its box in each lane snapped to the band nearest the line (within a
+    window that never reaches halfway to the next line).  With ``only_on_lines`` (default for the
+    app) those are the only rows; without it the rows found automatically away from every red
+    line are added as well."""
     st = settings or core.DetectSettings()
     work = core.detection_image(signal, st)
     H, W = work.shape
@@ -313,8 +316,13 @@ def detect(signal: np.ndarray, settings: Optional[core.DetectSettings] = None,
     def lane_x(li, y):
         return float(line_x(lanes[li]["line"], y, H))
 
-    if protein_lines and only_on_lines:  # boxes only where the red lines cross the lanes
-        return _boxes_on_lines(a, lanes, protein_lines, lane_x, half, pitch, st, mode, H)
+    line_a = None
+    if protein_lines:  # the red lines give the rows; the boxes follow the bands next to them
+        line_a = core.Analysis()
+        line_a.method = "lane"
+        line_a = _boxes_on_lines(line_a, lanes, protein_lines, lane_x, half, pitch, st, mode, H, k)
+        if only_on_lines:
+            return line_a
 
     box_w = max(4, int(round(0.8 * pitch)))
     for new_ri, ri in enumerate(order):
@@ -356,9 +364,33 @@ def detect(signal: np.ndarray, settings: Optional[core.DetectSettings] = None,
             if i not in ladset and i < len(a.lane_labels):
                 a.lane_labels[i] = f"L{i + 1}"
     _match_geometry(a, H)
-    if protein_lines:
-        name_rows_by_lines(a, protein_lines)
+    if line_a is not None:
+        return _add_rows_off_lines(line_a, a)
     return a
+
+
+def _add_rows_off_lines(line_a: core.Analysis, auto: core.Analysis) -> core.Analysis:
+    """The red-line rows plus the automatic rows that lie away from every red-line row."""
+    def row_y(an, ri):
+        ys = [b.cy for b in an.bands if b.row == ri]
+        return float(np.median(ys)) if ys else None
+
+    taken = [(row_y(line_a, ri), r.height) for ri, r in enumerate(line_a.rows)]
+    used = [r.name for r in line_a.rows]
+    for ri, r in enumerate(auto.rows):
+        y = row_y(auto, ri)
+        if y is None or any(ty is not None and abs(y - ty) <= max(4.0, 0.75 * max(h, r.height)) for ty, h in taken):
+            continue
+        name = core.unique_name(r.name, used)
+        used.append(name)
+        line_a.rows.append(core.Row(name=name, width=r.width, height=r.height))
+        new = len(line_a.rows) - 1
+        for b in auto.bands:
+            if b.row == ri:
+                line_a.bands.append(core.Band(row=new, lane=b.lane, cx=b.cx, cy=b.cy))
+    line_a.candidates = list(auto.candidates)
+    line_a.bands.sort(key=lambda b: (b.row, b.lane))
+    return line_a
 
 
 def _geom(line, half) -> dict:
@@ -367,24 +399,32 @@ def _geom(line, half) -> dict:
     return {"points": [[float(x), float(y)] for x, y in line], "half": int(half)}
 
 
-def _boxes_on_lines(a, lanes, protein_lines, lane_x, half, pitch, st, mode, H) -> core.Analysis:
-    """One box per lane on every red protein line: the band nearest to the line in that lane
-    (or the crossing itself when the lane shows no band there)."""
+def _boxes_on_lines(a, lanes, protein_lines, lane_x, half, pitch, st, mode, H, k: float = 0.0) -> core.Analysis:
+    """One box per lane on every red protein line: the band next to the line in that lane
+    (searched within about 1.5 band heights, never past halfway to the neighbouring red line;
+    a strong band a little off the line wins over a faint one on it), or the crossing itself
+    when the lane shows no band there."""
     all_h = [c["h"] for ln in lanes for c in ln["cands"]]
     med_h = float(np.median(all_h)) if all_h else max(6.0, 0.03 * H)
-    tol = max(6.0, 0.8 * med_h)
+    reach = max(6.0, 1.5 * med_h)
     box_w = max(4, int(round(0.8 * pitch)))
     plines = sorted(protein_lines, key=lambda p: (p["y0"] + p["y1"]) / 2.0)
+
+    def line_y_at(p, li):
+        y = core.protein_line_y(p, lane_x(li, H / 2.0))
+        return core.protein_line_y(p, lane_x(li, y))
+
     used = []
     for pi, p in enumerate(plines):
         name = core.unique_name(str(p.get("row") or f"P{pi + 1}"), used)
         used.append(name)
         hs, spots = [], []
         for li in range(len(lanes)):
-            y0 = core.protein_line_y(p, lane_x(li, H / 2.0))
-            y0 = core.protein_line_y(p, lane_x(li, y0))
-            near = [c for c in lanes[li]["cands"] if abs(c["y"] - y0) <= tol]
-            c = min(near, key=lambda c: abs(c["y"] - y0)) if near else None
+            y0 = line_y_at(p, li)
+            gaps = [abs(line_y_at(q, li) - y0) for q in plines if q is not p]
+            tol = min([reach] + [0.5 * g for g in gaps if g > 0])
+            near = [c for c in lanes[li]["cands"] if abs(c["y"] - y0) <= tol and c.get("snr", 1.0) >= 0.5 * k]
+            c = max(near, key=lambda c: c.get("snr", 1.0) * (1.0 - 0.5 * abs(c["y"] - y0) / max(tol, 1e-6))) if near else None
             cy = float(c["y"]) if c else float(y0)
             if c:
                 hs.append(c["h"])

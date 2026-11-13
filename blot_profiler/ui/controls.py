@@ -54,6 +54,8 @@ class Segmented(QtWidgets.QWidget):
 def card(title: Optional[str] = None) -> Tuple[QtWidgets.QGroupBox, QtWidgets.QFormLayout]:
     """A settings card (rounded inset group, title above, rows with hairlines)."""
     g = QtWidgets.QGroupBox(title or "")
+    if not title:
+        g.setProperty("hig_untitled", True)  # no title band above it
     f = QtWidgets.QFormLayout(g)
     f.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
     return g, f
@@ -118,7 +120,7 @@ class ChipRow(QtWidgets.QWidget):
             b = QtWidgets.QPushButton(t)
             b.setCheckable(True)
             b.setChecked(i == current)
-            b.setStyleSheet("min-height: 22px; padding: 0 8px; font-size: 12px;")
+            b.setStyleSheet("min-height: 22px; padding: 0 9px; font-size: 12px; border-radius: 11px;")
             b.clicked.connect(lambda _=False, i=i: self.clicked.emit(i))
             self.flow.addWidget(b)
         self.updateGeometry()
@@ -159,9 +161,10 @@ class SideList(QtWidgets.QListWidget):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustToContents)
+        accent = theme.TOKENS[theme.scheme()]["blue"]
         self.setStyleSheet("QListWidget { background: transparent; border: none; }"
-                           "QListWidget::item { min-height: 26px; padding: 2px 8px; border-radius: 7px; }"
-                           "QListWidget::item:selected { background: #0066cc; color: white; }")
+                           "QListWidget::item { min-height: 28px; padding: 2px 8px; border-radius: 10px; }"
+                           f"QListWidget::item:selected {{ background: {accent}; color: white; }}")
 
     def set_rows(self, rows: List[Tuple[str, str]], current: int = -1):
         self.blockSignals(True)
@@ -190,41 +193,41 @@ def icon(name: str) -> QtGui.QIcon:
 
 
 class ZoomChip(QtWidgets.QFrame):
-    """The zoom of a canvas as a chip at its top right (magnifier + percent, −, +, fit)."""
+    """The zoom of a canvas as a small chip over it (mockup 1.0.1): magnifier +
+    percent only.  Zoom with [ ] or ⌘± as before; a click on the chip fits."""
 
-    def __init__(self, host: QtWidgets.QWidget, minus, plus, fit=None, corner: str = "top"):
-        super().__init__(host)
-        self.corner = corner  # "top" right, or "bottom" right (graphs: the legend is at the top)
+    def __init__(self, host: Optional[QtWidgets.QWidget], minus=None, plus=None, fit=None, corner: str = "bottom"):
+        super().__init__(host)  # host None: an ordinary widget laid out by its parent (graph header)
+        self.corner = corner  # "bottom" right (main, Figure) or "top" right (graph)
         self.setObjectName("zoom_chip")
         self.setAttribute(Qt.WA_StyledBackground, True)
+        self._fit = fit
         lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(8, 3, 4, 3)
-        lay.setSpacing(2)
+        lay.setContentsMargins(10, 0, 11, 0)
+        lay.setSpacing(5)
+        self.setFixedHeight(26)  # a capsule: the radius (12) stays under half the height, else Qt draws it square
         ic = QtWidgets.QLabel()
-        ic.setPixmap(icon("magnifyingglass").pixmap(14, 14))
+        ic.setPixmap(icon("magnifyingglass").pixmap(13, 13))
         lay.addWidget(ic)
         self.label = QtWidgets.QLabel("100%")
-        self.label.setMinimumWidth(40)
-        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         f = self.label.font()
         f.setPixelSize(12)
+        f.setWeight(QtGui.QFont.Medium)
         self.label.setFont(f)
         lay.addWidget(self.label)
-        for text, tip, fn in (("−", "축소 ( ] )", minus), ("+", "확대 ( [ )", plus)):
-            b = QtWidgets.QToolButton()
-            b.setText(text)
-            b.setToolTip(tip)
-            b.clicked.connect(fn)
-            lay.addWidget(b)
+        self.setToolTip("확대 [ · 축소 ] · 눌러서 화면 맞춤 (⌘0)")
         if fit is not None:
-            b = QtWidgets.QToolButton()
-            b.setIcon(icon("fit"))
-            b.setToolTip("화면 맞춤 (⌘0)")
-            b.clicked.connect(fit)
-            lay.addWidget(b)
+            self.setCursor(Qt.PointingHandCursor)
         self.host = host
-        host.installEventFilter(self)
-        self.place()
+        if host is not None:
+            host.installEventFilter(self)
+            self.place()
+
+    def mouseReleaseEvent(self, e):
+        if self._fit is not None and e.button() == Qt.LeftButton:
+            self._fit()
+        super().mouseReleaseEvent(e)
 
     def set_zoom(self, k: float):
         self.label.setText(f"{k * 100:.0f}%")
@@ -233,7 +236,9 @@ class ZoomChip(QtWidgets.QFrame):
 
     def place(self):
         self.adjustSize()
-        y = 10 if self.corner == "top" else max(0, self.host.height() - self.height() - 10)
+        if self.host is None:
+            return
+        y = 12 if self.corner == "top" else max(0, self.host.height() - self.height() - 12)
         self.move(max(0, self.host.width() - self.width() - 12), y)
         self.raise_()
 

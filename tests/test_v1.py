@@ -108,9 +108,10 @@ def test_windows_and_canvas_tools(tmp_path):
     QTest.mouseRelease(v.viewport(), QtCore.Qt.LeftButton, pos=p1)
     assert len(a.protein_lines) == m + 1
     # detect again along the lines
-    w.only_on_lines.setChecked(True)
+    w.extra_bands.setChecked(False)  # default: the red lines are the rows
     w.detect(use_lines=True)
     assert len(w.analysis.rows) == m + 1
+    assert {p["row"] for p in w.analysis.protein_lines} == {r.name for r in w.analysis.rows}
     # [ and ] zoom
     k = v.transform().m11()
     QTest.keyClick(v, QtCore.Qt.Key_BracketLeft)
@@ -132,6 +133,24 @@ def test_windows_and_canvas_tools(tmp_path):
     w.figure_editor.render()
     texts = [t["key"] for t in w.figure_editor.preview.layout_["texts"]]
     assert any(k_.startswith("protein:") for k_ in texts)
+    # several images in one figure (Board B): tick I2 in 그림에 넣을 블롯, its panel joins the figure
+    ed = w.figure_editor
+    w.fig_win.layout_seg.set_value("rows", emit=True)
+    ed.s["layout"] = "rows"
+    other = next(d for d in w.loaded_docs() if d is not ed.doc)
+    ed.toggle_image(other, True)
+    ed.render()
+    lay = ed.preview.layout_
+    assert any(p_.get("doc") == ed.doc_id(other) for p_ in lay["panels"])
+    assert any(k_.startswith("src:") for k_ in (t["key"] for t in lay["texts"]))  # source tags I1 / I2
+    fp = next(p_ for p_ in ed.s["panels"] if p_.get("doc"))
+    ed.preview.select({"kind": "panel", "row": fp["row"]})
+    assert ed.props_layout.count() > 2  # the other image's panel cards
+    assert any(k_.startswith("src:") for k_, _, _ in ed.number_sources())
+    ed.write_figure(str(tmp_path / "multi.png"), 100)
+    assert (tmp_path / "multi.png").exists()
+    ed.toggle_image(other, False)
+    assert not any(p_.get("doc") for p_ in ed.s["panels"])
 
 
 def test_figure_numbers_old_names_and_dropped_lanes():
@@ -169,3 +188,56 @@ def test_graph_fits_small_canvas():
         e = art.get_window_extent(r)
         assert e.x0 >= fb.x0 - 1 and e.x1 <= fb.x1 + 1 and e.y0 >= fb.y0 - 1 and e.y1 <= fb.y1 + 1
     assert matplotlib  # (imported for the backend)
+
+
+def test_red_lines_lead_detection():
+    """A red line a few px off a band row: the boxes snap to the bands; rows come from the lines
+    (named after them), and 'extra' adds the automatic rows away from every line."""
+    corr = _blot()
+    auto = lanes.detect(corr)
+    core.lines_from_analysis(auto, corr.shape)
+    assert len(auto.rows) >= 2
+    p = dict(auto.protein_lines[0], row="Vinculin")
+    true_y = [b.cy for b in auto.bands if b.row == 0]
+    off = 0.4 * auto.rows[0].height
+    p["y0"] += off
+    p["y1"] += off
+    a = lanes.detect(corr, protein_lines=[p], only_on_lines=True)
+    assert [r.name for r in a.rows] == ["Vinculin"]
+    ys = sorted(b.cy for b in a.bands)
+    assert abs(float(np.median(ys)) - float(np.median(true_y))) < 0.5 * off + 1.0  # snapped to the band, not the line
+    b = lanes.detect(corr, protein_lines=[p], only_on_lines=False)
+    assert b.rows[0].name == "Vinculin" and len(b.rows) == len(auto.rows)
+
+
+def test_multi_blot_figure_panels():
+    """Panels from another image stack under this image's panels on the same lane columns;
+    a missing lane is a white cell; a panel whose image is not open keeps a grey place."""
+    from matplotlib.figure import Figure
+    from blot_profiler import figure
+
+    corr = _blot()
+    a = lanes.detect(corr)
+    b = lanes.detect(corr)
+    b_sig = corr[:, : int(corr.shape[1] * 0.8)]  # the other image: fewer lanes
+    b = lanes.detect(b_sig)
+    s = figure.sync_settings(figure.default_settings(), a, corr.shape)
+    n_own = len(s["panels"])
+    other = {"row": f"{b.rows[0].name} · other.tif", "src_row": b.rows[0].name, "doc": "/x/other.tif",
+             "show": True, "label": "IB: other", "pad_top": 4, "pad_bottom": 4}
+    gone = dict(other, row="gone", doc="/x/gone.tif")
+    s["panels"] += [other, gone]
+    figure.sync_settings(s, a, corr.shape)  # keeps the other images' panels in place
+    assert [p.get("doc") for p in s["panels"][n_own:]] == ["/x/other.tif", "/x/gone.tif"]
+    sources = {"/x/other.tif": {"signal": b_sig, "analysis": b, "tag": "I2"}, "__own__": {"tag": "I1"}}
+    lay = figure.render(Figure(), corr, a, s, sources=sources, preview=True)
+    docs = [p.get("doc") for p in lay["panels"]]
+    assert docs.count("/x/other.tif") == 1 and docs.count("/x/gone.tif") == 1
+    own_c = figure.lane_centres(a)
+    strip = figure.foreign_strip(b_sig, b, 0, 10, figure.default_lane_map(len(own_c), b.n_lanes), own_c,
+                                 int(min(c for c in own_c) - 5), int(max(own_c) + 5), 1.0)
+    if b.n_lanes < a.n_lanes:
+        assert np.isnan(strip[:, -1]).all()  # the last figure column has no lane in the other image
+    # without sources (export of an old project): the other images' panels are left out
+    lay2 = figure.render(Figure(), corr, a, s)
+    assert all(not p.get("doc") for p in lay2["panels"])
