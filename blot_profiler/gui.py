@@ -2093,6 +2093,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.img_info = QtWidgets.QLabel()
         theme.hint(self.img_info)
         st.addWidget(self.img_info)
+        # messages of the window in the canvas box (no status line under the boxes, mockup board A)
+        self.canvas_msg = QtWidgets.QLabel()
+        self.canvas_msg.setStyleSheet("font-size: 12px;")
+        self.canvas_msg.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        cl.addWidget(self.canvas_msg)
         cl.addLayout(st)
 
         self.inspector = QtWidgets.QStackedWidget()
@@ -2131,6 +2136,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.zoomChanged.connect(self.zoom_chip.set_zoom)
         self.set_step(0)
         self._build_menu()
+        self.statusBar().messageChanged.connect(self._canvas_message)
+        self.statusBar().hide()
         self.statusBar().showMessage("TIF 파일을 열어 시작하세요 (파일 → 열기 또는 창에 끌어다 놓기)")
         self.setAcceptDrops(True)
 
@@ -2143,6 +2150,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._title_timer.setInterval(1500)
         self._title_timer.timeout.connect(self.update_title)
         self._title_timer.start()
+
+    def _canvas_message(self, msg: str):
+        self.canvas_msg.setText(f"● {msg}" if msg else "")
+        self.canvas_msg.setToolTip(msg)
 
     # ---------------------------------------------------------------- 1.0 sidebar / steps / inspector
     def _inspector_page(self, page):

@@ -1,5 +1,12 @@
 # Multi-blot Figure (approved 2026-11-12, mockup boards 10 and 11)
 
+> **Superseded (2026-11-13):** the owner chose the Board B mockup instead of this picker sheet
+> (https://claude.ai/artifact/3FWepE9YqtPm7qxDge4GTv). 1.1.0 implements Board B: image check boxes
+> and protein chips under '그림에 넣을 블롯' in the Figure sidebar, lanes matched by lane name by
+> default (or 순서대로), an on/off source tag under each protein name, and per-panel cards in the
+> inspector. Data: `panels[]` entries with `doc` (absolute image path), `src_row`, optional
+> `lane_map`, `gamma`, `height_k`, `auto_range`; figure settings `lane_match`, `show_src`, `image_gap_pt`.
+
 Mockup canvas: https://claude.ai/artifact/KSQyW4Uao78mCT6dZ2BaCf
 - Board 10: "Figure 창 · 여러 이미지의 블롯을 한 그림에".
 - Board 11: "‘다른 이미지의 블롯…’ 고르기 창".

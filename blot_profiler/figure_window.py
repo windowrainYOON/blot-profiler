@@ -333,6 +333,12 @@ class PreviewLabel(QtWidgets.QLabel):
             return [(st["x"], st["y"], st["w"], st["h"]) for st in L.get("strips", [])]
         if sel.get("kind") == "panel":
             return [(p["x_blot"], p["y"], L.get("panel_w", 0), p["h"]) for p in L["panels"] if p["row"] == sel["row"]]
+        if sel.get("kind") == "blot":  # this image's panels as one block
+            own = [p for p in L.get("panels", []) if not p.get("doc")]
+            if own:
+                y0 = min(p["y"] for p in own)
+                y1 = max(p["y"] + p["h"] for p in own)
+                return [(own[0]["x_blot"], y0, L.get("panel_w", 0), y1 - y0)]
         return []
 
     def mouseMoveEvent(self, e):
@@ -485,9 +491,16 @@ class PreviewLabel(QtWidgets.QLabel):
             return
         qp = QtGui.QPainter(self)
         if self.selected:
-            qp.setPen(QtGui.QPen(QtGui.QColor("#ff6d00"), 2))
-            for x, y, w_, h_ in self._selected_rects():
-                qp.drawRect(QtCore.QRectF(ox + x * k - 2, oy + y * k - 2, w_ * k + 4, h_ * k + 4))
+            blue = theme.color("blue")
+            qp.setRenderHint(QtGui.QPainter.Antialiasing)
+            for x, y, w_, h_ in self._selected_rects():  # blue outline with four corner dots (mockup board A)
+                r = QtCore.QRectF(ox + x * k - 3, oy + y * k - 3, w_ * k + 6, h_ * k + 6)
+                qp.setPen(QtGui.QPen(blue, 1.5))
+                qp.setBrush(Qt.NoBrush)
+                qp.drawRoundedRect(r, 2, 2)
+                qp.setBrush(QtGui.QColor("white"))
+                for c in (r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight()):
+                    qp.drawRoundedRect(QtCore.QRectF(c.x() - 3.5, c.y() - 3.5, 7, 7), 2, 2)
         if not self.edit_mode:
             qp.end()
             return
@@ -566,6 +579,13 @@ class FigureEditor(QtWidgets.QWidget):
         sl = QtWidgets.QVBoxLayout(side)
         sl.setContentsMargins(10, 12, 10, 12)
         sl.setSpacing(2)
+        sl.addWidget(_ctl.section("그림에 넣을 블롯"))
+        self.blot_box = QtWidgets.QWidget()  # one row per open image + its protein chips (refresh_blots)
+        self.blot_lay = QtWidgets.QVBoxLayout(self.blot_box)
+        self.blot_lay.setContentsMargins(0, 0, 0, 0)
+        self.blot_lay.setSpacing(2)
+        sl.addWidget(self.blot_box)
+        sl.addSpacing(6)
         sl.addWidget(_ctl.section("추가"))
         self.add_list = _ctl.SideList()
         self.ADD_ROWS = [("lanes", "레인 이름 층"), ("groups", "그룹 막대 층"), ("cond", "조건 글자"),
@@ -575,16 +595,21 @@ class FigureEditor(QtWidgets.QWidget):
                                                       self.add_list.clearSelection()))
         sl.addWidget(self.add_list)
         sl.addSpacing(10)
-        sl.addWidget(_ctl.section("그림 안의 것"))
+        self.obj_title = _ctl.section("그림 안의 것")
+        sl.addWidget(self.obj_title)
         self.obj_list = _ctl.SideList()
         self.obj_list.itemClicked.connect(lambda it: self.select_from_list(self.obj_list.row(it)))
+        # drag a panel row to change the order of the panels (여러 블롯: 끌어서 순서)
+        self.obj_list.setDragDropMode(QtWidgets.QAbstractItemView.InternalMove)
+        self.obj_list.setDefaultDropAction(Qt.MoveAction)
+        self.obj_list.model().rowsMoved.connect(lambda *_: QtCore.QTimer.singleShot(0, self._on_objects_moved))
         self._objects: List[tuple] = []
         sl.addWidget(self.obj_list)
         sl.addStretch(1)
         sl.addWidget(_ctl.hint("저장: 창 위 '내보내기' 또는 파일 › 내보내기… (⌘E)"))
         scroll = self._scrolled(side)
-        scroll.setMinimumWidth(220)
-        scroll.setMaximumWidth(280)
+        scroll.setMinimumWidth(240)
+        scroll.setMaximumWidth(300)
         # right: properties of what is already there (the selected object, the whole figure);
         # the tables that list every tier, kDa mark and number row stay under 그림 전체
         whole = QtWidgets.QWidget()
@@ -635,7 +660,13 @@ class FigureEditor(QtWidgets.QWidget):
         self.w_editmode.toggled.connect(self.on_edit_mode)
         _theme.switch(self.w_editmode)
         pl.addWidget(pv, 1)
-        pl.addWidget(self.size_label)
+        foot = QtWidgets.QHBoxLayout()
+        foot.addWidget(self.size_label)
+        foot.addStretch(1)
+        self.foot_msg = QtWidgets.QLabel()  # messages of this window (no status line under the boxes)
+        self.foot_msg.setStyleSheet("font-size: 11px;")
+        foot.addWidget(self.foot_msg)
+        pl.addLayout(foot)
 
         self.ref = ReferenceView()
         self.ref.clicked.connect(self.add_kda_at)
@@ -740,7 +771,8 @@ class FigureEditor(QtWidgets.QWidget):
         self.dirty = True
 
     def status(self, msg):
-        self.main.statusBar().showMessage(msg)
+        self.foot_msg.setText(f"● {msg}" if msg else "")
+        self.foot_msg.setToolTip(msg)
 
     def set_doc(self, doc):
         """Show the figure of ``doc`` (the image of the main window)."""
@@ -756,11 +788,10 @@ class FigureEditor(QtWidgets.QWidget):
         if self.s.get("marker_path") and os.path.exists(self.s["marker_path"]) and doc.marker is None:
             self._load_marker(self.s["marker_path"], quiet=True)
         self.stack.setCurrentIndex(1)
+        self.load_from_settings()
         if getattr(self, "_props_doc", None) is not doc:
             self._props_doc = doc
-            self.preview.select(None)
-            self.show_props(None)
-        self.load_from_settings()
+            self.preview.select({"kind": "blot"})  # the inspector starts with the blot's cards
 
     # ------------------------------------------------------------ building blocks
     @staticmethod
@@ -1016,23 +1047,36 @@ class FigureEditor(QtWidgets.QWidget):
         finally:
             self._loading = False
         self.refresh_reference()
+        self.refresh_blots()
         self.refresh_objects()
         self.schedule()
 
     # ---- sidebar lists (mockup 1.0.1): 추가 / 그림 안의 것
     def refresh_objects(self):
-        """그림 안의 것: the blot panels, tiers, kDa marks, number rows and the marker strip."""
+        """그림 안의 것: the blot, its panels (with their source image when several images
+        are in the figure), tiers, kDa marks, number rows and the marker strip."""
         s = self.s
         objs = []
         full = s.get("layout") == "full"
-        for p in s.get("panels", []):
-            if full:
-                objs.append(("블롯 (Full)", "", {"kind": "panel", "row": p["row"]}))
-                break
-            objs.append((f"단백질 · {p.get('label') or p['row']}", "", {"kind": "panel", "row": p["row"]}))
+        src = self.sources() if self.doc is not None else {}
+        own_tag = src.get("__own__", {}).get("tag", "")
+        multi = any(p.get("doc") for p in s.get("panels", []))
+        n_own = sum(1 for p in s.get("panels", []) if not p.get("doc"))
+        objs.append((f"블롯 · {own_tag}" + (" (Full)" if full else ""), f"패널 {n_own}" if not full else "",
+                     {"kind": "blot"}))
+        if not full:
+            for p in s.get("panels", []):
+                if p.get("doc"):
+                    tag = (src.get(p["doc"]) or {}).get("tag", "닫힘")
+                else:
+                    tag = own_tag
+                if not p.get("show", True):
+                    continue
+                objs.append((("" if multi else "   ") + (p.get("label") or p["row"]), tag if multi else "",
+                             {"kind": "panel", "row": p["row"]}))
         for ti, t in enumerate(s.get("tiers", [])):
             if t.get("kind") == "lanes":
-                objs.append(("   레인 이름", "", {"kind": "text", "key": f"lane:{ti}:0"}))
+                objs.append(("   레인 이름", own_tag if multi else "", {"kind": "text", "key": f"lane:{ti}:0"}))
             elif t.get("groups"):
                 name = " · ".join(g.get("text", "") for g in t["groups"][:2])
                 objs.append((f"   그룹 막대 · {name}", "", {"kind": "text", "key": f"group:{ti}:0"}))
@@ -1045,12 +1089,189 @@ class FigureEditor(QtWidgets.QWidget):
         for ni, n in enumerate(s.get("numbers", [])):
             objs.append((f"   정량 숫자 · {n.get('label', '')}", "", {"kind": "text", "key": f"numlabel:{ni}"}))
         self._objects = objs
+        self.obj_title.setText("그림 안의 것 · 끌어서 순서" if multi else "그림 안의 것")
         cur = next((i for i, o in enumerate(objs) if o[2] == self.selection), -1)
         self.obj_list.set_rows([(t, n) for t, n, _ in objs], cur)
+        for i, (_, _, sel) in enumerate(objs):  # only panel rows can be dragged
+            it = self.obj_list.item(i)
+            it.setData(Qt.UserRole, sel)
+            fl = it.flags() & ~Qt.ItemIsDropEnabled
+            it.setFlags(fl | Qt.ItemIsDragEnabled if sel.get("kind") == "panel" else fl & ~Qt.ItemIsDragEnabled)
+
+    def _on_objects_moved(self):
+        """Panel rows were dragged in 그림 안의 것: the panels follow the new order."""
+        order = []
+        for i in range(self.obj_list.count()):
+            sel = self.obj_list.item(i).data(Qt.UserRole) or {}
+            if sel.get("kind") == "panel":
+                order.append(sel["row"])
+        by = {p["row"]: p for p in self.s["panels"]}
+        moved = [by[r] for r in order if r in by]
+        rest = [p for p in self.s["panels"] if p["row"] not in order]
+        self.s["panels"] = moved + rest
+        self.load_from_settings()
+
+    # ---- several images in one figure (Board B): 그림에 넣을 블롯
+    @staticmethod
+    def doc_id(d) -> str:
+        return os.path.abspath(d.image_path) if getattr(d, "image_path", None) else f"mem:{id(d)}"
+
+    def sources(self) -> dict:
+        """The other open images a panel may come from: {doc id: signal, analysis, tag, name}."""
+        m = self.main
+        out = {}
+        for k, d in enumerate(m.docs):
+            if d.raw is None or d is self.doc or not d.analysis.bands:
+                continue
+            sig = m.get_corrected(d) if self.s.get("use_corrected") else d.signal
+            out[self.doc_id(d)] = {"signal": sig, "analysis": d.analysis, "tag": m.doc_key(k), "name": d.name, "doc": d}
+        if self.doc in m.docs:
+            out["__own__"] = {"tag": m.doc_key(m.docs.index(self.doc)), "name": self.doc.name}
+        return out
+
+    def _foreign(self, did):
+        return [p for p in self.s["panels"] if p.get("doc") == did]
+
+    def _match_count(self, d):
+        lm = figure.match_lanes(self.doc.analysis, d.analysis, self.s.get("lane_match", "name"))
+        return sum(1 for j in lm if j is not None), len(lm)
+
+    def refresh_blots(self):
+        """그림에 넣을 블롯: every open image with a check box and its protein chips."""
+        if self.doc is None or not hasattr(self, "blot_lay"):
+            return
+        from .ui import controls as _ctl
+
+        while self.blot_lay.count():
+            w = self.blot_lay.takeAt(0).widget()
+            if w is not None:
+                w.deleteLater()
+        m = self.main
+        for k, d in enumerate(m.docs):
+            if d.raw is None or not d.analysis.bands:
+                continue
+            own = d is self.doc
+            did = self.doc_id(d)
+            panels = [p for p in self.s["panels"] if not p.get("doc")] if own else self._foreign(did)
+            on = own or bool(panels)
+            row = QtWidgets.QWidget()
+            hl = QtWidgets.QHBoxLayout(row)
+            hl.setContentsMargins(6, 2, 6, 0)
+            cb = QtWidgets.QCheckBox(f"{m.doc_key(k)} · {d.name}")
+            cb.setChecked(on)
+            cb.setEnabled(not own)
+            cb.setToolTip(d.name)
+            hl.addWidget(cb, 1)
+            if own:
+                note = "기준"
+                color = None
+            elif d.mode == core.MODE_GEL:
+                note, color = "겔", None
+            else:
+                got, n = self._match_count(d)
+                note = f"레인 {got}/{n}"
+                color = "#c93400" if got < n else None
+            nl = QtWidgets.QLabel(note)
+            if color:
+                nl.setStyleSheet(f"color: {color}; font-size: 11px;")
+            else:
+                theme.hint(nl)
+            hl.addWidget(nl)
+            self.blot_lay.addWidget(row)
+            if not own:
+                cb.toggled.connect(lambda c, d=d: self.toggle_image(d, c))
+            if not on:
+                continue
+            chips = QtWidgets.QWidget()
+            fl = QtWidgets.QVBoxLayout(chips)  # rows of chips that fit the sidebar, left aligned
+            fl.setSpacing(4)
+            fl.setContentsMargins(30, 0, 6, 6)
+            line, used_w = None, 0
+            shown = ({p["row"] for p in panels if p.get("show", True)} if own
+                     else {p.get("src_row") for p in panels})
+            for r in d.analysis.rows:
+                b = QtWidgets.QPushButton(r.name)
+                b.setCheckable(True)
+                b.setChecked(r.name in shown)
+                b.setStyleSheet("min-height: 20px; padding: 0 9px; font-size: 11px; border-radius: 10px;")
+                b.toggled.connect(lambda c, d=d, name=r.name: self.toggle_protein(d, name, c))
+                b.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+                bw = b.fontMetrics().horizontalAdvance(r.name) + 22
+                b.setFixedWidth(bw)
+                if line is None or used_w + bw > 190:
+                    if line is not None:
+                        line.addStretch(1)
+                    line = QtWidgets.QHBoxLayout()
+                    line.setSpacing(4)
+                    fl.addLayout(line)
+                    used_w = 0
+                line.addWidget(b)
+                used_w += bw + 4
+            if line is not None:
+                line.addStretch(1)
+            self.blot_lay.addWidget(chips)
+        _ = _ctl
+
+    def _new_foreign_panel(self, d, name):
+        ri = next((i for i, r in enumerate(d.analysis.rows) if r.name == name), 0)
+        pad = int(round(0.6 * d.analysis.rows[ri].height)) if d.analysis.rows else 4
+        key = core.unique_name(f"{name} · {d.name}", [p["row"] for p in self.s["panels"]])
+        return {"row": key, "src_row": name, "doc": self.doc_id(d), "show": True, "label": f"IB: {name}",
+                "pad_top": pad, "pad_bottom": pad}
+
+    def toggle_image(self, d, on):
+        did = self.doc_id(d)
+        if on and not self._foreign(did):
+            rows = d.analysis.rows
+            pick = next((r for r in rows if r.role != core.ROLE_CONTROL), rows[0] if rows else None)
+            if pick is not None:
+                self.s["panels"].append(self._new_foreign_panel(d, pick.name))
+        elif not on:
+            self.s["panels"] = [p for p in self.s["panels"] if p.get("doc") != did]
+        self.load_from_settings()
+
+    def toggle_protein(self, d, name, on):
+        if d is self.doc:
+            for p in self.s["panels"]:
+                if not p.get("doc") and p["row"] == name:
+                    p["show"] = on
+        else:
+            did = self.doc_id(d)
+            have = [p for p in self._foreign(did) if p.get("src_row") == name]
+            if on and not have:
+                self.s["panels"].append(self._new_foreign_panel(d, name))
+            elif not on:
+                self.s["panels"] = [p for p in self.s["panels"] if p not in have]
+        QtCore.QTimer.singleShot(0, self.load_from_settings)
+
+    def _report_missing(self, src):
+        """빈 칸 in panels from other images: one line in the canvas footer."""
+        msgs = []
+        a = self.doc.analysis
+        a.ensure_lane_labels()
+        for p in self.s["panels"]:
+            sd = src.get(p.get("doc") or "")
+            if not p.get("doc") or not p.get("show", True):
+                continue
+            if sd is None:
+                msgs.append(f"'{p.get('label')}'의 이미지가 열려 있지 않습니다")
+                continue
+            lm = figure.panel_lane_map(a, self.s, p, sd["analysis"])
+            miss = [a.lane_labels[i] for i, j in enumerate(lm) if j is None and i < len(a.lane_labels)]
+            if miss:
+                names = list(dict.fromkeys(miss))
+                msgs.append(f"{sd['tag']}에는 {', '.join(names)} 레인이 없어 그 칸을 비웠습니다")
+        msgs = list(dict.fromkeys(msgs))
+        if msgs:
+            self.status(msgs[0] + (f" (외 {len(msgs) - 1}개)" if len(msgs) > 1 else ""))
+        elif self.foot_msg.text().startswith("● ") and "레인이 없어" in self.foot_msg.text():
+            self.status("")
 
     def select_from_list(self, row):
         if 0 <= row < len(self._objects):
             sel = self._objects[row][2]
+            if not sel:
+                return
             self.preview.select(sel)
             self.on_object_selected(sel)
 
@@ -1728,6 +1949,8 @@ class FigureEditor(QtWidgets.QWidget):
                 self._props_number(int(rest[0]))
         elif kind == "panel":
             self._props_panel(sel["row"])
+        elif kind == "blot":
+            self._props_blot()
         elif kind == "strip":
             self._props_strip()
         b = QtWidgets.QPushButton("선택 해제")
@@ -1844,6 +2067,9 @@ class FigureEditor(QtWidgets.QWidget):
         p = next((p for p in self.s["panels"] if p["row"] == row), None)
         if p is None:
             return
+        if p.get("doc"):
+            self._props_foreign(p)
+            return
         f = self._p_box(f"단백질 패널: {row}")
         self._p_line(f, "라벨", p["label"], lambda v: p.__setitem__("label", v))
         self._p_check(f, "그림에 표시", p.get("show", True), lambda on: p.__setitem__("show", on))
@@ -1854,6 +2080,145 @@ class FigureEditor(QtWidgets.QWidget):
         lab.setWordWrap(True)
         theme.hint(lab)
         f.addRow(lab)
+
+    def _props_blot(self):
+        """The blot of this image (Board A): 보기 · 너비 · 잘라낼 영역 / 밝기 범위 · 감마 · 테두리 /
+        kDa 눈금 · 단백질 이름 · 글자 크기."""
+        s = self.s
+        src = self.sources()
+        tag = src.get("__own__", {}).get("tag", "")
+        f = self._p_box(f"블롯 · {tag}")
+        self._p_combo(f, "보기", [("레인별 자르기", "rows"), ("Full blot", "full")], s.get("layout", "rows"),
+                      lambda v: s.__setitem__("layout", v))
+        self._p_num(f, "너비", round(float(s["width_in"]) * 25.4, 1), 10, 400, 1, 1, " mm",
+                    lambda v: s.__setitem__("width_in", float(v) / 25.4))
+        b = QtWidgets.QPushButton("초기화")
+
+        def reset_crop():
+            s["margin_left_px"] = s["margin_right_px"] = None
+            s["gel_crop"] = None
+            for p in s["panels"]:
+                if not p.get("doc"):
+                    ri = next((i for i, r in enumerate(self.doc.analysis.rows) if r.name == p["row"]), None)
+                    if ri is not None:
+                        p["pad_top"] = p["pad_bottom"] = int(round(0.6 * self.doc.analysis.rows[ri].height))
+            self._p_changed()
+        b.clicked.connect(reset_crop)
+        lab = QtWidgets.QLabel("잘라낼 영역")
+        lab.setToolTip("미리보기에서 더블클릭 후 패널 가장자리를 끌어 정합니다")
+        f.addRow(lab, b)
+        f = self._p_box("")
+        self._p_check(f, "밝기 범위 자동 (패널마다)", s.get("per_panel", True), lambda on: s.__setitem__("per_panel", on))
+        self._p_num(f, "감마", float(s["gamma"]), 0.2, 4.0, 0.05, 2, "", lambda v: s.__setitem__("gamma", float(v)))
+        self._p_check(f, "테두리 선", float(s.get("frame_lw", 0.8)) > 0,
+                      lambda on: s.__setitem__("frame_lw", (s.get("_frame_lw_on") or 0.8) if on else
+                                               (s.__setitem__("_frame_lw_on", s.get("frame_lw") or 0.8) or 0.0)))
+        f = self._p_box("")
+        kda_now = "hide" if not s.get("show_kda") else s.get("kda_side", "left")
+
+        def set_kda(v):
+            s["show_kda"] = v != "hide"
+            if v != "hide":
+                s["kda_side"] = v
+        self._p_combo(f, "kDa 눈금", [("왼쪽", "left"), ("오른쪽", "right"), ("숨김", "hide")], kda_now, set_kda)
+        self._p_combo(f, "단백질 이름", [("왼쪽", "left"), ("오른쪽", "right")], s.get("protein_side", "left"),
+                      lambda v: s.__setitem__("protein_side", v))
+        base = float(s["fonts"].get("protein", s.get("font_size", 8.0)))
+
+        def set_size(v):
+            for key, (_, fac) in figure.FONT_CATEGORIES.items():
+                s["fonts"][key] = round(float(v) * fac, 1)
+            s["font_size"] = float(v)
+        self._p_num(f, "글자 크기", base, 4, 30, 0.5, 1, " pt", set_size)
+        if any(p.get("doc") for p in s["panels"]):
+            self._props_multi()
+
+    def _props_multi(self):
+        """여러 블롯 card: lane matching, reference image, source tags, gap between images."""
+        s = self.s
+        src = self.sources()
+        f = self._p_box("여러 블롯 · 그림 전체")
+        self._p_combo(f, "레인 맞추기", [("레인 이름", "name"), ("순서대로", "order")], s.get("lane_match", "name"),
+                      lambda v: s.__setitem__("lane_match", v))
+        ref = QtWidgets.QLabel(src.get("__own__", {}).get("tag", ""))
+        ref.setToolTip("레인 이름 줄 · 그룹 막대 · 조건 글자 · kDa 눈금은 기준 이미지 것을 씁니다.\n"
+                       "기준을 바꾸려면 메인 창에서 그 이미지를 고른 뒤 Figure를 여세요.")
+        f.addRow("기준 이미지", ref)
+        self._p_check(f, "출처 표시 (I1, I2…)", s.get("show_src", True), lambda on: s.__setitem__("show_src", on))
+        self._p_num(f, "이미지 사이 간격", float(s.get("image_gap_pt", 6.0)), 0, 40, 1, 0, " pt",
+                    lambda v: s.__setitem__("image_gap_pt", float(v)))
+
+    def _props_foreign(self, p):
+        """A panel from another image (Board B): 출처 이미지 · 단백질 줄 · 레인 / 밝기 · 감마 · 높이 / order."""
+        s = self.s
+        m = self.main
+        src = self.sources()
+        sd = src.get(p["doc"])
+        f = self._p_box(f"{p.get('label')}  ·  {sd['tag'] if sd else '(닫힌 이미지)'}")
+        others = [(f"{m.doc_key(k)} · {d.name}", self.doc_id(d)) for k, d in enumerate(m.docs)
+                  if d.raw is not None and d is not self.doc and d.analysis.bands]
+
+        def set_doc(did):
+            d = src[did]["doc"]
+            p["doc"] = did
+            if p.get("src_row") not in [r.name for r in d.analysis.rows] and d.analysis.rows:
+                p["src_row"] = d.analysis.rows[0].name
+                p["label"] = f"IB: {p['src_row']}"
+            p.pop("lane_map", None)
+            QtCore.QTimer.singleShot(0, lambda: self.on_object_selected({"kind": "panel", "row": p["row"]}))
+        self._p_combo(f, "출처 이미지", [(t.split(" · ")[0], did) for t, did in others], p["doc"], set_doc).setToolTip(
+            "\n".join(t for t, _ in others))
+        if sd is not None:
+            rows = [(r.name, r.name) for r in sd["analysis"].rows]
+
+            def set_row(name):
+                p["src_row"] = name
+                if p.get("label", "").startswith("IB: "):
+                    p["label"] = f"IB: {name}"
+            self._p_combo(f, "단백질 줄", rows, p.get("src_row"), set_row)
+            lm = figure.panel_lane_map(self.doc.analysis, s, p, sd["analysis"])
+            got = sum(1 for j in lm if j is not None)
+            how = "레인 이름으로" if s.get("lane_match", "name") == "name" else "순서대로"
+            lab = QtWidgets.QLabel(f"{got} / {len(lm)}")
+            lab.setToolTip(f"{how} 맞춘 레인 수 (없는 레인은 빈 칸)")
+            f.addRow("레인", lab)
+        self._p_line(f, "라벨", p.get("label", ""), lambda v: p.__setitem__("label", v))
+        f = self._p_box("")
+        self._p_check(f, "밝기 범위 자동 (이 이미지만)", p.get("auto_range", True), lambda on: p.__setitem__("auto_range", on))
+        self._p_num(f, "감마", float(p.get("gamma", s["gamma"])), 0.2, 4.0, 0.05, 2, "",
+                    lambda v: p.__setitem__("gamma", float(v)))
+        self._p_num(f, "패널 높이", float(p.get("height_k", 1.0)), 0.3, 4.0, 0.1, 1, " ×",
+                    lambda v: p.__setitem__("height_k", float(v)))
+        self._p_num(f, "위 여백", int(p.get("pad_top", 0)), -500, 2000, 1, None, " px", lambda v: p.__setitem__("pad_top", int(v)))
+        self._p_num(f, "아래 여백", int(p.get("pad_bottom", 0)), -500, 2000, 1, None, " px",
+                    lambda v: p.__setitem__("pad_bottom", int(v)))
+        hb = QtWidgets.QHBoxLayout()
+        hb.setSpacing(6)
+        for text, d_ in (("↑", -1), ("↓", 1)):
+            b = QtWidgets.QPushButton(text)
+            b.setToolTip("위로" if d_ < 0 else "아래로")
+            b.setFixedWidth(40)
+            b.clicked.connect(lambda _=False, d_=d_: self.move_panel(p, d_))
+            hb.addWidget(b)
+        hb.addStretch(1)
+        rm = QtWidgets.QPushButton("빼기")
+        rm.setStyleSheet(f"color: {theme.color('red').name()};")
+        rm.clicked.connect(lambda: self.remove_panel(p))
+        hb.addWidget(rm)
+        f.addRow("순서", hb)
+        self._props_multi()
+
+    def move_panel(self, p, d):
+        ps = self.s["panels"]
+        i = ps.index(p)
+        j = max(0, min(len(ps) - 1, i + d))
+        ps[i], ps[j] = ps[j], ps[i]
+        self.load_from_settings()
+
+    def remove_panel(self, p):
+        self.s["panels"] = [q for q in self.s["panels"] if q is not p]
+        self.preview.select({"kind": "blot"})
+        self.load_from_settings()
 
     def _props_strip(self):
         s = self.s
@@ -1996,6 +2361,31 @@ class FigureEditor(QtWidgets.QWidget):
         for ri, r in enumerate(a.rows):
             out.append((f"net:{r.name}", f"{r.name} (Net, raw)", core.row_vector(a, d.measurements, ri)))
         out += self.multi_sources()
+        out += self.foreign_number_sources()
+        return out
+
+    def foreign_number_sources(self):
+        """Results of the other images in the figure, moved onto this figure's lane columns."""
+        out = []
+        src = self.sources()
+        seen = set()
+        for p in self.s.get("panels", []):
+            did = p.get("doc")
+            if not did or did in seen or did not in src:
+                continue
+            seen.add(did)
+            d = src[did]["doc"]
+            if not d.measurements:
+                continue
+            lm = figure.panel_lane_map(self.doc.analysis, self.s, p, d.analysis)
+            res, _ = self.main.image_results(d)
+            for name, v in res.items():
+                if np.size(v) <= 1:
+                    continue
+                v = np.asarray(v, float)
+                v = core.group_values_on_lanes(d.analysis, d.basis, v) if d.basis else core.lanes_from_results(d.analysis, v)
+                fig_v = np.array([v[j] if j is not None and j < v.size else np.nan for j in lm], float)
+                out.append((f"src:{did}:res:{name}", f"{src[did]['tag']} · {name}", fig_v))
         return out
 
     def multi_sources(self):
@@ -2187,8 +2577,10 @@ class FigureEditor(QtWidgets.QWidget):
         if not self.ready():
             return
         try:
+            src = self.sources()
             layout = figure.render(self.fig, self._display_source(), self.doc.analysis, self.s, self.doc.marker,
-                                   self.resolve_numbers())
+                                   self.resolve_numbers(), sources=src)
+            self._report_missing(src)
             self.preview.set_layout(layout)
             buf = io.BytesIO()
             self.fig.savefig(buf, format="png", dpi=PREVIEW_DPI, facecolor="white")
