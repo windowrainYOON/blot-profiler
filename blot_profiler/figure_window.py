@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt
 from matplotlib.figure import Figure
 
 from . import core, figure
-from .ui import theme
+from .ui import glass, theme
 
 FONTS = ["Arial", "Helvetica", "Times New Roman", "AppleGothic"]
 PREVIEW_DPI = 200
@@ -3847,6 +3847,9 @@ class FigureWindow(QtWidgets.QMainWindow):
 
     def __init__(self, main, editor: "FigureEditor"):
         super().__init__(main, Qt.Window)
+        # 1.3: no title bar line + see-through background (macOS, ui/glass.py)
+        self.setProperty("hig_titlebar", True)
+        self.setProperty("hig_glass", glass.prepare(self))
         from .ui import controls
 
         self.main = main
@@ -3899,10 +3902,10 @@ class FigureWindow(QtWidgets.QMainWindow):
         self.activateWindow()
 
     def keyPressEvent(self, e):
-        if e.key() == Qt.Key_BracketLeft:
+        if e.key() == Qt.Key_BracketRight:
             self.editor.zoom_preview(1.25)
             return
-        if e.key() == Qt.Key_BracketRight:
+        if e.key() == Qt.Key_BracketLeft:
             self.editor.zoom_preview(0.8)
             return
         super().keyPressEvent(e)

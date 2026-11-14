@@ -945,6 +945,10 @@ class _Polisher(QObject):
                 and not obj.property('hig_polished'):
             obj.setProperty('hig_polished', True)
             align_forms(obj)
+            if obj.property('hig_titlebar'):
+                from . import glass  # noqa: PLC0415
+
+                glass.unify_titlebar(obj)  # 1.3: no line under the title bar (macOS)
             if obj.property('hig_glass'):
                 from . import glass  # noqa: PLC0415
 

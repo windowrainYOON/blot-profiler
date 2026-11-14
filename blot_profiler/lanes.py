@@ -352,13 +352,8 @@ def detect(signal: np.ndarray, settings: Optional[core.DetectSettings] = None,
                                  "w": float(box_w), "score": float(s_ / thr)})
     if mode == core.MODE_GEL:
         lad = [li for li, ln in enumerate(lanes) if any(c.get("ladder_like") for c in ln["cands"])]
-        for i, r in enumerate(a.rows):
-            r.name = f"B{i + 1}"
         if lad:
             core.set_ladder_lanes(a, [l for l in lad if any(b.lane == l for b in a.bands)])
-        others = [r for r in a.rows if r.name != a.ladder_row]
-        for i, r in enumerate(sorted(others, key=lambda r: a._row_y(a.rows.index(r)))):
-            r.name = f"B{i + 1}"
         ladset = set(core.ladder_lanes(a))
         for i in range(a.n_lanes):
             if i not in ladset and i < len(a.lane_labels):
@@ -436,10 +431,6 @@ def _boxes_on_lines(a, lanes, protein_lines, lane_x, half, pitch, st, mode, H, k
     a.lane_labels = [f"L{i + 1}" for i in range(len(lanes))]
     a.lane_geom = [_geom(ln["line"], half) for ln in lanes]
     a.bands.sort(key=lambda b: (b.row, b.lane))
-    if mode == core.MODE_GEL:
-        for i, r in enumerate(a.rows):
-            if r.name.startswith("P"):
-                r.name = f"B{i + 1}"
     return a
 
 

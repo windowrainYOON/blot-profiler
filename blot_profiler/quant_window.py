@@ -9,7 +9,7 @@ from typing import Optional
 from PySide6 import QtWidgets
 from PySide6.QtCore import Qt
 
-from .ui import controls, theme
+from .ui import controls, glass, theme
 
 
 class QuantWindow(QtWidgets.QMainWindow):
@@ -17,6 +17,9 @@ class QuantWindow(QtWidgets.QMainWindow):
 
     def __init__(self, main):
         super().__init__(main, Qt.Window)
+        # 1.3: no title bar line + see-through background (macOS, ui/glass.py)
+        self.setProperty("hig_titlebar", True)
+        self.setProperty("hig_glass", glass.prepare(self))
         self.main = main
         self.setWindowTitle("정량·그래프")
         self.resize(1440, 900)
@@ -130,10 +133,10 @@ class QuantWindow(QtWidgets.QMainWindow):
             self.main.plot.resize(int(vp.width() * self._zoom), int(vp.height() * self._zoom))
 
     def keyPressEvent(self, e):
-        if e.key() == Qt.Key_BracketLeft:
+        if e.key() == Qt.Key_BracketRight:
             self.zoom(1.25)
             return
-        if e.key() == Qt.Key_BracketRight:
+        if e.key() == Qt.Key_BracketLeft:
             self.zoom(0.8)
             return
         super().keyPressEvent(e)
