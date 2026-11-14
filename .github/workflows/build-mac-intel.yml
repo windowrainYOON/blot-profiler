@@ -1,0 +1,39 @@
+name: Build Mac app (Intel)
+
+on:
+  push:
+    branches: [mac-intel-build]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Build app and dmg
+        env:
+          PYTHON: python
+        run: |
+          uname -m
+          python -c "import platform; print(platform.machine())"
+          ./build_mac.sh
+          VERSION=$(.venv-build/bin/python -c "import blot_profiler; print(blot_profiler.__version__)")
+          echo "BUILD_NAME=BlotProfiler-$VERSION-intel" >> "$GITHUB_ENV"
+          mv "dist/BlotProfiler-$VERSION.dmg" "dist/BlotProfiler-$VERSION-intel.dmg"
+      - name: Check architecture
+        run: |
+          file "dist/Blot Profiler.app/Contents/MacOS/Blot Profiler"
+          lipo -archs "dist/Blot Profiler.app/Contents/MacOS/Blot Profiler"
+          ls "dist/Blot Profiler.app/Contents/Frameworks/AppKit"
+      - name: Smoke test
+        run: |
+          QT_QPA_PLATFORM=offscreen .venv-build/bin/python -m pip install -q pytest
+          QT_QPA_PLATFORM=offscreen .venv-build/bin/python -m pytest -q tests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUILD_NAME }}
+          path: dist/${{ env.BUILD_NAME }}.dmg
