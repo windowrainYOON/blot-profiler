@@ -25,7 +25,7 @@ from . import figure  # noqa: E402
 from . import project as projfile  # noqa: E402
 from . import lanes  # noqa: E402
 from . import graph, prefs  # noqa: E402
-from .ui import controls, theme  # noqa: E402
+from .ui import controls, glass, theme  # noqa: E402
 
 
 def _tok(name: str) -> str:
@@ -1008,10 +1008,10 @@ class BlotView(QtWidgets.QGraphicsView):
             self._space = True
             self.viewport().setCursor(Qt.OpenHandCursor)
             return
-        if e.key() == Qt.Key_BracketLeft:  # [ zoom in, ] zoom out (spec 1.0)
+        if e.key() == Qt.Key_BracketRight:  # ] zoom in, [ zoom out (1.3)
             self.zoom(1.25)
             return
-        if e.key() == Qt.Key_BracketRight:
+        if e.key() == Qt.Key_BracketLeft:
             self.zoom(0.8)
             return
         if e.key() in (Qt.Key_Backspace, Qt.Key_Delete) and self.tool != "select":
@@ -1587,9 +1587,11 @@ class MarkerStepDialog(QtWidgets.QDialog):
 
     THUMB_H = 260
 
-    def __init__(self, parent, doc, candidate: Optional[str] = None):
+    def __init__(self, parent, doc, candidate: Optional[str] = None, initial: Optional[dict] = None):
+        """``initial`` (1.3, reopened from the canvas crop button): {"blot": [x0, y0, x1, y1] or None,
+        "marker": [...] or None, "marker_tf": {...}} of the image as it is now."""
         super().__init__(parent)
-        self.setWindowTitle("블롯 · 마커 가져오기")
+        self.setWindowTitle("블롯 · 마커 영역" if initial else "블롯 · 마커 가져오기")
         self.setAcceptDrops(True)
         self.doc = doc
         self.path: Optional[str] = None
@@ -1668,10 +1670,20 @@ class MarkerStepDialog(QtWidgets.QDialog):
         base = doc.raw_orig if doc.raw_orig is not None else doc.raw
         self.blot_thumb.set_array(1.0 - figure._stretch(core.to_signal(base, None), 0.5, 99.8, 0.6))
         if candidate:
-            self.set_path(candidate, found=True)
+            self.set_path(candidate, found=not initial)
         else:
-            self.state.setText("같은 폴더에서 짝이 되는 마커 파일을 찾지 못했습니다. 마커 사진이 없으면 '건너뛰기'를 누르세요. "
-                               "(나중에 1번 탭의 '마커 열기…'로 넣을 수 있습니다)")
+            self.state.setText("같은 폴더에서 짝이 되는 마커 파일을 찾지 못했습니다. 마커 사진이 없으면 '마커 없이 계속'을 누르세요 "
+                               "('마커 따로 없음' 이미지로 열립니다. 나중에 캔버스의 영역 버튼으로 다시 넣을 수 있습니다).")
+        if initial:
+            mtf = initial.get("marker_tf") or {}
+            if candidate and getattr(self, "_marker_raw", None) is not None:
+                self.choose_orientation({"rot90": int(mtf.get("rot90", 0)) % 4, "flip": bool(mtf.get("flip", False))})
+            if initial.get("blot"):
+                self.blot_thumb.regions = [list(map(float, initial["blot"]))]
+                self.blot_thumb.sel = 0
+            if initial.get("marker") and candidate:
+                self.same_spot.setChecked(False)
+                self.marker_thumb.regions = [list(map(float, initial["marker"]))]
         self.refresh_regions()
         self.resize(1080, 760)
 
@@ -2269,6 +2281,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self):
         super().__init__()
+        # 1.3: no title bar line + see-through background (macOS, ui/glass.py)
+        self.setProperty("hig_titlebar", True)
+        self.setProperty("hig_glass", glass.prepare(self))
         self.setWindowTitle("Blot Profiler")
         self.resize(1400, 900)
         self.prefs = prefs.load()  # File → 설정: default look of graphs/figures, export defaults
@@ -2356,6 +2371,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tool_seg = controls.Segmented([("select", "선택"), ("lane", "레인 선"), ("protein", "단백질 선"), ("marker", "마커 영역")])
         self.tool_seg.changed.connect(self.set_tool)
         head.addWidget(self.tool_seg)
+        from .ui.hig_widgets import IconButton  # noqa: PLC0415
+
+        self.region_btn = IconButton("crop", "블롯 · 마커 영역 다시 정하기…\n이미지를 열 때 뜨는 영역 지정 창을 다시 엽니다 (⌘⇧R)")
+        self.region_btn.clicked.connect(self.edit_regions)
+        head.addWidget(self.region_btn)
         cl.addLayout(head)
         cl.addWidget(self.view, 1)
         st = QtWidgets.QHBoxLayout()
@@ -2481,6 +2501,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.inspector.setCurrentIndex(i)
         self.canvas_title.setText("검출" if i == 0 else "레인 / 단백질")
         self.tool_seg.setVisible(i == 0)
+        self.region_btn.setVisible(i == 0)
         self.canvas_note.setVisible(i == 1)
         self.canvas_note.setText("박스를 클릭·드래그로 선택, 더블클릭으로 크기 수정, 끌어서 이동")
         if i == 1 and self.view.tool != "select":
@@ -2501,7 +2522,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def update_key_hint(self):
         tail = ("드래그: 선택 · ROI 수정 · 영역 설정" if self.step == 0
                 else "더블클릭: 크기 수정 · ⌫ 지우기 · 우클릭: 그룹·병합")
-        self.key_hint.setText(f"[ 확대   ] 축소   Space + 드래그: 화면 이동   {tail}")
+        self.key_hint.setText(f"[ 축소   ] 확대   Space + 드래그: 화면 이동   {tail}")
 
     # ---- inspector: 검출
     def _take_row(self, widget):
@@ -2519,10 +2540,12 @@ class MainWindow(QtWidgets.QMainWindow):
         page = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(page)
         g, f = controls.card("검출")
-        self.kind_seg = controls.Segmented([(core.MODE_WESTERN, "Western"), (core.MODE_GEL, "DNA gel")], small=True)
+        self.kind_seg = controls.Segmented([(core.MODE_WESTERN, "따로 있음"), (core.MODE_GEL, "따로 없음")], small=True)
+        self.kind_seg.setToolTip("마커(ladder) 사진이 블롯과 따로 있는 이미지인지 정합니다. 가져오기 창에서 마커를 붙이면 '따로 있음', "
+                                 "마커 없이 열면 '따로 없음'(마커 레인이 이미지 안에 있거나 마커 없음)으로 정해집니다.")
         self.kind_seg.changed.connect(lambda m: self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(m))))
         self.mode_combo.currentIndexChanged.connect(lambda _: self.kind_seg.set_value(self.mode_combo.currentData()))
-        f.addRow("종류", self.kind_seg)
+        f.addRow("마커 이미지", self.kind_seg)
         f.addRow("민감도", controls.slider_row(self._take_row(self.sens)))
         self._take_row(self.auto_tilt)
         self.auto_tilt.setText("")
@@ -2960,14 +2983,13 @@ class MainWindow(QtWidgets.QMainWindow):
         cb = self.ladder_combo
         cb.blockSignals(True)
         cb.clear()
-        gel = self.doc.mode == core.MODE_GEL if hasattr(self, "docs") else False
-        presets = core.LADDER_PRESETS if gel else core.LADDER_PRESETS_KDA
+        presets = {**core.LADDER_PRESETS_KDA, **core.LADDER_PRESETS}  # 1.3: kDa and bp ladders for every image
         for name in presets:
             cb.addItem(name, name)
         cur = (self.doc.figure or {}).get("ladder") if hasattr(self, "docs") else None
         cb.setCurrentIndex(max(0, cb.findData(cur)))
         cb.blockSignals(False)
-        self.kda_unit.setText("bp" if gel else "kDa")
+        self.kda_unit.setText("bp" if cb.currentData() in core.LADDER_PRESETS else "kDa")
 
     def on_marker_edited(self, msg):
         s = self._marker_s()
@@ -2998,17 +3020,19 @@ class MainWindow(QtWidgets.QMainWindow):
         s = self._marker_s()
         name = self.ladder_combo.currentData()
         s["ladder"] = name
+        s["unit"] = "bp" if name in core.LADDER_PRESETS else "kDa"
+        self.kda_unit.setText(s["unit"])
         marks = s.get("kda", [])
         i = self._anchor()
         v = self.first_kda.value()
         if i is None or not v:
             self.refresh_marker_card()
             return
-        presets = core.LADDER_PRESETS if self.doc.mode == core.MODE_GEL else core.LADDER_PRESETS_KDA
+        presets = {**core.LADDER_PRESETS_KDA, **core.LADDER_PRESETS}
         sizes = core.fill_ladder(len(marks), i, v, presets.get(name, core.DEFAULT_LADDER))
         for m_, sz in zip(marks, sizes):
             m_["kda"] = sz
-        s["unit"] = "bp" if self.doc.mode == core.MODE_GEL else "kDa"
+        s["unit"] = "bp" if name in core.LADDER_PRESETS else "kDa"  # the unit follows the ladder
         self.on_marker_edited("마커 크기를 래더 순서로 채웠습니다 — 칩을 눌러 하나씩 고칠 수 있습니다")
         self.view.rebuild_lines()
 
@@ -3197,8 +3221,20 @@ class MainWindow(QtWidgets.QMainWindow):
         v.addAction("창에 맞추기", self.view.fit).setShortcut("Ctrl+0")
         v.addAction("확대", lambda: self.view.zoom(1.25)).setShortcut(QtGui.QKeySequence.ZoomIn)
         v.addAction("축소", lambda: self.view.zoom(0.8)).setShortcut(QtGui.QKeySequence.ZoomOut)
+        v.addAction("블롯 · 마커 영역 다시 정하기…", self.edit_regions).setShortcut("Ctrl+Shift+R")
+        v.addSeparator()
+        a = v.addAction("반투명 배경")
+        a.setCheckable(True)
+        a.setChecked(glass.enabled_setting())
+        a.setToolTip("창 바닥에 바탕화면이 흐리게 비칩니다 (macOS). 다시 실행하면 적용됩니다. "
+                     "시스템 설정 '투명도 줄이기'가 켜져 있으면 늘 불투명합니다.")
+        a.toggled.connect(self.toggle_glass)
         h = self.menuBar().addMenu("도움말")
         h.addAction("사용법", self.show_help)
+
+    def toggle_glass(self, on: bool):
+        glass.set_enabled_setting(on)
+        self.statusBar().showMessage("반투명 배경을 " + ("켰습니다" if on else "껐습니다") + " — 앱을 다시 실행하면 적용됩니다")
 
     # ---------------------------------------------------------------- tab 1
     def _build_detect_tab(self):
@@ -3244,8 +3280,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_orient_marker.setChecked(True)
         hb.addWidget(self.auto_orient_marker)
         f.addRow("마커 방향", hb)
-        self.ask_marker = QtWidgets.QCheckBox("블롯 TIF를 열면 짝이 되는 마커 이미지도 받기")
-        self.ask_marker.setToolTip("같은 폴더에 '…Marker…' 파일이 있으면 자동으로 붙이고, 없으면 마커 파일을 고르는 창을 띄웁니다 (취소 = 건너뛰기)")
+        self.ask_marker = QtWidgets.QCheckBox("이미지를 열면 영역 · 마커 지정 창 띄우기")
+        self.ask_marker.setToolTip("이미지를 열 때마다 블롯 영역과 마커 영역을 정하는 창을 띄웁니다. 같은 폴더의 '…Marker…' 파일은 미리 골라 둡니다. 마커 없이 계속하면 '마커 따로 없음' 이미지가 됩니다")
         self.ask_marker.setChecked(True)
         f.addRow(self.ask_marker)
         lay.addWidget(g_img)
@@ -4540,40 +4576,87 @@ class MainWindow(QtWidgets.QMainWindow):
         return None
 
     def ask_marker_for(self, d: ImageDoc, candidates=()):
-        """Step after opening a blot: the import window (mockup board 5). The user may drag one
-        or more blot regions (each opens as its own image tab) and, at the same spot or drawn
-        separately, the matching marker regions; then the marker image is attached."""
-        path = self.find_marker_for(d.image_path, candidates)
-        dlg = MarkerStepDialog(self, d, path)
+        """Step after opening an image: the import window (1.2 board 5, 1.3: for every image)."""
+        self.region_dialog(d, candidates)
+
+    def edit_regions(self):
+        """Canvas crop button (1.3): the import window again for the image shown."""
+        d = self.doc
+        if d.raw_orig is None:
+            self.statusBar().showMessage("먼저 이미지를 여세요")
+            return
+        self.region_dialog(d, reopen=True)
+
+    def region_dialog(self, d: ImageDoc, candidates=(), reopen: bool = False):
+        """Blot regions (each its own image tab) and marker regions, then the marker image;
+        the image's kind follows: a marker image attached = '따로 있음', none = '따로 없음'."""
+        tf0 = dict(d.transform or {})
+        mpath0 = (d.figure or {}).get("marker_path") if d.marker is not None else None
+        if reopen:
+            path = mpath0
+            initial = {"blot": tf0.get("region"), "marker": (d.marker_tf or {}).get("region"),
+                       "marker_tf": d.marker_tf or {}}
+            dlg = MarkerStepDialog(self, d, path, initial=initial)
+        else:
+            path = self.find_marker_for(d.image_path, candidates)
+            dlg = MarkerStepDialog(self, d, path)
         if dlg.exec() != QtWidgets.QDialog.Accepted:
             return
-        regions = dlg.regions
+        regions = dlg.regions or [{"blot": None, "marker": None}]
         mpath = dlg.path
-        docs = [d]
-        if regions:
-            for i, reg in enumerate(regions):
-                if i == 0:
-                    di = d
-                else:
-                    di = self.new_doc()
-                    di.raw_orig, di.image_path, di.mode = d.raw_orig, d.image_path, d.mode
-                    di.transform = core.default_transform()
-                    di.analysis, di.measurements, di.marker, di.marker_orig, di.figure = core.Analysis(), [], None, None, None
-                    docs.append(di)
-                tf = dict(core.default_transform(), region=list(reg["blot"]), region_tag=f"#{i + 1}")
+        if reopen:
+            same = (regions[0]["blot"] == tf0.get("region") and len(regions) == 1 and mpath == mpath0
+                    and regions[0].get("marker") == (d.marker_tf or {}).get("region"))
+            if same:
+                return
+            if regions[0]["blot"] != tf0.get("region") and (d.analysis.bands or d.analysis.lane_lines or d.analysis.protein_lines):
+                r = QtWidgets.QMessageBox.question(
+                    self, "영역 바꾸기", "블롯 영역이 바뀌면 이 이미지의 레인 선 · 단백질 선 · 밴드 박스를 지우고 다시 그려야 합니다. 바꿀까요?")
+                if r != QtWidgets.QMessageBox.Yes:
+                    return
+        docs = []
+        for i, reg in enumerate(regions):
+            if i == 0:
+                di = d
+            else:
+                di = self.new_doc()
+                di.raw_orig, di.image_path, di.mode = d.raw_orig, d.image_path, d.mode
+                di.transform = core.default_transform()
+                di.analysis, di.measurements, di.marker, di.marker_orig, di.figure = core.Analysis(), [], None, None, None
+            docs.append(di)
+            tag = f"#{i + 1}" if len(regions) > 1 else (tf0.get("region_tag", "") if reopen else "")
+            if reg["blot"] != (di.transform or {}).get("region") or i > 0:
+                base_tf = dict(tf0) if (i == 0 and reopen) else core.default_transform()
+                if reg["blot"] != tf0.get("region"):
+                    base_tf.update(crop=None)
+                    di.analysis, di.measurements = core.Analysis(), []
+                tf = dict(base_tf, region=list(reg["blot"]) if reg["blot"] else None, region_tag=tag if reg["blot"] else "")
                 self.set_transform(di, tf, redetect=False)
-                if mpath:
-                    self.set_marker(di, mpath, quiet=True, marker_tf=dict(dlg.marker_tf, region=reg.get("marker")))
-            self.refresh_doc_tabs()
-            self.switch_doc(self.docs.index(d))
-            self.view.rebuild_lines()
-            self.refresh_lines_card()
-            self.statusBar().showMessage(f"블롯 영역 {len(regions)}개를 각각 탭으로 열었습니다" +
-                                         (f" · 마커: {os.path.basename(mpath)}" if mpath else "") +
-                                         " — 탭마다 레인 선과 단백질 선을 그은 뒤 '밴드 찾기'를 누르세요")
-        elif mpath:
-            if self.set_marker(d, mpath, marker_tf=dlg.marker_tf):
-                self.statusBar().showMessage(f"마커 이미지를 붙였습니다: {os.path.basename(mpath)} — 왼쪽 마커 위 파란 상자로 띠 영역을 고칠 수 있습니다")
+            if mpath:
+                self.set_marker(di, mpath, quiet=True, marker_tf=dict(dlg.marker_tf, region=reg.get("marker")))
+            elif di.marker is not None:
+                di.marker = di.marker_orig = None
+                if di.figure:
+                    di.figure["marker_path"] = None
+                    di.figure["show_strip"] = False
+            di.mode = core.MODE_WESTERN if mpath else core.MODE_GEL
+            if di.figure is not None:
+                figure.apply_mode_defaults(di.figure, di.analysis, di.mode)
+        self.refresh_doc_tabs()
+        self.switch_doc(self.docs.index(d))
+        self.sync_orient_widgets()
+        self.view.rebuild_lines()
+        self.refresh_lines_card()
+        self.refresh_marker_view()
+        self.update_display(reset_zoom=True)
+        kind = f"마커: {os.path.basename(mpath)} (마커 따로 있음)" if mpath else "마커 없음 (마커 따로 없음)"
+        if len(docs) > 1:
+            msg = f"블롯 영역 {len(docs)}개를 각각 탭으로 열었습니다 · {kind} — 탭마다 레인 선과 단백질 선을 그은 뒤 '밴드 찾기'를 누르세요"
+        elif regions[0]["blot"]:
+            msg = f"블롯 영역만 열었습니다 · {kind}"
+        else:
+            msg = f"이미지 전체를 씁니다 · {kind}"
+        self.statusBar().showMessage(msg)
 
     def open_marker(self):
         if self.doc.raw is None:
@@ -4743,16 +4826,12 @@ class MainWindow(QtWidgets.QMainWindow):
         d.mode = self.suggest_mode(d, marker_candidates)
         self.refresh_doc_tabs()
         self.switch_doc(self.docs.index(d))
-        if d.mode == core.MODE_GEL and self.auto_gel_crop.isChecked():
-            self.auto_crop_gel(redetect=False)
+        # 1.3: no automatic gel crop on opening; the import window's regions do that
         # 1.2: no lanes, protein rows or boxes until the user draws the lines (mockup board 4)
         self.view.rebuild_lines()
         self.refresh_lines_card()
         self.statusBar().showMessage("레인 선 도구로 레인을 위→아래로, 단백질 선 도구로 밴드 줄을 왼→오른쪽으로 그은 뒤 '밴드 찾기'를 누르세요")
-        if d.mode == core.MODE_GEL:
-            self.statusBar().showMessage(self.statusBar().currentMessage() +
-                                         "  · 자동 선택: DNA gel 모드 (이미지 안에 ladder 레인이 보입니다) — 1번 탭에서 바꿀 수 있습니다")
-        elif ask_marker and self.ask_marker.isChecked():
+        if ask_marker and self.ask_marker.isChecked():  # 1.3: whatever kind of image it is
             self.ask_marker_for(d, marker_candidates)
 
     def _invert_choice(self, doc: Optional[ImageDoc] = None):
@@ -4822,12 +4901,12 @@ class MainWindow(QtWidgets.QMainWindow):
         g = QtWidgets.QGroupBox("실험 종류 · 이미지 방향 · 자르기")
         f = QtWidgets.QFormLayout(g)
         self.mode_combo = QtWidgets.QComboBox()
-        self.mode_combo.addItem("Western blot (마커 사진이 따로 있음)", core.MODE_WESTERN)
-        self.mode_combo.addItem("DNA gel 전기영동 (ladder가 이미지 안에 있음)", core.MODE_GEL)
-        self.mode_combo.setToolTip("이미지를 열 때 자동으로 정합니다: 짝이 되는 마커 파일이 있으면 Western, "
-                                   "이미지 안에 ladder 레인이 보이면 DNA gel, 애매하면 Western. 언제든 바꿀 수 있습니다.")
+        self.mode_combo.addItem("마커 이미지 따로 있음", core.MODE_WESTERN)
+        self.mode_combo.addItem("마커 이미지 따로 없음 (이미지 안에 마커 레인 / 마커 없음)", core.MODE_GEL)
+        self.mode_combo.setToolTip("가져오기 창에서 정해집니다: 마커 이미지를 붙이면 '따로 있음', 마커 없이 열면 '따로 없음'. "
+                                   "언제든 바꿀 수 있습니다.")
         self.mode_combo.currentIndexChanged.connect(lambda _: self.set_mode(self.doc, self.mode_combo.currentData()))
-        f.addRow("실험 종류", self.mode_combo)
+        f.addRow("마커 이미지", self.mode_combo)
         hb = QtWidgets.QHBoxLayout()
         for text, tip, fn in (("⟲ 90°", "반시계 방향 90° 회전", lambda: self.rotate90(1)),
                               ("⟳ 90°", "시계 방향 90° 회전", lambda: self.rotate90(-1)),
@@ -4995,19 +5074,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if d.figure is not None:
             figure.apply_mode_defaults(d.figure, d.analysis, mode)
             self._figure_changed(d)
-        self.statusBar().showMessage(("DNA gel 모드: 레인별로 밴드를 찾고, ladder 레인을 따로 묶었습니다 (Figure는 겔 전체 한 패널)."
-                                      if mode == core.MODE_GEL else "Western blot 모드: 단백질(행)과 레인으로 밴드를 찾습니다."))
+        self.statusBar().showMessage(("마커 이미지 따로 없음: 이미지 안의 마커 레인을 ladder로 씁니다 (Figure는 이미지 전체 한 패널)."
+                                      if mode == core.MODE_GEL else "마커 이미지 따로 있음: 붙인 마커 사진으로 ladder 띠와 kDa 눈금을 만듭니다."))
 
     def suggest_mode(self, d: ImageDoc, marker_candidates=()) -> str:
-        """Western when a separate marker file belongs to the image; DNA gel when the image
-        itself has ladder-like lanes; Western when unsure."""
-        if self.find_marker_for(d.image_path, marker_candidates):
-            return core.MODE_WESTERN
-        try:
-            corr = self.get_corrected(d)
-            return core.MODE_GEL if core.looks_like_gel(corr) else core.MODE_WESTERN
-        except Exception:
-            return core.MODE_WESTERN
+        """1.3: two kinds only, by the marker: a separate marker image (found next to the image
+        or opened with it) or not. The import window settles it."""
+        return core.MODE_WESTERN if self.find_marker_for(d.image_path, marker_candidates) else core.MODE_GEL
 
     def set_ladder_selected(self, on: bool):
         a = self.analysis
@@ -5066,7 +5139,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 figure.apply_mode_defaults(self.doc.figure, a, core.MODE_GEL)
             lad = core.ladder_lanes(a)
             self.statusBar().showMessage(
-                f"DNA gel: 레인 {a.n_lanes}개, 밴드 {len(a.bands)}개, ladder 레인 {len(lad)}개"
+                f"마커 따로 없음: 레인 {a.n_lanes}개, 밴드 {len(a.bands)}개, ladder 레인 {len(lad)}개"
                 f"({', '.join(a.lane_labels[l] for l in lad) or '없음'}). 밴드를 선택해 우클릭 → 'ladder로 지정/빼기'로 고칠 수 있습니다.")
             return
         names = [r.name for r in old.rows]
@@ -5093,7 +5166,7 @@ class MainWindow(QtWidgets.QMainWindow):
         red = red or []
         a = lanes.detect(corr, settings, d.mode, lane_lines=old.lane_lines if use_lines else None,
                          protein_lines=red or None, only_on_lines=not self.extra_bands.isChecked())
-        if d.mode != core.MODE_GEL:
+        if True:  # 1.3: names and roles kept whatever the marker kind
             role_of = {r.name: r.role for r in old.rows}
             n_red = len(red)
             for i, r in enumerate(a.rows):  # keep the user's names and roles when re-detecting
@@ -6671,7 +6744,7 @@ HELP_TEXT = """Blot Profiler 1.0 사용 순서
 
 Figure 창: 레인별 자르기 / Full blot, 왼쪽 추가 도구, 오른쪽 속성, 더블클릭으로 편집.
 
-[ 확대   ] 축소   Space + 드래그: 화면 이동.  저장은 모두 파일 메뉴(내보내기… ⌘E, 설정… ⌘,).
+[ 축소   ] 확대   Space + 드래그: 화면 이동.  저장은 모두 파일 메뉴(내보내기… ⌘E, 설정… ⌘,).
 정량값(Net) = 박스 안 원본(raw) 픽셀 intensity 합 − 배경.
 """
 

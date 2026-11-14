@@ -859,7 +859,7 @@ def apply_mode_defaults(s: dict, a: core.Analysis, mode: str) -> dict:
     taken from the ladder lane(s); a western blot is cut per protein with kDa ticks."""
     if mode == core.MODE_GEL:
         s["layout"] = "full"
-        s["unit"] = "bp"
+        s["unit"] = "bp" if s.get("ladder") in core.LADDER_PRESETS else "kDa"  # 1.3: the unit follows the ladder
         ys = core.ladder_band_ys(a)
         if ys and not any(k.get("kda") not in (None, "") for k in s.get("kda", [])):
             s["kda"] = [{"kda": None, "y": float(y)} for y in ys]  # sizes are filled in by the user / a preset

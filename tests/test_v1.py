@@ -115,7 +115,7 @@ def test_windows_and_canvas_tools(tmp_path):
     assert {p["row"] for p in w.analysis.protein_lines} == {r.name for r in w.analysis.rows}
     # [ and ] zoom
     k = v.transform().m11()
-    QTest.keyClick(v, QtCore.Qt.Key_BracketLeft)
+    QTest.keyClick(v, QtCore.Qt.Key_BracketRight)
     assert v.transform().m11() > k
     # second image, quantification window: two images pooled by lane name
     w.load_image(str(tmp_path / "b.tif"))
