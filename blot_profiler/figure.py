@@ -23,6 +23,7 @@ import numpy as np
 from matplotlib.lines import Line2D
 
 from . import core
+from .i18n import _t  # noqa: E402
 
 FIGURE_DEFAULTS = {
     "width_in": 3.2,  # width of the blot panels
@@ -298,20 +299,20 @@ def format_numbers(values, decimals: int = 2, rel_lane: Optional[int] = None):
 
 
 FONT_CATEGORIES = {  # key: (label, factor of the base font size)
-    "lane": ("레인 이름", 1.0),
-    "group": ("상위 그룹", 1.0),
-    "cond": ("조건 설명", 1.0),
-    "protein": ("단백질 이름", 1.0),
-    "kda": ("마커(kDa)", 0.85),
-    "number": ("정량 숫자", 0.9),
+    "lane": (_t("레인 이름"), 1.0),
+    "group": (_t("상위 그룹"), 1.0),
+    "cond": (_t("조건 설명"), 1.0),
+    "protein": (_t("단백질 이름"), 1.0),
+    "kda": (_t("마커(kDa)"), 0.85),
+    "number": (_t("정량 숫자"), 0.9),
 }
 
 
 NEW_CELL = "–"  # a new name tier starts with this in every lane (visible, so it can be clicked)
 
 # patterns of 이 층 채우기 (key, menu text)
-TIER_FILLS = [("dash", "– 모두"), ("alt", "– + 번갈아"), ("pairs", "– – + + (두 칸씩)"), ("numbers", "1, 2, 3 …"),
-              ("copy", "아래 층 복사"), ("empty", "비우기")]
+TIER_FILLS = [("dash", _t("– 모두")), ("alt", _t("– + 번갈아")), ("pairs", _t("– – + + (두 칸씩)")), ("numbers", "1, 2, 3 …"),
+              ("copy", _t("아래 층 복사")), ("empty", _t("비우기"))]
 
 
 def fill_texts(pattern: str, n: int, below: Optional[List[str]] = None) -> List[str]:
@@ -476,7 +477,7 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
     layout = {"panels": [], "texts": [], "strips": [], "size": (3.0, 1.0)}
     if not a.bands:
         fig.set_size_inches(3, 1)
-        fig.text(0.5, 0.5, "밴드 박스가 없습니다", ha="center", va="center")
+        fig.text(0.5, 0.5, _t("밴드 박스가 없습니다"), ha="center", va="center")
         return layout
     fonts = s["fonts"]
     ov = s.get("overrides", {})
@@ -485,7 +486,7 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
     panels, x0px, x1px = layout_panels(a, s, (H, W), sources)
     if not panels:
         fig.set_size_inches(3, 1)
-        fig.text(0.5, 0.5, "표시할 단백질 패널이 없습니다", ha="center", va="center")
+        fig.text(0.5, 0.5, _t("표시할 단백질 패널이 없습니다"), ha="center", va="center")
         return layout
     _sync_tiers(s, len(s["lanes"]))
     scale = float(s["width_in"]) / max(x1px - x0px, 1)  # inches per pixel
@@ -698,7 +699,7 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
         if ri == MISSING:  # its image is not open: a grey placeholder keeps the place
             ax = fig.add_axes([left / total_w, (total_h - y - h) / total_h, panel_w / total_w, h / total_h])
             ax.set_facecolor("#ececec")
-            ax.text(0.5, 0.5, "이미지를 열면 보입니다", ha="center", va="center", fontsize=6, color="#6e6e73",
+            ax.text(0.5, 0.5, _t("이미지를 열면 보입니다"), ha="center", va="center", fontsize=6, color="#6e6e73",
                     transform=ax.transAxes, family=family)
             _frame(ax, s["frame_lw"])
             side_text(f"protein:{p['row']}", "protein", prot_side, y + h / 2, p["label"], weight=weight)
@@ -824,7 +825,7 @@ def match_marker(marker: np.ndarray, shape) -> np.ndarray:
     mh, mw = marker.shape
     H, W = shape
     if abs(mw / mh - W / H) > core.MARKER_ASPECT_TOL * (W / H):
-        raise ValueError(f"마커 이미지({mw}×{mh})와 블롯 이미지({W}×{H})의 가로세로 비율이 다릅니다")
+        raise ValueError(_t("마커 이미지({0}×{1})와 블롯 이미지({2}×{3})의 가로세로 비율이 다릅니다").format(mw, mh, W, H))
     from scipy import ndimage as ndi
 
     out = ndi.zoom(marker, (H / mh, W / mw), order=1)

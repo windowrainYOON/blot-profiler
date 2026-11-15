@@ -9,7 +9,7 @@ from blot_profiler import __version__  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 
-hidden = ["blot_profiler.figure", "blot_profiler.figure_window"]
+hidden = ["blot_profiler.figure", "blot_profiler.figure_window", "blot_profiler.i18n", "blot_profiler.i18n_en"]
 if sys.platform == "darwin":  # ui/glass.py: title bar + see-through background
     hidden += ["objc", "AppKit", "Foundation"]
 for pkg in ("skimage.restoration", "skimage.filters", "skimage.measure", "skimage.morphology"):

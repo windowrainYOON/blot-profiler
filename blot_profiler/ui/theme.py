@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
     QStyleFactory,
     QWidget,
 )
+from ..i18n import _t  # noqa: E402
 
 # Colour tokens of the design system (project/tokens.json), light and dark.
 # Only the semantic tokens the app needs; values are Apple's system colours.
@@ -381,7 +382,7 @@ def is_auto_choice(box) -> bool:
     if box.property('hig_auto_choice'):  # a switch titled by its row (검출 자동화)
         return True
     t = box.text().strip()
-    return t == '자동' or t.startswith('자동 ') or t.startswith('자동(')
+    return t == _t("자동") or t.startswith(_t("자동 ")) or t.startswith(_t("자동("))
 
 
 # ---- one layout system for every inspector page -------------------------------
@@ -493,7 +494,7 @@ def auto_value(spin: QAbstractSpinBox, manual: float | None = None,
     lay = QHBoxLayout(holder)
     lay.setContentsMargins(0, 0, 0, 0)
     lay.setSpacing(8)
-    box = QCheckBox('자동')
+    box = QCheckBox(_t("자동"))
     if tip:
         box.setToolTip(tip)
     lay.addWidget(spin)
@@ -812,8 +813,8 @@ def destructive_alert(parent, title: str, text: str, action: str, info: str = ''
     box.setIcon(QMessageBox.Icon.Warning)
     box.setWindowTitle(title)
     box.setText(text)
-    box.setInformativeText(info or '이 작업은 되돌릴 수 없습니다.')
-    cancel = box.addButton('취소', QMessageBox.ButtonRole.RejectRole)
+    box.setInformativeText(info or _t("이 작업은 되돌릴 수 없습니다."))
+    cancel = box.addButton(_t("취소"), QMessageBox.ButtonRole.RejectRole)
     act = box.addButton(action, QMessageBox.ButtonRole.DestructiveRole)
     _apply_destructive(act)
     box.setDefaultButton(cancel)

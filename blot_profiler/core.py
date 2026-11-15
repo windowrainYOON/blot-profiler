@@ -26,6 +26,7 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 from scipy import ndimage as ndi
+from .i18n import _t  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -911,7 +912,7 @@ def sync_groupings(a: Analysis) -> None:
 
 
 def add_grouping(a: Analysis, name: str) -> str:
-    final = unique_name(name or "묶음", [g["name"] for g in a.groupings])
+    final = unique_name(name or _t("묶음"), [g["name"] for g in a.groupings])
     a.groupings.append({"name": final, "groups": []})
     return final
 
@@ -989,11 +990,11 @@ def group_status(a: Analysis, sname: str) -> List[dict]:
         dup = len({b.row for b in mem}) < len(mem)
         problems = []
         if not n_c:
-            problems.append("Control 박스 없음")
+            problems.append(_t("Control 박스 없음"))
         if not n_t:
-            problems.append("Target 박스 없음")
+            problems.append(_t("Target 박스 없음"))
         if dup:
-            problems.append("같은 단백질 박스가 여럿 (합해서 계산)")
+            problems.append(_t("같은 단백질 박스가 여럿 (합해서 계산)"))
         out.append({"group": gname, "bands": mem, "control": n_c, "target": n_t, "problems": problems})
     return out
 
@@ -1086,7 +1087,7 @@ def restore_tags(a: Analysis, tagged) -> int:
 
 LANE_SAMPLE, LANE_MARKER, LANE_EXCLUDE = "sample", "marker", "exclude"
 LANE_ROLES = (LANE_SAMPLE, LANE_MARKER, LANE_EXCLUDE)
-LANE_ROLE_LABELS = {LANE_SAMPLE: "시료", LANE_MARKER: "마커", LANE_EXCLUDE: "제외"}
+LANE_ROLE_LABELS = {LANE_SAMPLE: _t("시료"), LANE_MARKER: _t("마커"), LANE_EXCLUDE: _t("제외")}
 
 
 def poly_x(points, y):
@@ -1354,11 +1355,11 @@ def evaluate(expr: str, variables: Dict[str, object]):
     try:
         tree = ast.parse(expr.strip(), mode="eval")
     except SyntaxError as e:
-        raise FormulaError(f"수식 문법 오류: {e.msg}") from e
+        raise FormulaError(_t("수식 문법 오류: {0}").format(e.msg)) from e
 
     def value(v, name):
         if isinstance(v, dict):
-            raise FormulaError(f"'{name}'은 이미지 이름입니다. {name}.변수 형태로 쓰세요 (예: {name}.Vinculin)")
+            raise FormulaError(_t("'{0}'은 이미지 이름입니다. {1}.변수 형태로 쓰세요 (예: {2}.Vinculin)").format(name, name, name))
         return np.asarray(v, float) if not np.isscalar(v) else float(v)
 
     def ev(node):
@@ -1369,20 +1370,20 @@ def evaluate(expr: str, variables: Dict[str, object]):
         if isinstance(node, ast.Name):
             if node.id in variables:
                 return value(variables[node.id], node.id)
-            raise FormulaError(f"알 수 없는 이름: {node.id}")
+            raise FormulaError(_t("알 수 없는 이름: {0}").format(node.id))
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
             # <image>.<name>: a variable of another image, e.g. I2.Vinculin
             ns = variables.get(node.value.id)
             if not isinstance(ns, dict):
-                raise FormulaError(f"알 수 없는 이미지: {node.value.id} (I1, I2 … 또는 이미지 별칭)")
+                raise FormulaError(_t("알 수 없는 이미지: {0} (I1, I2 … 또는 이미지 별칭)").format(node.value.id))
             if node.attr not in ns:
-                raise FormulaError(f"알 수 없는 이름: {node.value.id}.{node.attr}")
+                raise FormulaError(_t("알 수 없는 이름: {0}.{1}").format(node.value.id, node.attr))
             return value(ns[node.attr], f"{node.value.id}.{node.attr}")
         if isinstance(node, ast.BinOp) and type(node.op) in _BINOPS:
             with np.errstate(divide="ignore", invalid="ignore"):
                 left, right = ev(node.left), ev(node.right)
                 if np.ndim(left) and np.ndim(right) and np.size(left) != np.size(right):
-                    raise FormulaError(f"레인 수가 다른 값끼리 계산할 수 없습니다 ({np.size(left)}개 vs {np.size(right)}개 레인)")
+                    raise FormulaError(_t("레인 수가 다른 값끼리 계산할 수 없습니다 ({0}개 vs {1}개 레인)").format(np.size(left), np.size(right)))
                 if isinstance(node.op, ast.Div):
                     res = np.divide(left, right)
                     return np.where(np.asarray(right) == 0, np.nan, res) if np.ndim(res) else (float("nan") if right == 0 else float(res))
@@ -1391,7 +1392,7 @@ def evaluate(expr: str, variables: Dict[str, object]):
             return _UNOPS[type(node.op)](ev(node.operand))
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _FUNCS and len(node.args) == 1:
             return _FUNCS[node.func.id](ev(node.args[0]))
-        raise FormulaError("허용되지 않는 수식입니다 (+ - * / ** ( ) 와 sum, mean, max, min, log2, log10, sqrt만 사용 가능)")
+        raise FormulaError(_t("허용되지 않는 수식입니다 (+ - * / ** ( ) 와 sum, mean, max, min, log2, log10, sqrt만 사용 가능)"))
 
     return ev(tree)
 
@@ -1897,14 +1898,14 @@ def suggest_gel_crop(raw: np.ndarray, inset: float = 0.015) -> Optional[List[int
 # --------------------------------------------------------------------------
 
 MARKER_ORIENTATIONS = [  # (rot90, flip, label)
-    (0, False, "원래대로"),
-    (1, False, "90° 반시계"),
-    (3, False, "90° 시계"),
+    (0, False, _t("원래대로")),
+    (1, False, _t("90° 반시계")),
+    (3, False, _t("90° 시계")),
     (2, False, "180°"),
-    (0, True, "좌우 반전"),
-    (1, True, "90° 반시계 + 좌우 반전"),
-    (3, True, "90° 시계 + 좌우 반전"),
-    (2, True, "180° + 좌우 반전"),
+    (0, True, _t("좌우 반전")),
+    (1, True, _t("90° 반시계 + 좌우 반전")),
+    (3, True, _t("90° 시계 + 좌우 반전")),
+    (2, True, _t("180° + 좌우 반전")),
 ]
 
 
@@ -1953,4 +1954,4 @@ def orientation_label(tf: Optional[dict]) -> str:
     for k, flip, label in MARKER_ORIENTATIONS:
         if k == int(tf.get("rot90", 0)) % 4 and flip == bool(tf.get("flip", False)):
             return label
-    return "원래대로"
+    return _t("원래대로")

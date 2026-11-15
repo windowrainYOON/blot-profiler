@@ -13,6 +13,7 @@ from matplotlib.figure import Figure
 
 from . import core, figure
 from .ui import glass, theme
+from .i18n import _t  # noqa: E402
 
 FONTS = ["Arial", "Helvetica", "Times New Roman", "AppleGothic"]
 PREVIEW_DPI = 200
@@ -67,7 +68,7 @@ class StripRegionItem(QtWidgets.QGraphicsRectItem):
         self.setFlags(QtWidgets.QGraphicsItem.ItemIsMovable | QtWidgets.QGraphicsItem.ItemSendsGeometryChanges)
         self.setAcceptHoverEvents(True)
         self.setCursor(Qt.SizeAllCursor)
-        self.setToolTip("마커 띠 영역: 끌어서 옮기기(위아래 = 세로 위치 보정), 왼쪽/오른쪽 가장자리를 끌어서 폭 조절")
+        self.setToolTip(_t("마커 띠 영역: 끌어서 옮기기(위아래 = 세로 위치 보정), 왼쪽/오른쪽 가장자리를 끌어서 폭 조절"))
         self.setZValue(5)
         self._edge = None
 
@@ -236,22 +237,22 @@ class MiniToolbar(QtWidgets.QFrame):
             lay.addWidget(b)
             return b
 
-        self.size_btn = btn("8 pt", "글자 크기", self._ask_size)
-        btn("A−", "작게 (⌘−)", lambda: self.action.emit("smaller", None))
-        btn("A+", "크게 (⌘+)", lambda: self.action.emit("bigger", None))
+        self.size_btn = btn("8 pt", _t("글자 크기"), self._ask_size)
+        btn("A−", _t("작게 (⌘−)"), lambda: self.action.emit("smaller", None))
+        btn("A+", _t("크게 (⌘+)"), lambda: self.action.emit("bigger", None))
         self._sep(lay)
-        self.bold_btn = btn("B", "굵게 (⌘B)", lambda on: self.action.emit("bold", on), True)
+        self.bold_btn = btn("B", _t("굵게 (⌘B)"), lambda on: self.action.emit("bold", on), True)
         f = self.bold_btn.font()
         f.setBold(True)
         self.bold_btn.setFont(f)
-        self.italic_btn = btn("I", "기울임 (⌘I)", lambda on: self.action.emit("italic", on), True)
+        self.italic_btn = btn("I", _t("기울임 (⌘I)"), lambda on: self.action.emit("italic", on), True)
         f = self.italic_btn.font()
         f.setItalic(True)
         self.italic_btn.setFont(f)
         self._sep(lay)
         self.rot_btn = QtWidgets.QToolButton()
         self.rot_btn.setText("0° ↻")
-        self.rot_btn.setToolTip("각도")
+        self.rot_btn.setToolTip(_t("각도"))
         self.rot_btn.setFocusPolicy(Qt.NoFocus)
         self.rot_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         m = QtWidgets.QMenu(self.rot_btn)
@@ -269,7 +270,7 @@ class MiniToolbar(QtWidgets.QFrame):
         lay.addWidget(s)
 
     def _ask_size(self):
-        v, ok = QtWidgets.QInputDialog.getDouble(self, "글자 크기", "크기 (pt):", self._size, 3.0, 72.0, 1)
+        v, ok = QtWidgets.QInputDialog.getDouble(self, _t("글자 크기"), _t("크기 (pt):"), self._size, 3.0, 72.0, 1)
         if ok:
             self.action.emit("size", float(v))
 
@@ -1315,23 +1316,23 @@ class FigureEditor(QtWidgets.QWidget):
         sl = QtWidgets.QVBoxLayout(side)
         sl.setContentsMargins(10, 12, 10, 12)
         sl.setSpacing(2)
-        sl.addWidget(_ctl.section("그림에 넣을 블롯"))
+        sl.addWidget(_ctl.section(_t("그림에 넣을 블롯")))
         self.blot_box = QtWidgets.QWidget()  # one row per open image + its protein chips (refresh_blots)
         self.blot_lay = QtWidgets.QVBoxLayout(self.blot_box)
         self.blot_lay.setContentsMargins(0, 0, 0, 0)
         self.blot_lay.setSpacing(2)
         sl.addWidget(self.blot_box)
         sl.addSpacing(6)
-        sl.addWidget(_ctl.section("추가"))
+        sl.addWidget(_ctl.section(_t("추가")))
         self.add_list = _ctl.SideList()
-        self.ADD_ROWS = [("lanes", "이름 층 (위에 한 줄)"), ("groups", "그룹 막대"), ("cond", "조건 글자"),
-                         ("kda", "마커 kDa 눈금"), ("number", "정량 숫자 줄"), ("image", "이미지 (끌어다 놓기)")]
+        self.ADD_ROWS = [("lanes", _t("이름 층 (위에 한 줄)")), ("groups", _t("그룹 막대")), ("cond", _t("조건 글자")),
+                         ("kda", _t("마커 kDa 눈금")), ("number", _t("정량 숫자 줄")), ("image", _t("이미지 (끌어다 놓기)"))]
         self.add_list.set_rows([(t, "") for _, t in self.ADD_ROWS])
         self.add_list.itemClicked.connect(lambda it: (self.add_from_list(self.ADD_ROWS[self.add_list.row(it)][0]),
                                                       self.add_list.clearSelection()))
         sl.addWidget(self.add_list)
         sl.addSpacing(10)
-        self.obj_title = _ctl.section("그림 안의 것")
+        self.obj_title = _ctl.section(_t("그림 안의 것"))
         sl.addWidget(self.obj_title)
         self.obj_list = _ctl.SideList()
         self.obj_list.itemClicked.connect(lambda it: self.select_from_list(self.obj_list.row(it)))
@@ -1342,7 +1343,7 @@ class FigureEditor(QtWidgets.QWidget):
         self._objects: List[tuple] = []
         sl.addWidget(self.obj_list)
         sl.addStretch(1)
-        sl.addWidget(_ctl.hint("저장: 창 위 '내보내기' 또는 파일 › 내보내기… (⌘E)"))
+        sl.addWidget(_ctl.hint(_t("저장: 창 위 '내보내기' 또는 파일 › 내보내기… (⌘E)")))
         scroll = self._scrolled(side)
         scroll.setMinimumWidth(240)
         scroll.setMaximumWidth(300)
@@ -1362,7 +1363,7 @@ class FigureEditor(QtWidgets.QWidget):
         tl.addWidget(self._build_numbers())
         wl.addWidget(self.ladder_display)
         wl.addWidget(self._build_contrast())
-        wl.addWidget(_ctl.Collapsible("표로 고치기 (층 · 마커 · 숫자 줄)", tables))
+        wl.addWidget(_ctl.Collapsible(_t("표로 고치기 (층 · 마커 · 숫자 줄)"), tables))
         wl.addStretch(1)
 
         self.preview = PreviewLabel()
@@ -1413,20 +1414,19 @@ class FigureEditor(QtWidgets.QWidget):
         rw = QtWidgets.QWidget()
         rl = QtWidgets.QVBoxLayout(rw)
         rl.setContentsMargins(0, 0, 0, 0)
-        hint = QtWidgets.QLabel("왼쪽: 마커 이미지, 오른쪽: 블롯. 파란 상자 = 그림에 쓰는 마커 띠(끌어서 옮기기·가장자리로 폭 조절, "
-                                "위아래로 끌면 세로 위치 보정), 점선 = 단백질 패널 범위. ⌘/Ctrl+휠: 확대")
+        hint = QtWidgets.QLabel(_t("왼쪽: 마커 이미지, 오른쪽: 블롯. 파란 상자 = 그림에 쓰는 마커 띠(끌어서 옮기기·가장자리로 폭 조절, 위아래로 끌면 세로 위치 보정), 점선 = 단백질 패널 범위. ⌘/Ctrl+휠: 확대"))
         hint.setWordWrap(True)
         _theme.hint(hint)
         rl.addWidget(hint)
         mb = QtWidgets.QHBoxLayout()
-        mb.addWidget(QtWidgets.QLabel("마우스로:"))
-        self.ref_kda_btn = QtWidgets.QRadioButton("클릭 = 크기(kDa/bp) 입력")
-        self.ref_region_btn = QtWidgets.QRadioButton("드래그 = 마커 띠 영역 새로 그리기")
+        mb.addWidget(QtWidgets.QLabel(_t("마우스로:")))
+        self.ref_kda_btn = QtWidgets.QRadioButton(_t("클릭 = 크기(kDa/bp) 입력"))
+        self.ref_region_btn = QtWidgets.QRadioButton(_t("드래그 = 마커 띠 영역 새로 그리기"))
         self.ref_kda_btn.setChecked(True)
         self.ref_kda_btn.toggled.connect(lambda on: setattr(self.ref, "mode", "kda" if on else "region"))
         mb.addWidget(self.ref_kda_btn)
         mb.addWidget(self.ref_region_btn)
-        b = QtWidgets.QPushButton("마커 영역 자동으로 찾기")
+        b = QtWidgets.QPushButton(_t("마커 영역 자동으로 찾기"))
         b.clicked.connect(self.auto_strip)
         mb.addWidget(b)
         mb.addStretch(1)
@@ -1440,14 +1440,17 @@ class FigureEditor(QtWidgets.QWidget):
                                                      self.view_seg.set_value("ref" if i == 1 else "preview")))
         head = QtWidgets.QHBoxLayout()
         head.setSpacing(10)
-        self.pane_title = QtWidgets.QLabel("미리보기")
+        self.pane_title = QtWidgets.QLabel(_t("미리보기"))
         self.pane_title.setStyleSheet("font-size: 15px; font-weight: 700;")
         head.addWidget(self.pane_title)
-        self.pane_hint = QtWidgets.QLabel("클릭: 선택 · 두 번 클릭/타이핑: 글자 고치기 · 레인 이름 긁기 → 우클릭: 그룹 · ⋮⋮ 끌기: 층 옮기기")
-        self.pane_hint.setToolTip("그림의 대비는 보기용입니다. 정량값은 원본 raw intensity로 계산됩니다.")
+        self.pane_hint = QtWidgets.QLabel(_t("클릭: 선택 · 두 번 클릭/타이핑: 글자 고치기 · 레인 이름 긁기 → 우클릭: 그룹 · ⋮⋮ 끌기: 층 옮기기"))
+        self.pane_hint.setToolTip(_t("그림의 대비는 보기용입니다. 정량값은 원본 raw intensity로 계산됩니다."))
         _theme.hint(self.pane_hint)
+        self.pane_hint.setWordWrap(True)  # longer in English: wraps instead of widening the window
+        self.pane_hint.setMinimumWidth(120)
+        self.pane_hint.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         head.addWidget(self.pane_hint, 1)
-        self.view_seg = _ctl.Segmented([("preview", "미리보기"), ("ref", "마커 참고")], small=True)
+        self.view_seg = _ctl.Segmented([("preview", _t("미리보기")), ("ref", _t("마커 참고"))], small=True)
         self.view_seg.changed.connect(lambda k: self.right.setCurrentIndex(1 if k == "ref" else 0))
         head.addWidget(self.view_seg)
         center = QtWidgets.QWidget()
@@ -1456,13 +1459,13 @@ class FigureEditor(QtWidgets.QWidget):
         cl.setSpacing(8)
         cl.addLayout(head)
         cl.addWidget(self.right, 1)
-        self.right.currentChanged.connect(lambda i: self.pane_title.setText("마커 참고" if i == 1 else "미리보기"))
+        self.right.currentChanged.connect(lambda i: self.pane_title.setText(_t("마커 참고") if i == 1 else _t("미리보기")))
 
         from .ui.hig_widgets import ChipTabs
 
         self.props_tabs = ChipTabs()  # 선택한 대상 | 그림 전체 as chips (mockup)
-        self.props_tabs.addTab(self._build_props(), "선택한 대상")
-        self.props_tabs.addTab(self._scrolled(whole), "그림 전체")
+        self.props_tabs.addTab(self._build_props(), _t("선택한 대상"))
+        self.props_tabs.addTab(self._scrolled(whole), _t("그림 전체"))
         for i in range(self.props_tabs.count()):
             self.props_tabs.set_fixed(self.props_tabs.widget(i))
         _theme.unify(whole)
@@ -1499,7 +1502,7 @@ class FigureEditor(QtWidgets.QWidget):
         el.setContentsMargins(0, 0, 0, 0)
         el.addWidget(split, 1)
         self.placeholder = QtWidgets.QLabel(
-            "TIF를 열고 '밴드 자동 검출'을 누르면 단백질/레인 그룹이 자동으로 제안되고, 여기서 바로 그림을 만들 수 있습니다.")
+            _t("TIF를 열고 '밴드 자동 검출'을 누르면 단백질/레인 그룹이 자동으로 제안되고, 여기서 바로 그림을 만들 수 있습니다."))
         self.placeholder.setAlignment(Qt.AlignCenter)
         self.placeholder.setWordWrap(True)
         self.stack = QtWidgets.QStackedLayout(self)
@@ -1545,13 +1548,13 @@ class FigureEditor(QtWidgets.QWidget):
         return g
 
     def _build_layout(self):
-        g = self._group("그림 형태")
+        g = self._group(_t("그림 형태"))
         f = QtWidgets.QFormLayout(g)
         self.w_layout = QtWidgets.QComboBox()
-        self.w_layout.addItem("단백질(행)별로 가로로 잘라내기 (Western blot)", "rows")
-        self.w_layout.addItem("겔 전체를 한 패널로 (DNA gel)", "full")
+        self.w_layout.addItem(_t("단백질(행)별로 가로로 잘라내기 (Western blot)"), "rows")
+        self.w_layout.addItem(_t("겔 전체를 한 패널로 (DNA gel)"), "full")
         self.w_layout.currentIndexChanged.connect(lambda _: self.set_layout_kind(self.w_layout.currentData()))
-        f.addRow("형태", self.w_layout)
+        f.addRow(_t("형태"), self.w_layout)
         self.w_gc = [_spin(0, 100000, 0, 1, None, "") for _ in range(4)]  # x0, y0, x1, y1
         for sp in self.w_gc:
             theme.plain_number(sp)
@@ -1560,23 +1563,23 @@ class FigureEditor(QtWidgets.QWidget):
         self.gel_crop_row = QtWidgets.QWidget()  # 가로 x0 ~ x1 / 세로 y0 ~ y1, then 자동
         gv = QtWidgets.QFormLayout(self.gel_crop_row)
         gv.setContentsMargins(0, 0, 0, 0)
-        for lab, a, b_ in (("가로", 0, 2), ("세로", 1, 3)):
+        for lab, a, b_ in ((_t("가로"), 0, 2), (_t("세로"), 1, 3)):
             hb = QtWidgets.QHBoxLayout()
             hb.addStretch(1)
             hb.addWidget(self.w_gc[a])
             hb.addWidget(QtWidgets.QLabel("~"))
             hb.addWidget(self.w_gc[b_])
             gv.addRow(lab, hb)
-        b = QtWidgets.QPushButton("범위 자동")
-        b.setToolTip("모든 밴드를 감싸는 범위로 되돌립니다")
+        b = QtWidgets.QPushButton(_t("범위 자동"))
+        b.setToolTip(_t("모든 밴드를 감싸는 범위로 되돌립니다"))
         b.clicked.connect(lambda: (self.s.__setitem__("gel_crop", None), self.load_from_settings()))
         gv.addRow(b)
-        f.addRow("겔 범위 (px)", self.gel_crop_row)
+        f.addRow(_t("겔 범위 (px)"), self.gel_crop_row)
         self.w_gel_label = QtWidgets.QLineEdit()
-        self.w_gel_label.setPlaceholderText("예: Myco PCR")
+        self.w_gel_label.setPlaceholderText(_t("예: Myco PCR"))
         self.w_gel_label.editingFinished.connect(lambda: self.set("gel_label", self.w_gel_label.text()))
-        f.addRow("겔 왼쪽 라벨", self.w_gel_label)
-        hint = QtWidgets.QLabel("겔 전체 패널을 클릭하면 생기는 가장자리 네모를 끌어 자를 수 있습니다.")
+        f.addRow(_t("겔 왼쪽 라벨"), self.w_gel_label)
+        hint = QtWidgets.QLabel(_t("겔 전체 패널을 클릭하면 생기는 가장자리 네모를 끌어 자를 수 있습니다."))
         hint.setWordWrap(True)
         theme.hint(hint)
         f.addRow(hint)
@@ -1598,10 +1601,10 @@ class FigureEditor(QtWidgets.QWidget):
             self.schedule()
 
     def _build_panels(self):
-        g = self._group("단백질 패널")
+        g = self._group(_t("단백질 패널"))
         l = QtWidgets.QVBoxLayout(g)
         self.panel_table = QtWidgets.QTableWidget(0, 4)
-        self.panel_table.setHorizontalHeaderLabels(["표시", "라벨", "위 여백", "아래 여백"])
+        self.panel_table.setHorizontalHeaderLabels([_t("표시"), _t("라벨"), _t("위 여백"), _t("아래 여백")])
         self.panel_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
         self.panel_table.verticalHeader().setVisible(False)
         self.panel_table.setMaximumHeight(170)
@@ -1610,32 +1613,32 @@ class FigureEditor(QtWidgets.QWidget):
         return g
 
     def _build_style(self):
-        g = self._group("모양")
+        g = self._group(_t("모양"))
         f = QtWidgets.QFormLayout(g)
         self.w_width = _spin(1.0, 12.0, 3.2, 0.1, 2, " in")
-        self.w_width.setToolTip("블롯 패널의 가로 길이 (인치). 전체 그림은 라벨만큼 더 넓습니다.")
-        f.addRow("패널 폭", self.w_width)
+        self.w_width.setToolTip(_t("블롯 패널의 가로 길이 (인치). 전체 그림은 라벨만큼 더 넓습니다."))
+        f.addRow(_t("패널 폭"), self.w_width)
         self.w_font = QtWidgets.QComboBox()
         self.w_font.addItems(FONTS)
         self.w_font.setEditable(True)
-        f.addRow("글꼴", self.w_font)
-        self.w_bold = QtWidgets.QCheckBox("IB 라벨 굵게")
+        f.addRow(_t("글꼴"), self.w_font)
+        self.w_bold = QtWidgets.QCheckBox(_t("IB 라벨 굵게"))
         f.addRow(self.w_bold)
         self.w_gap = _spin(0.0, 1.0, 0.06, 0.01, 2, " in")
-        f.addRow("패널 간격", self.w_gap)
+        f.addRow(_t("패널 간격"), self.w_gap)
         hb = QtWidgets.QHBoxLayout()
         self.w_ml = _spin(-500, 2000, 8, 1, None, " px")
         self.w_mr = _spin(-500, 2000, 8, 1, None, " px")
         for w_ in (self.w_ml, self.w_mr):
-            w_.setToolTip("바깥쪽 레인 박스 밖으로 더 보여줄 블롯 픽셀 (음수 = 안쪽으로 자름). 모든 패널에 같이 적용")
-        f.addRow("왼쪽 여백", self.w_ml)  # one value a row: the inspector stays one column wide
-        f.addRow("오른쪽 여백", self.w_mr)
+            w_.setToolTip(_t("바깥쪽 레인 박스 밖으로 더 보여줄 블롯 픽셀 (음수 = 안쪽으로 자름). 모든 패널에 같이 적용"))
+        f.addRow(_t("왼쪽 여백"), self.w_ml)  # one value a row: the inspector stays one column wide
+        f.addRow(_t("오른쪽 여백"), self.w_mr)
         self.w_frame = _spin(0.0, 3.0, 0.8, 0.1, 1, " pt")
-        f.addRow("테두리 두께", self.w_frame)
+        f.addRow(_t("테두리 두께"), self.w_frame)
         self.w_dpi = _spin(150, 2400, 600, 50, None, " dpi")
-        self.w_dpi.setToolTip("파일 → 'Figure 그림 저장'의 해상도")
+        self.w_dpi.setToolTip(_t("파일 → 'Figure 그림 저장'의 해상도"))
         self.w_dpi.valueChanged.connect(lambda v: self.set("export_dpi", int(v)))
-        f.addRow("저장 해상도", self.w_dpi)
+        f.addRow(_t("저장 해상도"), self.w_dpi)
         for w, key in ((self.w_width, "width_in"), (self.w_gap, "panel_gap_in"),
                        (self.w_ml, "margin_left_px"), (self.w_mr, "margin_right_px"), (self.w_frame, "frame_lw")):
             w.valueChanged.connect(lambda v, key=key: self.set(key, v))
@@ -1644,20 +1647,20 @@ class FigureEditor(QtWidgets.QWidget):
         return g
 
     def _build_contrast(self):
-        g = self._group("표시 대비 (그림에만 적용, 정량과 무관)")
+        g = self._group(_t("표시 대비 (그림에만 적용, 정량과 무관)"))
         f = QtWidgets.QFormLayout(g)
         self.w_lo = _spin(0.0, 50.0, 0.5, 0.5, 1, " %")
-        self.w_lo.setToolTip("이 퍼센타일 이하는 흰색")
-        f.addRow("흰색 기준", self.w_lo)
+        self.w_lo.setToolTip(_t("이 퍼센타일 이하는 흰색"))
+        f.addRow(_t("흰색 기준"), self.w_lo)
         self.w_hi = _spin(50.0, 100.0, 99.8, 0.1, 2, " %")
-        self.w_hi.setToolTip("이 퍼센타일 이상은 검은색 (낮추면 진해짐)")
-        f.addRow("검은색 기준", self.w_hi)
+        self.w_hi.setToolTip(_t("이 퍼센타일 이상은 검은색 (낮추면 진해짐)"))
+        f.addRow(_t("검은색 기준"), self.w_hi)
         self.w_gamma = _spin(0.2, 3.0, 1.0, 0.05, 2)
-        self.w_gamma.setToolTip("1보다 작으면 흐린 밴드가 진해집니다")
-        f.addRow("감마", self.w_gamma)
-        self.w_perpanel = QtWidgets.QCheckBox("패널마다 따로 대비 맞춤")
+        self.w_gamma.setToolTip(_t("1보다 작으면 흐린 밴드가 진해집니다"))
+        f.addRow(_t("감마"), self.w_gamma)
+        self.w_perpanel = QtWidgets.QCheckBox(_t("패널마다 따로 대비 맞춤"))
         f.addRow(self.w_perpanel)
-        self.w_corr = QtWidgets.QCheckBox("배경 제거한 이미지로 표시")
+        self.w_corr = QtWidgets.QCheckBox(_t("배경 제거한 이미지로 표시"))
         f.addRow(self.w_corr)
         for w, key in ((self.w_lo, "lo_pct"), (self.w_hi, "hi_pct"), (self.w_gamma, "gamma")):
             w.valueChanged.connect(lambda v, key=key: self.set(key, v))
@@ -1666,20 +1669,20 @@ class FigureEditor(QtWidgets.QWidget):
         return g
 
     def _build_ladder(self):
-        g = self._group("Ladder (마커)")
+        g = self._group(_t("Ladder (마커)"))
         l = QtWidgets.QVBoxLayout(g)
         hb = QtWidgets.QHBoxLayout()
-        b = QtWidgets.QPushButton("마커 이미지 불러오기…")
-        b.setToolTip("블롯과 같은 크기(가로세로 비율)의 마커/white-light TIF")
+        b = QtWidgets.QPushButton(_t("마커 이미지 불러오기…"))
+        b.setToolTip(_t("블롯과 같은 크기(가로세로 비율)의 마커/white-light TIF"))
         b.clicked.connect(self.open_marker)
         hb.addWidget(b)
-        self.marker_label = QtWidgets.QLabel("없음")
+        self.marker_label = QtWidgets.QLabel(_t("없음"))
         self.marker_label.setWordWrap(True)
         hb.addWidget(self.marker_label, 1)
         l.addLayout(hb)
-        self.ladder_display = self._group("마커 띠 · 크기 눈금 표시")
+        self.ladder_display = self._group(_t("마커 띠 · 크기 눈금 표시"))
         f = QtWidgets.QFormLayout(self.ladder_display)
-        self.w_strip = QtWidgets.QCheckBox("마커 이미지 띠를 패널 왼쪽에 표시")
+        self.w_strip = QtWidgets.QCheckBox(_t("마커 이미지 띠를 패널 왼쪽에 표시"))
         f.addRow(self.w_strip)
         hb = QtWidgets.QHBoxLayout()
         self.w_sx0 = _spin(0, 100000, 0, 1, None, " px")
@@ -1691,31 +1694,31 @@ class FigureEditor(QtWidgets.QWidget):
         hb.addWidget(self.w_sx0)
         hb.addWidget(QtWidgets.QLabel("~"))
         hb.addWidget(self.w_sx1)
-        f.addRow("띠 가로 범위", hb)
-        b = QtWidgets.QPushButton("띠 자동으로 찾기")
-        b.setToolTip("마커 이미지에서 ladder 위치를 찾습니다. '마커 참고'나 메인 화면의 마커 위에서 파란 상자를 끌어 직접 정할 수도 있습니다")
+        f.addRow(_t("띠 가로 범위"), hb)
+        b = QtWidgets.QPushButton(_t("띠 자동으로 찾기"))
+        b.setToolTip(_t("마커 이미지에서 ladder 위치를 찾습니다. '마커 참고'나 메인 화면의 마커 위에서 파란 상자를 끌어 직접 정할 수도 있습니다"))
         b.clicked.connect(self.auto_strip)
         f.addRow(b)
         self.w_sdy = _spin(-5000, 5000, 0, 1, None, " px")
-        self.w_sdy.setToolTip("마커 사진이 블롯과 위아래로 어긋나 있을 때 마커 띠의 세로 위치를 보정합니다")
+        self.w_sdy.setToolTip(_t("마커 사진이 블롯과 위아래로 어긋나 있을 때 마커 띠의 세로 위치를 보정합니다"))
         self.w_sdy.valueChanged.connect(lambda v: self.set("strip_dy", int(v)))
-        f.addRow("띠 세로 보정", self.w_sdy)
-        self.w_minv = QtWidgets.QCheckBox("마커 띠 반전 (어두운 ladder / 흰 배경)")
+        f.addRow(_t("띠 세로 보정"), self.w_sdy)
+        self.w_minv = QtWidgets.QCheckBox(_t("마커 띠 반전 (어두운 ladder / 흰 배경)"))
         f.addRow(self.w_minv)
-        self.w_kda = QtWidgets.QCheckBox("크기 눈금 표시 (kDa / bp)")
+        self.w_kda = QtWidgets.QCheckBox(_t("크기 눈금 표시 (kDa / bp)"))
         f.addRow(self.w_kda)
         self.w_unit = QtWidgets.QComboBox()
         self.w_unit.addItems(["kDa", "bp"])
         self.w_unit.currentTextChanged.connect(lambda t: self.set("unit", t))
-        f.addRow("단위", self.w_unit)
+        f.addRow(_t("단위"), self.w_unit)
         f2 = QtWidgets.QFormLayout()
         hb = QtWidgets.QHBoxLayout()
         self.w_preset = QtWidgets.QComboBox()
         self.w_preset.addItems(list(core.LADDER_PRESETS))
         hb.addWidget(self.w_preset, 1)
-        f2.addRow("ladder 종류", hb)
-        b = QtWidgets.QPushButton("위에서부터 값 채우기")
-        b.setToolTip("아래 표의 눈금(위쪽 밴드부터)에 고른 ladder의 크기를 차례로 넣습니다")
+        f2.addRow(_t("ladder 종류"), hb)
+        b = QtWidgets.QPushButton(_t("위에서부터 값 채우기"))
+        b.setToolTip(_t("아래 표의 눈금(위쪽 밴드부터)에 고른 ladder의 크기를 차례로 넣습니다"))
         b.clicked.connect(self.fill_preset)
         f2.addRow(b)
         l.addLayout(f2)
@@ -1725,20 +1728,20 @@ class FigureEditor(QtWidgets.QWidget):
         self.w_minv.toggled.connect(lambda on: self.set("marker_invert", on))
         self.w_kda.toggled.connect(lambda on: self.set("show_kda", on))
         self.kda_table = QtWidgets.QTableWidget(0, 2)
-        self.kda_table.setHorizontalHeaderLabels(["크기", "y (px)"])
+        self.kda_table.setHorizontalHeaderLabels([_t("크기"), "y (px)"])
         self.kda_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         self.kda_table.verticalHeader().setVisible(False)
         self.kda_table.setMaximumHeight(170)
         self.kda_table.itemChanged.connect(self.on_kda_item)
         l.addWidget(self.kda_table)
         hb = QtWidgets.QHBoxLayout()
-        b = QtWidgets.QPushButton("눈금 추가 (직접 입력)")
+        b = QtWidgets.QPushButton(_t("눈금 추가 (직접 입력)"))
         b.clicked.connect(self.add_kda_row)
         hb.addWidget(b)
-        b = QtWidgets.QPushButton("선택 삭제")
+        b = QtWidgets.QPushButton(_t("선택 삭제"))
         b.clicked.connect(self.delete_kda)
         hb.addWidget(b)
-        b = QtWidgets.QPushButton("마커 보며 클릭으로 입력")
+        b = QtWidgets.QPushButton(_t("마커 보며 클릭으로 입력"))
         b.clicked.connect(lambda: self.right.setCurrentIndex(1))
         hb.addWidget(b)
         l.addLayout(hb)
@@ -1799,12 +1802,12 @@ class FigureEditor(QtWidgets.QWidget):
         own_tag = src.get("__own__", {}).get("tag", "")
         multi = any(p.get("doc") for p in s.get("panels", []))
         n_own = sum(1 for p in s.get("panels", []) if not p.get("doc"))
-        objs.append((f"블롯 · {own_tag}" + (" (Full)" if full else ""), f"패널 {n_own}" if not full else "",
+        objs.append((_t("블롯 · {0}").format(own_tag) + (" (Full)" if full else ""), _t("패널 {0}").format(n_own) if not full else "",
                      {"kind": "blot"}))
         if not full:
             for p in s.get("panels", []):
                 if p.get("doc"):
-                    tag = (src.get(p["doc"]) or {}).get("tag", "닫힘")
+                    tag = (src.get(p["doc"]) or {}).get("tag", _t("닫힘"))
                 else:
                     tag = own_tag
                 if not p.get("show", True):
@@ -1814,21 +1817,21 @@ class FigureEditor(QtWidgets.QWidget):
         for ti, t in enumerate(s.get("tiers", [])):  # ⋮⋮ rows: drag to change the order of the tiers
             if t.get("kind") == "lanes":
                 if t.get("auto"):
-                    name = "레인 이름"
+                    name = _t("레인 이름")
                 else:
-                    name = "이름 층 · " + ((t.get("condition") or "").strip() or
+                    name = _t("이름 층 · ") + ((t.get("condition") or "").strip() or
                                           " ".join(x for x in figure.tier_texts(s, t)[:4] if x))
             else:
-                name = "그룹 막대 · " + " · ".join(g.get("text", "") for g in t.get("groups", [])[:2])
+                name = _t("그룹 막대 · ") + " · ".join(g.get("text", "") for g in t.get("groups", [])[:2])
             objs.append((f"⋮⋮ {name}"[:40], own_tag if multi and t.get("auto") else "", {"kind": "tier", "ti": ti}))
         if any(k.get("kda") not in (None, "") for k in s.get("kda", [])):
-            objs.append(("   kDa 눈금", "", {"kind": "text", "key": "kda:0"}))
+            objs.append((_t("   kDa 눈금"), "", {"kind": "text", "key": "kda:0"}))
         if self.doc is not None and getattr(self.doc, "marker", None) is not None and s.get("show_strip"):
-            objs.append(("   마커 띠", "", {"kind": "strip"}))
+            objs.append((_t("   마커 띠"), "", {"kind": "strip"}))
         for ni, n in enumerate(s.get("numbers", [])):
-            objs.append((f"   정량 숫자 · {n.get('label', '')}", "", {"kind": "text", "key": f"numlabel:{ni}"}))
+            objs.append((_t("   정량 숫자 · {0}").format(n.get('label', '')), "", {"kind": "text", "key": f"numlabel:{ni}"}))
         self._objects = objs
-        self.obj_title.setText("그림 안의 것 · 끌어서 순서" if multi else "그림 안의 것")
+        self.obj_title.setText(_t("그림 안의 것 · 끌어서 순서") if multi else _t("그림 안의 것"))
         cur = next((i for i, o in enumerate(objs) if o[2] == self.selection), -1)
         self.obj_list.set_rows([(t, n) for t, n, _ in objs], cur)
         for i, (_, _, sel) in enumerate(objs):  # only panel rows can be dragged
@@ -1907,13 +1910,13 @@ class FigureEditor(QtWidgets.QWidget):
             cb.setToolTip(d.name)
             hl.addWidget(cb, 1)
             if own:
-                note = "기준"
+                note = _t("기준")
                 color = None
             elif d.mode == core.MODE_GEL:
-                note, color = "겔", None
+                note, color = _t("겔"), None
             else:
                 got, n = self._match_count(d)
-                note = f"레인 {got}/{n}"
+                note = _t("레인 {0}/{1}").format(got, n)
                 color = "#c93400" if got < n else None
             nl = QtWidgets.QLabel(note)
             if color:
@@ -1998,17 +2001,17 @@ class FigureEditor(QtWidgets.QWidget):
             if not p.get("doc") or not p.get("show", True):
                 continue
             if sd is None:
-                msgs.append(f"'{p.get('label')}'의 이미지가 열려 있지 않습니다")
+                msgs.append(_t("'{0}'의 이미지가 열려 있지 않습니다").format(p.get('label')))
                 continue
             lm = figure.panel_lane_map(a, self.s, p, sd["analysis"])
             miss = [a.lane_labels[i] for i, j in enumerate(lm) if j is None and i < len(a.lane_labels)]
             if miss:
                 names = list(dict.fromkeys(miss))
-                msgs.append(f"{sd['tag']}에는 {', '.join(names)} 레인이 없어 그 칸을 비웠습니다")
+                msgs.append(_t("{0}에는 {1} 레인이 없어 그 칸을 비웠습니다").format(sd['tag'], ', '.join(names)))
         msgs = list(dict.fromkeys(msgs))
         if msgs:
-            self.status(msgs[0] + (f" (외 {len(msgs) - 1}개)" if len(msgs) > 1 else ""))
-        elif self.foot_msg.text().startswith("● ") and "레인이 없어" in self.foot_msg.text():
+            self.status(msgs[0] + (_t(" (외 {0}개)").format(len(msgs) - 1) if len(msgs) > 1 else ""))
+        elif self.foot_msg.text().startswith("● ") and _t("레인이 없어") in self.foot_msg.text():
             self.status("")
 
     def select_from_list(self, row):
@@ -2026,7 +2029,7 @@ class FigureEditor(QtWidgets.QWidget):
         sel = self.preview.selected or {}
         if what == "lanes":  # 이름 층: a new tier on top, every cell '–' (mockup board 2)
             self.add_tier_at(sel["ti"] if sel.get("kind") in ("tier", "cells") else 0)
-            self.status("새 이름 층: 칸을 클릭하거나 긁어서 고른 뒤 바로 타이핑하세요. 왼쪽 ⋮⋮ 를 끌면 층이 통째로 옮겨집니다")
+            self.status(_t("새 이름 층: 칸을 클릭하거나 긁어서 고른 뒤 바로 타이핑하세요. 왼쪽 ⋮⋮ 를 끌면 층이 통째로 옮겨집니다"))
         elif what == "groups":
             if sel.get("kind") == "cells":
                 self.make_group(sel["ti"], sel["lanes"])
@@ -2035,7 +2038,7 @@ class FigureEditor(QtWidgets.QWidget):
             ti = lane_tiers[-1] if lane_tiers else 0
             n = len(s["lanes"])
             self.make_group(ti, list(range(min(2, n))))
-            self.status("레인 이름을 마우스로 긁어 고른 뒤 우클릭 › ‘그룹 막대로 묶기’ 로도 만들 수 있습니다")
+            self.status(_t("레인 이름을 마우스로 긁어 고른 뒤 우클릭 › ‘그룹 막대로 묶기’ 로도 만들 수 있습니다"))
         elif what == "cond":
             if not s["tiers"]:
                 self.add_tier_at(0)
@@ -2047,7 +2050,7 @@ class FigureEditor(QtWidgets.QWidget):
             self.preview.start_edit()
         elif what == "kda":
             self.right.setCurrentIndex(1)
-            self.status("마커 참고: 마커 밴드를 클릭하고 크기(kDa/bp)를 넣으세요")
+            self.status(_t("마커 참고: 마커 밴드를 클릭하고 크기(kDa/bp)를 넣으세요"))
         elif what == "number":
             self.add_number()
             if s["numbers"]:
@@ -2114,15 +2117,14 @@ class FigureEditor(QtWidgets.QWidget):
     ROTATIONS = (0, 30, 45, 60, 90)
 
     def _build_tiers(self):
-        g = self._group("레인 위 층 (위에서 아래 순서 · '|' = 줄바꿈)")
+        g = self._group(_t("레인 위 층 (위에서 아래 순서 · '|' = 줄바꿈)"))
         l = QtWidgets.QVBoxLayout(g)
-        info = QtWidgets.QLabel("층마다 '레인별 이름'(예: + − + −, 12h 24h) 또는 '그룹 막대'(여러 레인을 묶는 막대)를 고르고, "
-                                "옆에 조건 설명(예: Dox, Cell number)을 넣을 수 있습니다. 표에서 층을 고르면 아래에서 내용을 고칩니다.")
+        info = QtWidgets.QLabel(_t("층마다 '레인별 이름'(예: + − + −, 12h 24h) 또는 '그룹 막대'(여러 레인을 묶는 막대)를 고르고, 옆에 조건 설명(예: Dox, Cell number)을 넣을 수 있습니다. 표에서 층을 고르면 아래에서 내용을 고칩니다."))
         info.setWordWrap(True)
         theme.hint(info)
         l.addWidget(info)
         self.tier_table = QtWidgets.QTableWidget(0, 6)
-        self.tier_table.setHorizontalHeaderLabels(["층", "종류", "조건 설명", "설명 위치", "회전", "기울임"])
+        self.tier_table.setHorizontalHeaderLabels([_t("층"), _t("종류"), _t("조건 설명"), _t("설명 위치"), _t("회전"), _t("기울임")])
         self.tier_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
         self.tier_table.verticalHeader().setVisible(False)
         self.tier_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -2132,8 +2134,8 @@ class FigureEditor(QtWidgets.QWidget):
         self.tier_table.itemSelectionChanged.connect(self.on_tier_selected)
         l.addWidget(self.tier_table)
         hb = QtWidgets.QHBoxLayout()
-        for text, fn in (("+ 레인별 이름 층", lambda: self.add_tier("lanes")), ("+ 그룹 막대 층", lambda: self.add_tier("groups")),
-                         ("▲", lambda: self.move_tier(-1)), ("▼", lambda: self.move_tier(1)), ("층 삭제", self.delete_tier)):
+        for text, fn in ((_t("+ 레인별 이름 층"), lambda: self.add_tier("lanes")), (_t("+ 그룹 막대 층"), lambda: self.add_tier("groups")),
+                         ("▲", lambda: self.move_tier(-1)), ("▼", lambda: self.move_tier(1)), (_t("층 삭제"), self.delete_tier)):
             b = QtWidgets.QPushButton(text)
             b.clicked.connect(fn)
             hb.addWidget(b)
@@ -2142,7 +2144,7 @@ class FigureEditor(QtWidgets.QWidget):
         # editor of the selected tier
         self.tier_detail = QtWidgets.QStackedWidget()
         self.tier_lane_table = QtWidgets.QTableWidget(0, 2)
-        self.tier_lane_table.setHorizontalHeaderLabels(["레인", "텍스트"])
+        self.tier_lane_table.setHorizontalHeaderLabels([_t("레인"), _t("텍스트")])
         self.tier_lane_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
         self.tier_lane_table.verticalHeader().setVisible(False)
         self.tier_lane_table.itemChanged.connect(self.on_tier_lane_item)
@@ -2151,19 +2153,19 @@ class FigureEditor(QtWidgets.QWidget):
         gl = QtWidgets.QVBoxLayout(gw)
         gl.setContentsMargins(0, 0, 0, 0)
         self.group_table = QtWidgets.QTableWidget(0, 3)
-        self.group_table.setHorizontalHeaderLabels(["그룹 텍스트", "시작 레인", "끝 레인"])
+        self.group_table.setHorizontalHeaderLabels([_t("그룹 텍스트"), _t("시작 레인"), _t("끝 레인")])
         self.group_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
         self.group_table.verticalHeader().setVisible(False)
         self.group_table.itemChanged.connect(self.on_group_item)
         gl.addWidget(self.group_table, 1)
         hb = QtWidgets.QHBoxLayout()
-        b = QtWidgets.QPushButton("그룹 추가")
+        b = QtWidgets.QPushButton(_t("그룹 추가"))
         b.clicked.connect(self.add_group)
         hb.addWidget(b)
-        b = QtWidgets.QPushButton("선택 그룹 삭제")
+        b = QtWidgets.QPushButton(_t("선택 그룹 삭제"))
         b.clicked.connect(self.delete_group)
         hb.addWidget(b)
-        self.w_bar = QtWidgets.QCheckBox("막대 표시")
+        self.w_bar = QtWidgets.QCheckBox(_t("막대 표시"))
         self.w_bar.toggled.connect(self.on_bar_toggled)
         hb.addWidget(self.w_bar)
         hb.addStretch(1)
@@ -2183,14 +2185,14 @@ class FigureEditor(QtWidgets.QWidget):
             it = QtWidgets.QTableWidgetItem(str(i + 1))
             it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             t.setItem(i, 0, it)
-            kind = "레인별 이름" + (" (레인 그룹)" if tier.get("auto") else "") if tier["kind"] == "lanes" else "그룹 막대"
+            kind = _t("레인별 이름") + (_t(" (레인 그룹)") if tier.get("auto") else "") if tier["kind"] == "lanes" else _t("그룹 막대")
             it = QtWidgets.QTableWidgetItem(kind)
             it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             t.setItem(i, 1, it)
             t.setItem(i, 2, QtWidgets.QTableWidgetItem(str(tier.get("condition", ""))))
             side = QtWidgets.QComboBox()
-            side.addItem("왼쪽", "left")
-            side.addItem("오른쪽", "right")
+            side.addItem(_t("왼쪽"), "left")
+            side.addItem(_t("오른쪽"), "right")
             side.setCurrentIndex(0 if tier.get("cond_side", "left") == "left" else 1)
             side.currentIndexChanged.connect(lambda _=None, tier=tier, cb=side: self._tier_set(tier, "cond_side", cb.currentData()))
             t.setCellWidget(i, 3, side)
@@ -2345,7 +2347,7 @@ class FigureEditor(QtWidgets.QWidget):
 
     # ------------------------------------------------------------ fonts and sides
     def _build_fonts(self):
-        g = self._group("글자 크기 · 위치")
+        g = self._group(_t("글자 크기 · 위치"))
         f = QtWidgets.QFormLayout(g)
         self.w_fonts = {}
         for key, (label, _) in figure.FONT_CATEGORIES.items():
@@ -2354,24 +2356,24 @@ class FigureEditor(QtWidgets.QWidget):
             self.w_fonts[key] = sp
             f.addRow(label, sp)
         hb = QtWidgets.QHBoxLayout()
-        for text, d in (("모두 −0.5", -0.5), ("모두 +0.5", 0.5)):
+        for text, d in ((_t("모두 −0.5"), -0.5), (_t("모두 +0.5"), 0.5)):
             b = QtWidgets.QPushButton(text)
             b.clicked.connect(lambda _=None, d=d: self.bump_fonts(d))
             hb.addWidget(b)
         hb.addStretch(1)
-        f.addRow("모든 글자", hb)
-        b = QtWidgets.QPushButton("글자별 조절 모두 초기화")
-        b.setToolTip("우클릭/드래그로 바꾼 개별 글자의 크기·각도·위치를 모두 되돌립니다")
+        f.addRow(_t("모든 글자"), hb)
+        b = QtWidgets.QPushButton(_t("글자별 조절 모두 초기화"))
+        b.setToolTip(_t("우클릭/드래그로 바꾼 개별 글자의 크기·각도·위치를 모두 되돌립니다"))
         b.clicked.connect(self.reset_overrides)
         f.addRow(b)
         self.w_prot_side = QtWidgets.QComboBox()
         self.w_kda_side = QtWidgets.QComboBox()
         for cb, key in ((self.w_prot_side, "protein_side"), (self.w_kda_side, "kda_side")):
-            cb.addItem("왼쪽", "left")
-            cb.addItem("오른쪽", "right")
+            cb.addItem(_t("왼쪽"), "left")
+            cb.addItem(_t("오른쪽"), "right")
             cb.currentIndexChanged.connect(lambda _=None, cb=cb, key=key: self.set(key, cb.currentData()))
-        f.addRow("단백질 이름 위치", self.w_prot_side)
-        f.addRow("kDa 눈금 위치", self.w_kda_side)
+        f.addRow(_t("단백질 이름 위치"), self.w_prot_side)
+        f.addRow(_t("kDa 눈금 위치"), self.w_kda_side)
         return g
 
     def set_font(self, key, v):
@@ -2521,7 +2523,7 @@ class FigureEditor(QtWidgets.QWidget):
                 p["show"] = False
                 self.preview.select(None)
                 self.load_from_settings()
-                self.status(f"'{p.get('label') or p['row']}' 패널을 그림에서 숨겼습니다 (왼쪽 칩으로 다시 켭니다)")
+                self.status(_t("'{0}' 패널을 그림에서 숨겼습니다 (왼쪽 칩으로 다시 켭니다)").format(p.get('label') or p['row']))
             return
         groups_gone = []
         for key in self.sel_keys(sel):
@@ -2607,7 +2609,7 @@ class FigureEditor(QtWidgets.QWidget):
         sel = {"kind": "tier", "ti": to}
         self.preview.select(sel)
         self.on_object_selected(sel)
-        self.status(f"층을 {'위' if to < ti else '아래'}로 옮겼습니다")
+        self.status(_t("층을 {0}로 옮겼습니다").format(_t("위") if to < ti else _t("아래")))
 
     def duplicate_tier(self, ti: int):
         import copy as _copy
@@ -2628,7 +2630,7 @@ class FigureEditor(QtWidgets.QWidget):
         if not (0 <= ti < len(tiers)):
             return
         if tiers[ti].get("auto"):
-            self.status("레인 이름 층은 지울 수 없습니다. 칸을 비우면 그림에서 사라집니다")
+            self.status(_t("레인 이름 층은 지울 수 없습니다. 칸을 비우면 그림에서 사라집니다"))
             return
         del tiers[ti]
         self._set_tiers(tiers)
@@ -2663,7 +2665,7 @@ class FigureEditor(QtWidgets.QWidget):
         self.preview.select(sel)
         self.on_object_selected(sel)
         self.preview.start_edit()
-        self.status("그룹 이름을 바로 입력하세요 (Enter로 확정). 막대 끝 네모를 끌면 범위가 바뀝니다")
+        self.status(_t("그룹 이름을 바로 입력하세요 (Enter로 확정). 막대 끝 네모를 끌면 범위가 바뀝니다"))
 
     def on_group_resized(self, ti, gi, first, last):
         try:
@@ -2687,7 +2689,7 @@ class FigureEditor(QtWidgets.QWidget):
         self.load_from_settings()
 
     def ask_same_text(self, sel):
-        v, ok = QtWidgets.QInputDialog.getText(self, "같은 글자 넣기", "고른 칸에 넣을 글자:", text=self.sel_text(sel) or "")
+        v, ok = QtWidgets.QInputDialog.getText(self, _t("같은 글자 넣기"), _t("고른 칸에 넣을 글자:"), text=self.sel_text(sel) or "")
         if ok:
             self.on_text_committed(sel, v)
 
@@ -2701,76 +2703,76 @@ class FigureEditor(QtWidgets.QWidget):
             str(self.s["lanes"][i].get("label", i + 1)) for i in ls[:6]) + (" …" if len(ls) > 6 else "")
         if kind == "cells":
             ti, ls = sel["ti"], sel["lanes"]
-            t = menu.addAction(f"레인 {len(ls)}개 ({lanes_lab(ls)})")
+            t = menu.addAction(_t("레인 {0}개 ({1})").format(len(ls), lanes_lab(ls)))
             t.setEnabled(False)
-            a = menu.addAction("그룹 막대로 묶기", lambda: self.make_group(ti, ls))
+            a = menu.addAction(_t("그룹 막대로 묶기"), lambda: self.make_group(ti, ls))
             a.setShortcut(QtGui.QKeySequence("Ctrl+G"))
-            menu.addAction("위에 이름 층 추가", lambda: self.add_tier_at(ti))
-            menu.addAction("같은 글자 넣기…", lambda: self.ask_same_text(sel))
-            menu.addAction("번호 매기기 (1, 2, 3 …)", lambda: self.number_cells(ti, ls))
-            sub = menu.addMenu("이 칸들 채우기")
+            menu.addAction(_t("위에 이름 층 추가"), lambda: self.add_tier_at(ti))
+            menu.addAction(_t("같은 글자 넣기…"), lambda: self.ask_same_text(sel))
+            menu.addAction(_t("번호 매기기 (1, 2, 3 …)"), lambda: self.number_cells(ti, ls))
+            sub = menu.addMenu(_t("이 칸들 채우기"))
             for pat, label in figure.TIER_FILLS:
                 sub.addAction(label, lambda pat=pat: self.fill_tier(ti, pat, ls))
             menu.addSeparator()
-            menu.addAction("글자 크기…", lambda: self._ask_sel_size(sel))
-            menu.addAction("칸 비우기", lambda: self.delete_selection(sel))
+            menu.addAction(_t("글자 크기…"), lambda: self._ask_sel_size(sel))
+            menu.addAction(_t("칸 비우기"), lambda: self.delete_selection(sel))
         elif kind == "tier":
             ti = sel["ti"]
             tier = self.s["tiers"][ti]
             if tier["kind"] == "lanes":
-                sub = menu.addMenu("이 층 채우기")
+                sub = menu.addMenu(_t("이 층 채우기"))
                 for pat, label in figure.TIER_FILLS:
                     sub.addAction(label, lambda pat=pat: self.fill_tier(ti, pat))
-            menu.addAction("위에 이름 층 추가", lambda: self.add_tier_at(ti))
+            menu.addAction(_t("위에 이름 층 추가"), lambda: self.add_tier_at(ti))
             menu.addSeparator()
-            a = menu.addAction("한 층 위로", lambda: self.move_tier_to(ti, ti - 1))
+            a = menu.addAction(_t("한 층 위로"), lambda: self.move_tier_to(ti, ti - 1))
             a.setEnabled(ti > 0)
-            a = menu.addAction("한 층 아래로", lambda: self.move_tier_to(ti, ti + 1))
+            a = menu.addAction(_t("한 층 아래로"), lambda: self.move_tier_to(ti, ti + 1))
             a.setEnabled(ti + 1 < len(self.s["tiers"]))
-            menu.addAction("층 복제", lambda: self.duplicate_tier(ti))
-            a = menu.addAction("층 삭제", lambda: self.delete_tier_at(ti))
+            menu.addAction(_t("층 복제"), lambda: self.duplicate_tier(ti))
+            a = menu.addAction(_t("층 삭제"), lambda: self.delete_tier_at(ti))
             a.setEnabled(not tier.get("auto"))
         elif kind in ("text", "texts"):
             keys = self.sel_keys(sel)
             info = self._text_info(keys[0]) or {"text": keys[0]}
-            t = menu.addAction(f"'{info['text'][:24]}'" + (f" 외 {len(keys) - 1}개" if len(keys) > 1 else ""))
+            t = menu.addAction(f"'{info['text'][:24]}'" + (_t(" 외 {0}개").format(len(keys) - 1) if len(keys) > 1 else ""))
             t.setEnabled(False)
             if self.sel_text(sel) is not None:
-                menu.addAction("글자 고치기\tEnter", self.preview.start_edit)
-            menu.addAction("글자 크기…", lambda: self._ask_sel_size(sel))
+                menu.addAction(_t("글자 고치기\tEnter"), self.preview.start_edit)
+            menu.addAction(_t("글자 크기…"), lambda: self._ask_sel_size(sel))
             st = self.sel_style(sel)
-            menu.addAction(f"각도… ({st.get('rot', 0):g}°)", lambda: self._ask_sel_rot(sel))
+            menu.addAction(_t("각도… ({0:g}°)").format(st.get('rot', 0)), lambda: self._ask_sel_rot(sel))
             if any(self.s["overrides"].get(k) for k in keys):
-                menu.addAction("이 글자 조절 모두 초기화", lambda: (
+                menu.addAction(_t("이 글자 조절 모두 초기화"), lambda: (
                     [self.s["overrides"].pop(k, None) for k in keys], self.render()))
             if kind == "text" and keys[0].startswith("group:"):
                 _, ti, gi = keys[0].split(":")
                 tier = self.s["tiers"][int(ti)]
                 menu.addSeparator()
-                a = menu.addAction("막대 표시")
+                a = menu.addAction(_t("막대 표시"))
                 a.setCheckable(True)
                 a.setChecked(bool(tier.get("bar", True)))
                 a.toggled.connect(lambda on: (tier.__setitem__("bar", on), self.render()))
-                menu.addAction("이 그룹 지우기", lambda: self.delete_selection(sel))
+                menu.addAction(_t("이 그룹 지우기"), lambda: self.delete_selection(sel))
             cat = self.key_cat(keys[0])
             if cat in figure.FONT_CATEGORIES:
                 menu.addSeparator()
                 label = figure.FONT_CATEGORIES[cat][0]
-                menu.addAction(f"'{label}' 전체 글자 크기… ({self.s['fonts'].get(cat, 8):g} pt)", lambda: self._ask_cat_size(cat))
+                menu.addAction(_t("'{0}' 전체 글자 크기… ({1:g} pt)").format(label, self.s['fonts'].get(cat, 8)), lambda: self._ask_cat_size(cat))
         elif kind == "panel":
-            menu.addAction("이 패널 그림에서 숨기기", lambda: self.delete_selection(sel))
+            menu.addAction(_t("이 패널 그림에서 숨기기"), lambda: self.delete_selection(sel))
         else:
-            menu.addAction("위에 이름 층 추가", lambda: self.add_tier_at(0))
+            menu.addAction(_t("위에 이름 층 추가"), lambda: self.add_tier_at(0))
         menu.exec(gpos)
 
     def _ask_sel_size(self, sel):
-        v, ok = QtWidgets.QInputDialog.getDouble(self, "글자 크기", "크기 (pt):", float(self.sel_style(sel).get("size", 8.0)),
+        v, ok = QtWidgets.QInputDialog.getDouble(self, _t("글자 크기"), _t("크기 (pt):"), float(self.sel_style(sel).get("size", 8.0)),
                                                  3.0, 72.0, 1)
         if ok:
             self.apply_style(sel, size=float(v))
 
     def _ask_sel_rot(self, sel):
-        v, ok = QtWidgets.QInputDialog.getDouble(self, "글자 각도", "각도 (도, 반시계 방향 +):",
+        v, ok = QtWidgets.QInputDialog.getDouble(self, _t("글자 각도"), _t("각도 (도, 반시계 방향 +):"),
                                                  float(self.sel_style(sel).get("rot", 0)), -180.0, 180.0, 0)
         if ok:
             self.apply_style(sel, rot=float(v))
@@ -2778,18 +2780,18 @@ class FigureEditor(QtWidgets.QWidget):
     # ---- inspector cards for the new selections
     def _props_cells(self, sel):
         ti, ls = sel["ti"], sel["lanes"]
-        f = self._p_box(f"이름 층 {ti + 1} · 칸 {len(ls)}개")
+        f = self._p_box(_t("이름 층 {0} · 칸 {1}개").format(ti + 1, len(ls)))
         e = QtWidgets.QLineEdit(self.sel_text(sel) or "")
-        e.setPlaceholderText("여러 값" if len(ls) > 1 else "")
-        e.setToolTip("'|' = 줄바꿈. 고른 칸 모두에 들어갑니다")
+        e.setPlaceholderText(_t("여러 값") if len(ls) > 1 else "")
+        e.setToolTip(_t("'|' = 줄바꿈. 고른 칸 모두에 들어갑니다"))
         e.editingFinished.connect(lambda: e.text() != (self.sel_text(sel) or "") and self.on_text_committed(sel, e.text()))
-        f.addRow("내용", e)
+        f.addRow(_t("내용"), e)
         self._props_style(f, sel)
         hb = QtWidgets.QHBoxLayout()
-        b = QtWidgets.QPushButton("그룹 막대로 묶기")
+        b = QtWidgets.QPushButton(_t("그룹 막대로 묶기"))
         b.clicked.connect(lambda: self.make_group(ti, ls))
         hb.addWidget(b)
-        b = QtWidgets.QPushButton("위에 이름 층 추가")
+        b = QtWidgets.QPushButton(_t("위에 이름 층 추가"))
         b.clicked.connect(lambda: self.add_tier_at(ti))
         hb.addWidget(b)
         f.addRow(hb)
@@ -2799,9 +2801,9 @@ class FigureEditor(QtWidgets.QWidget):
         st = self.sel_style(sel)
         sp = _spin(3.0, 72.0, float(st.get("size", 8.0)), 0.5, 1, " pt")
         sp.valueChanged.connect(lambda v: self.apply_style(sel, size=float(v)))
-        f.addRow("글자 크기", sp)
+        f.addRow(_t("글자 크기"), sp)
         hb = QtWidgets.QHBoxLayout()
-        for key, label in (("bold", "굵게"), ("italic", "기울임")):
+        for key, label in (("bold", _t("굵게")), ("italic", _t("기울임"))):
             c = QtWidgets.QCheckBox(label)
             c.setChecked(bool(st.get(key)))
             c.toggled.connect(lambda on, key=key: self.apply_style(sel, **{key: on}))
@@ -2810,8 +2812,8 @@ class FigureEditor(QtWidgets.QWidget):
         f.addRow(hb)
 
     def _props_texts(self, sel):
-        f = self._p_box(f"글자 {len(sel['keys'])}개")
-        theme_lab = QtWidgets.QLabel("여러 개를 골랐습니다. 공통 속성만 바꿉니다.")
+        f = self._p_box(_t("글자 {0}개").format(len(sel['keys'])))
+        theme_lab = QtWidgets.QLabel(_t("여러 개를 골랐습니다. 공통 속성만 바꿉니다."))
         theme_lab.setWordWrap(True)
         theme.hint(theme_lab)
         f.addRow(theme_lab)
@@ -2819,28 +2821,28 @@ class FigureEditor(QtWidgets.QWidget):
 
     def _props_tier_card(self, ti):
         t = self.s["tiers"][ti]
-        kind = "이름 층" if t["kind"] == "lanes" else "그룹 막대 층"
-        f = self._p_box(f"{kind} {ti + 1}" + (" (레인 이름)" if t.get("auto") else ""))
-        self._p_line(f, "조건 이름", t.get("condition", ""), lambda v: t.__setitem__("condition", v))
-        self._p_combo(f, "조건 위치", [("왼쪽", "left"), ("오른쪽", "right")], t.get("cond_side", "left"),
+        kind = _t("이름 층") if t["kind"] == "lanes" else _t("그룹 막대 층")
+        f = self._p_box(f"{kind} {ti + 1}" + (_t(" (레인 이름)") if t.get("auto") else ""))
+        self._p_line(f, _t("조건 이름"), t.get("condition", ""), lambda v: t.__setitem__("condition", v))
+        self._p_combo(f, _t("조건 위치"), [(_t("왼쪽"), "left"), (_t("오른쪽"), "right")], t.get("cond_side", "left"),
                       lambda v: t.__setitem__("cond_side", v))
-        self._p_combo(f, "회전 (층 전체)", [(f"{r}°", r) for r in self.ROTATIONS], int(t.get("rotation", 0)),
+        self._p_combo(f, _t("회전 (층 전체)"), [(f"{r}°", r) for r in self.ROTATIONS], int(t.get("rotation", 0)),
                       lambda v: t.__setitem__("rotation", v))
-        self._p_check(f, "기울임 (층 전체)", t.get("italic"), lambda on: t.__setitem__("italic", on))
+        self._p_check(f, _t("기울임 (층 전체)"), t.get("italic"), lambda on: t.__setitem__("italic", on))
         if t["kind"] == "lanes":
             cb = QtWidgets.QComboBox()
-            cb.addItem("채우기…", None)
+            cb.addItem(_t("채우기…"), None)
             for pat, label in figure.TIER_FILLS:
                 cb.addItem(label, pat)
             cb.activated.connect(lambda i: cb.itemData(i) and self.fill_tier(ti, cb.itemData(i)))
-            f.addRow("이 층 채우기", cb)
+            f.addRow(_t("이 층 채우기"), cb)
         else:
-            self._p_check(f, "막대 표시", t.get("bar", True), lambda on: t.__setitem__("bar", on))
+            self._p_check(f, _t("막대 표시"), t.get("bar", True), lambda on: t.__setitem__("bar", on))
         hb = QtWidgets.QHBoxLayout()
-        for label, fn, ok in (("한 층 위", lambda: self.move_tier_to(ti, ti - 1), ti > 0),
-                              ("한 층 아래", lambda: self.move_tier_to(ti, ti + 1), ti + 1 < len(self.s["tiers"])),
-                              ("복제", lambda: self.duplicate_tier(ti), True),
-                              ("삭제", lambda: self.delete_tier_at(ti), not t.get("auto"))):
+        for label, fn, ok in ((_t("한 층 위"), lambda: self.move_tier_to(ti, ti - 1), ti > 0),
+                              (_t("한 층 아래"), lambda: self.move_tier_to(ti, ti + 1), ti + 1 < len(self.s["tiers"])),
+                              (_t("복제"), lambda: self.duplicate_tier(ti), True),
+                              (_t("삭제"), lambda: self.delete_tier_at(ti), not t.get("auto"))):
             b = QtWidgets.QPushButton(label)
             b.setEnabled(ok)
             b.clicked.connect(fn)
@@ -2867,17 +2869,17 @@ class FigureEditor(QtWidgets.QWidget):
         self.render()
 
     def _ask_text_size(self, key, size):
-        v, ok = QtWidgets.QInputDialog.getDouble(self, "글자 크기", "이 글자의 크기 (pt):", size, 3.0, 72.0, 1)
+        v, ok = QtWidgets.QInputDialog.getDouble(self, _t("글자 크기"), _t("이 글자의 크기 (pt):"), size, 3.0, 72.0, 1)
         if ok:
             self._override(key, size=float(v))
 
     def _ask_text_rot(self, key, o):
-        v, ok = QtWidgets.QInputDialog.getDouble(self, "글자 각도", "각도 (도, 반시계 방향 +):", float(o.get("rot") or 0), -180.0, 180.0, 0)
+        v, ok = QtWidgets.QInputDialog.getDouble(self, _t("글자 각도"), _t("각도 (도, 반시계 방향 +):"), float(o.get("rot") or 0), -180.0, 180.0, 0)
         if ok:
             self._override(key, rot=float(v) if v else None)
 
     def _ask_cat_size(self, cat):
-        v, ok = QtWidgets.QInputDialog.getDouble(self, "글자 크기", f"{figure.FONT_CATEGORIES.get(cat, (cat,))[0]} 크기 (pt):",
+        v, ok = QtWidgets.QInputDialog.getDouble(self, _t("글자 크기"), _t("{0} 크기 (pt):").format(figure.FONT_CATEGORIES.get(cat, (cat,))[0]),
                                                  float(self.s["fonts"].get(cat, 8.0)), 3.0, 72.0, 1)
         if ok:
             self.s["fonts"][cat] = float(v)
@@ -2904,11 +2906,11 @@ class FigureEditor(QtWidgets.QWidget):
         if self.doc.marker is not None and p:
             self.marker_label.setText(os.path.basename(p))
         else:
-            self.marker_label.setText("없음 (kDa 눈금은 마커 없이도 입력 가능)")
+            self.marker_label.setText(_t("없음 (kDa 눈금은 마커 없이도 입력 가능)"))
 
     def open_marker(self):
         start = os.path.dirname(self.doc.image_path or "")
-        p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "마커(ladder) 이미지 열기", start,
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(self, _t("마커(ladder) 이미지 열기"), start,
                                                      "Images (*.tif *.tiff *.png *.jpg);;All files (*)")
         if p:
             self._load_marker(p)
@@ -2929,11 +2931,11 @@ class FigureEditor(QtWidgets.QWidget):
         self.s["show_strip"] = True
         self.load_from_settings()
         self.main.refresh_marker_view()
-        self.status(f"마커 띠 영역: x {x0}~{x1} px, 세로 보정 {self.s.get('strip_dy', 0)} px")
+        self.status(_t("마커 띠 영역: x {0}~{1} px, 세로 보정 {2} px").format(x0, x1, self.s.get('strip_dy', 0)))
 
     def auto_strip(self):
         if self.doc is None or self.doc.marker is None:
-            self.status("먼저 마커 이미지를 불러오세요")
+            self.status(_t("먼저 마커 이미지를 불러오세요"))
             return
         x0, x1 = figure.guess_ladder_x(self.doc.marker, self.doc.analysis)
         self.set_strip_region(x0, x1, 0)
@@ -2965,7 +2967,7 @@ class FigureEditor(QtWidgets.QWidget):
         if not 0 <= y < H:
             return
         unit = self.s.get("unit", "kDa")
-        v, ok = QtWidgets.QInputDialog.getDouble(self, "크기 입력", f"y = {y:.0f} px 의 ladder 밴드 크기 ({unit}):", 100.0, 0.1, 100000.0, 1)
+        v, ok = QtWidgets.QInputDialog.getDouble(self, _t("크기 입력"), _t("y = {0:.0f} px 의 ladder 밴드 크기 ({1}):").format(y, unit), 100.0, 0.1, 100000.0, 1)
         if not ok:
             return
         self.s["kda"].append({"kda": v, "y": float(round(y))})
@@ -2976,10 +2978,10 @@ class FigureEditor(QtWidgets.QWidget):
         self.schedule()
 
     def add_kda_row(self):
-        v, ok = QtWidgets.QInputDialog.getDouble(self, "눈금 추가", f"ladder 밴드 크기 ({self.s.get('unit', 'kDa')}):", 100.0, 0.1, 100000.0, 1)
+        v, ok = QtWidgets.QInputDialog.getDouble(self, _t("눈금 추가"), _t("ladder 밴드 크기 ({0}):").format(self.s.get('unit', 'kDa')), 100.0, 0.1, 100000.0, 1)
         if not ok:
             return
-        y, ok = QtWidgets.QInputDialog.getInt(self, "kDa 추가", "그 밴드의 y 위치 (블롯 픽셀):", 0, 0, self.doc.raw.shape[0] - 1)
+        y, ok = QtWidgets.QInputDialog.getInt(self, _t("kDa 추가"), _t("그 밴드의 y 위치 (블롯 픽셀):"), 0, 0, self.doc.raw.shape[0] - 1)
         if not ok:
             return
         self.s["kda"].append({"kda": v, "y": float(y)})
@@ -2992,15 +2994,15 @@ class FigureEditor(QtWidgets.QWidget):
         values = core.LADDER_PRESETS.get(self.w_preset.currentText(), [])
         marks = sorted(self.s["kda"], key=lambda k: k["y"])
         if not marks:
-            QtWidgets.QMessageBox.information(self, "ladder 값", "먼저 ladder 밴드 위치(눈금)가 있어야 합니다. DNA gel 모드에서는 검출된 ladder 밴드가 자동으로 들어옵니다.")
+            QtWidgets.QMessageBox.information(self, _t("ladder 값"), _t("먼저 ladder 밴드 위치(눈금)가 있어야 합니다. DNA gel 모드에서는 검출된 ladder 밴드가 자동으로 들어옵니다."))
             return
         for k, v in zip(marks, values):
             k["kda"] = float(v)
         self.s["unit"] = "bp" if "DNA" in self.w_preset.currentText() else self.s.get("unit", "kDa")
         self.s["show_kda"] = True
         n = min(len(marks), len(values))
-        self.status(f"{self.w_preset.currentText()}: 위에서부터 {n}개 눈금에 크기를 넣었습니다"
-                    + ("" if len(marks) == len(values) else f" (눈금 {len(marks)}개, ladder {len(values)}개 — 확인하세요)"))
+        self.status(_t("{0}: 위에서부터 {1}개 눈금에 크기를 넣었습니다").format(self.w_preset.currentText(), n)
+                    + ("" if len(marks) == len(values) else _t(" (눈금 {0}개, ladder {1}개 — 확인하세요)").format(len(marks), len(values))))
         self.load_from_settings()
 
     def delete_kda(self):
@@ -3046,7 +3048,7 @@ class FigureEditor(QtWidgets.QWidget):
 
     def _p_line(self, f, label, value, on_set):
         e = QtWidgets.QLineEdit(str(value))
-        e.setToolTip("'|' = 줄바꿈")
+        e.setToolTip(_t("'|' = 줄바꿈"))
         e.editingFinished.connect(lambda: (on_set(e.text()), self._p_changed()))
         f.addRow(label, e)
         return e
@@ -3089,8 +3091,7 @@ class FigureEditor(QtWidgets.QWidget):
     def show_props(self, sel):
         self._clear_props()
         if not sel or self.doc is None:
-            hint = QtWidgets.QLabel("미리보기에서 글자, 단백질 패널, 마커 띠를 클릭하면 여기에서 그 대상을 고칠 수 있습니다.\n\n"
-                                    "왼쪽 '그림 안의 것'에서 골라도 됩니다. 글자 크기·대비 같은 전체 설정은 '그림 전체'에 있습니다.")
+            hint = QtWidgets.QLabel(_t("미리보기에서 글자, 단백질 패널, 마커 띠를 클릭하면 여기에서 그 대상을 고칠 수 있습니다.\n\n왼쪽 '그림 안의 것'에서 골라도 됩니다. 글자 크기·대비 같은 전체 설정은 '그림 전체'에 있습니다."))
             hint.setWordWrap(True)
             theme.hint(hint)
             self.props_layout.addWidget(hint)
@@ -3128,7 +3129,7 @@ class FigureEditor(QtWidgets.QWidget):
             self._props_blot()
         elif kind == "strip":
             self._props_strip()
-        b = QtWidgets.QPushButton("선택 해제")
+        b = QtWidgets.QPushButton(_t("선택 해제"))
         b.clicked.connect(lambda: (self.preview.select(None), self.on_object_selected(None)))
         self.props_layout.addWidget(b, 0, Qt.AlignLeft)
         self.props_layout.addStretch(1)
@@ -3167,13 +3168,13 @@ class FigureEditor(QtWidgets.QWidget):
         info = self._text_info(key) or {"cat": "lane", "text": ""}
         cat = info["cat"]
         o = self.s["overrides"].get(key, {})
-        f = self._p_box(f"글자: {info['text'][:30]}")
+        f = self._p_box(_t("글자: {0}").format(info['text'][:30]))
         acc = self._text_access(key)
         if acc:
             get, put = acc
-            self._p_line(f, "내용", get(), put)
+            self._p_line(f, _t("내용"), get(), put)
         else:
-            lab = QtWidgets.QLabel("(정량값에서 계산된 숫자 — 아래 '정량 숫자 줄'에서 형식을 바꿉니다)")
+            lab = QtWidgets.QLabel(_t("(정량값에서 계산된 숫자 — 아래 '정량 숫자 줄'에서 형식을 바꿉니다)"))
             lab.setWordWrap(True)
             f.addRow(lab)
 
@@ -3188,21 +3189,21 @@ class FigureEditor(QtWidgets.QWidget):
                 self.s["overrides"].pop(key, None)
 
         base = float(self.s["fonts"].get(cat, 8.0))
-        self._p_num(f, "글자 크기", float(o.get("size") or base), 3.0, 72.0, 0.5, 1, " pt",
+        self._p_num(f, _t("글자 크기"), float(o.get("size") or base), 3.0, 72.0, 0.5, 1, " pt",
                     lambda v: ov(size=None if abs(v - base) < 1e-6 else float(v)), sync=False)
-        self._p_num(f, "각도", float(o.get("rot") or 0), -180.0, 180.0, 5.0, 0, "°",
+        self._p_num(f, _t("각도"), float(o.get("rot") or 0), -180.0, 180.0, 5.0, 0, "°",
                     lambda v: ov(rot=float(v) if v else None), sync=False)
         bold_default = cat == "protein" and self.s.get("label_bold", True)
-        self._p_check(f, "굵게", o.get("bold", bold_default), lambda on: ov(bold=on), sync=False)
+        self._p_check(f, _t("굵게"), o.get("bold", bold_default), lambda on: ov(bold=on), sync=False)
         italic_default = False
         if key.split(":")[0] in ("lane", "group"):
             italic_default = bool(self.s["tiers"][int(key.split(":")[1])].get("italic"))
-        self._p_check(f, "기울임", o.get("italic", italic_default), lambda on: ov(italic=on), sync=False)
-        self._p_num(f, "가로 이동", float(o.get("dx", 0.0)) * 25.4, -100.0, 100.0, 0.5, 1, " mm",
+        self._p_check(f, _t("기울임"), o.get("italic", italic_default), lambda on: ov(italic=on), sync=False)
+        self._p_num(f, _t("가로 이동"), float(o.get("dx", 0.0)) * 25.4, -100.0, 100.0, 0.5, 1, " mm",
                     lambda v: ov(dx=float(v) / 25.4 if v else None), sync=False)
-        self._p_num(f, "세로 이동", float(o.get("dy", 0.0)) * 25.4, -100.0, 100.0, 0.5, 1, " mm",
+        self._p_num(f, _t("세로 이동"), float(o.get("dy", 0.0)) * 25.4, -100.0, 100.0, 0.5, 1, " mm",
                     lambda v: ov(dy=float(v) / 25.4 if v else None), sync=False)
-        b = QtWidgets.QPushButton("이 글자 조절 모두 초기화")
+        b = QtWidgets.QPushButton(_t("이 글자 조절 모두 초기화"))
         b.clicked.connect(lambda: (self.s["overrides"].pop(key, None), self.render(), self.show_props(self.selection)))
         f.addRow(b)
 
@@ -3211,21 +3212,21 @@ class FigureEditor(QtWidgets.QWidget):
         t = self.s["tiers"][ti]
         if t["kind"] == "groups" and gi is not None and gi < len(t["groups"]):
             g = t["groups"][gi]
-            f = self._p_box("그룹 범위 (막대 끝 네모를 끌어도 됩니다)")
+            f = self._p_box(_t("그룹 범위 (막대 끝 네모를 끌어도 됩니다)"))
             lanes = [(f"{i + 1}: {l.get('text', '').replace('|', ' ')}", i) for i, l in enumerate(self.s["lanes"])]
-            self._p_combo(f, "시작 레인", lanes, int(g["first"]), lambda v: g.__setitem__("first", min(v, g["last"])))
-            self._p_combo(f, "끝 레인", lanes, int(g["last"]), lambda v: g.__setitem__("last", max(v, g["first"])))
+            self._p_combo(f, _t("시작 레인"), lanes, int(g["first"]), lambda v: g.__setitem__("first", min(v, g["last"])))
+            self._p_combo(f, _t("끝 레인"), lanes, int(g["last"]), lambda v: g.__setitem__("last", max(v, g["first"])))
 
     def _props_panel(self, row):
         if row == figure.GEL_ROW:
-            f = self._p_box("겔 전체 패널")
+            f = self._p_box(_t("겔 전체 패널"))
             s = self.s
-            self._p_line(f, "왼쪽 라벨", s.get("gel_label", ""), lambda v: s.__setitem__("gel_label", v))
+            self._p_line(f, _t("왼쪽 라벨"), s.get("gel_label", ""), lambda v: s.__setitem__("gel_label", v))
             crop = s.get("gel_crop") or figure.default_gel_crop(self.doc.analysis, self.doc.raw.shape)
             s["gel_crop"] = list(crop)
-            for i, lab in enumerate(("왼쪽 x", "위 y", "오른쪽 x", "아래 y")):
+            for i, lab in enumerate((_t("왼쪽 x"), _t("위 y"), _t("오른쪽 x"), _t("아래 y"))):
                 self._p_num(f, lab, int(crop[i]), 0, 100000, 1, None, " px", lambda v, i=i: s["gel_crop"].__setitem__(i, int(v)))
-            self._p_combo(f, "형태", [("겔 전체 한 패널", "full"), ("단백질(행)별 잘라내기", "rows")], s.get("layout", "rows"),
+            self._p_combo(f, _t("형태"), [(_t("겔 전체 한 패널"), "full"), (_t("단백질(행)별 잘라내기"), "rows")], s.get("layout", "rows"),
                           lambda v: s.__setitem__("layout", v))
             return
         p = next((p for p in self.s["panels"] if p["row"] == row), None)
@@ -3234,13 +3235,13 @@ class FigureEditor(QtWidgets.QWidget):
         if p.get("doc"):
             self._props_foreign(p)
             return
-        f = self._p_box(f"단백질 패널: {row}")
-        self._p_line(f, "라벨", p["label"], lambda v: p.__setitem__("label", v))
-        self._p_check(f, "그림에 표시", p.get("show", True), lambda on: p.__setitem__("show", on))
-        self._p_num(f, "위 여백", int(p.get("pad_top", 0)), -500, 2000, 1, None, " px", lambda v: p.__setitem__("pad_top", int(v)))
-        self._p_num(f, "아래 여백", int(p.get("pad_bottom", 0)), -500, 2000, 1, None, " px",
+        f = self._p_box(_t("단백질 패널: {0}").format(row))
+        self._p_line(f, _t("라벨"), p["label"], lambda v: p.__setitem__("label", v))
+        self._p_check(f, _t("그림에 표시"), p.get("show", True), lambda on: p.__setitem__("show", on))
+        self._p_num(f, _t("위 여백"), int(p.get("pad_top", 0)), -500, 2000, 1, None, " px", lambda v: p.__setitem__("pad_top", int(v)))
+        self._p_num(f, _t("아래 여백"), int(p.get("pad_bottom", 0)), -500, 2000, 1, None, " px",
                     lambda v: p.__setitem__("pad_bottom", int(v)))
-        lab = QtWidgets.QLabel("패널 너비(좌우 여백)는 모든 패널이 함께 씁니다: 패널을 클릭한 뒤 왼쪽·오른쪽 가장자리 네모를 끌어도 됩니다.")
+        lab = QtWidgets.QLabel(_t("패널 너비(좌우 여백)는 모든 패널이 함께 씁니다: 패널을 클릭한 뒤 왼쪽·오른쪽 가장자리 네모를 끌어도 됩니다."))
         lab.setWordWrap(True)
         theme.hint(lab)
         f.addRow(lab)
@@ -3251,12 +3252,12 @@ class FigureEditor(QtWidgets.QWidget):
         s = self.s
         src = self.sources()
         tag = src.get("__own__", {}).get("tag", "")
-        f = self._p_box(f"블롯 · {tag}")
-        self._p_combo(f, "보기", [("레인별 자르기", "rows"), ("Full blot", "full")], s.get("layout", "rows"),
+        f = self._p_box(_t("블롯 · {0}").format(tag))
+        self._p_combo(f, _t("보기"), [(_t("레인별 자르기"), "rows"), ("Full blot", "full")], s.get("layout", "rows"),
                       lambda v: s.__setitem__("layout", v))
-        self._p_num(f, "너비", round(float(s["width_in"]) * 25.4, 1), 10, 400, 1, 1, " mm",
+        self._p_num(f, _t("너비"), round(float(s["width_in"]) * 25.4, 1), 10, 400, 1, 1, " mm",
                     lambda v: s.__setitem__("width_in", float(v) / 25.4))
-        b = QtWidgets.QPushButton("초기화")
+        b = QtWidgets.QPushButton(_t("초기화"))
 
         def reset_crop():
             s["margin_left_px"] = s["margin_right_px"] = None
@@ -3268,13 +3269,13 @@ class FigureEditor(QtWidgets.QWidget):
                         p["pad_top"] = p["pad_bottom"] = int(round(0.6 * self.doc.analysis.rows[ri].height))
             self._p_changed()
         b.clicked.connect(reset_crop)
-        lab = QtWidgets.QLabel("잘라낼 영역")
-        lab.setToolTip("미리보기에서 더블클릭 후 패널 가장자리를 끌어 정합니다")
+        lab = QtWidgets.QLabel(_t("잘라낼 영역"))
+        lab.setToolTip(_t("미리보기에서 더블클릭 후 패널 가장자리를 끌어 정합니다"))
         f.addRow(lab, b)
         f = self._p_box("")
-        self._p_check(f, "밝기 범위 자동 (패널마다)", s.get("per_panel", True), lambda on: s.__setitem__("per_panel", on))
-        self._p_num(f, "감마", float(s["gamma"]), 0.2, 4.0, 0.05, 2, "", lambda v: s.__setitem__("gamma", float(v)))
-        self._p_check(f, "테두리 선", float(s.get("frame_lw", 0.8)) > 0,
+        self._p_check(f, _t("밝기 범위 자동 (패널마다)"), s.get("per_panel", True), lambda on: s.__setitem__("per_panel", on))
+        self._p_num(f, _t("감마"), float(s["gamma"]), 0.2, 4.0, 0.05, 2, "", lambda v: s.__setitem__("gamma", float(v)))
+        self._p_check(f, _t("테두리 선"), float(s.get("frame_lw", 0.8)) > 0,
                       lambda on: s.__setitem__("frame_lw", (s.get("_frame_lw_on") or 0.8) if on else
                                                (s.__setitem__("_frame_lw_on", s.get("frame_lw") or 0.8) or 0.0)))
         f = self._p_box("")
@@ -3284,8 +3285,8 @@ class FigureEditor(QtWidgets.QWidget):
             s["show_kda"] = v != "hide"
             if v != "hide":
                 s["kda_side"] = v
-        self._p_combo(f, "kDa 눈금", [("왼쪽", "left"), ("오른쪽", "right"), ("숨김", "hide")], kda_now, set_kda)
-        self._p_combo(f, "단백질 이름", [("왼쪽", "left"), ("오른쪽", "right")], s.get("protein_side", "left"),
+        self._p_combo(f, _t("kDa 눈금"), [(_t("왼쪽"), "left"), (_t("오른쪽"), "right"), (_t("숨김"), "hide")], kda_now, set_kda)
+        self._p_combo(f, _t("단백질 이름"), [(_t("왼쪽"), "left"), (_t("오른쪽"), "right")], s.get("protein_side", "left"),
                       lambda v: s.__setitem__("protein_side", v))
         base = float(s["fonts"].get("protein", s.get("font_size", 8.0)))
 
@@ -3293,7 +3294,7 @@ class FigureEditor(QtWidgets.QWidget):
             for key, (_, fac) in figure.FONT_CATEGORIES.items():
                 s["fonts"][key] = round(float(v) * fac, 1)
             s["font_size"] = float(v)
-        self._p_num(f, "글자 크기", base, 4, 30, 0.5, 1, " pt", set_size)
+        self._p_num(f, _t("글자 크기"), base, 4, 30, 0.5, 1, " pt", set_size)
         if any(p.get("doc") for p in s["panels"]):
             self._props_multi()
 
@@ -3301,15 +3302,14 @@ class FigureEditor(QtWidgets.QWidget):
         """여러 블롯 card: lane matching, reference image, source tags, gap between images."""
         s = self.s
         src = self.sources()
-        f = self._p_box("여러 블롯 · 그림 전체")
-        self._p_combo(f, "레인 맞추기", [("레인 이름", "name"), ("순서대로", "order")], s.get("lane_match", "name"),
+        f = self._p_box(_t("여러 블롯 · 그림 전체"))
+        self._p_combo(f, _t("레인 맞추기"), [(_t("레인 이름"), "name"), (_t("순서대로"), "order")], s.get("lane_match", "name"),
                       lambda v: s.__setitem__("lane_match", v))
         ref = QtWidgets.QLabel(src.get("__own__", {}).get("tag", ""))
-        ref.setToolTip("레인 이름 줄 · 그룹 막대 · 조건 글자 · kDa 눈금은 기준 이미지 것을 씁니다.\n"
-                       "기준을 바꾸려면 메인 창에서 그 이미지를 고른 뒤 Figure를 여세요.")
-        f.addRow("기준 이미지", ref)
-        self._p_check(f, "출처 표시 (I1, I2…)", s.get("show_src", True), lambda on: s.__setitem__("show_src", on))
-        self._p_num(f, "이미지 사이 간격", float(s.get("image_gap_pt", 6.0)), 0, 40, 1, 0, " pt",
+        ref.setToolTip(_t("레인 이름 줄 · 그룹 막대 · 조건 글자 · kDa 눈금은 기준 이미지 것을 씁니다.\n기준을 바꾸려면 메인 창에서 그 이미지를 고른 뒤 Figure를 여세요."))
+        f.addRow(_t("기준 이미지"), ref)
+        self._p_check(f, _t("출처 표시 (I1, I2…)"), s.get("show_src", True), lambda on: s.__setitem__("show_src", on))
+        self._p_num(f, _t("이미지 사이 간격"), float(s.get("image_gap_pt", 6.0)), 0, 40, 1, 0, " pt",
                     lambda v: s.__setitem__("image_gap_pt", float(v)))
 
     def _props_foreign(self, p):
@@ -3318,7 +3318,7 @@ class FigureEditor(QtWidgets.QWidget):
         m = self.main
         src = self.sources()
         sd = src.get(p["doc"])
-        f = self._p_box(f"{p.get('label')}  ·  {sd['tag'] if sd else '(닫힌 이미지)'}")
+        f = self._p_box(_t("{0}  ·  {1}").format(p.get('label'), sd['tag'] if sd else _t("(닫힌 이미지)")))
         others = [(f"{m.doc_key(k)} · {d.name}", self.doc_id(d)) for k, d in enumerate(m.docs)
                   if d.raw is not None and d is not self.doc and d.analysis.bands]
 
@@ -3330,7 +3330,7 @@ class FigureEditor(QtWidgets.QWidget):
                 p["label"] = f"IB: {p['src_row']}"
             p.pop("lane_map", None)
             QtCore.QTimer.singleShot(0, lambda: self.on_object_selected({"kind": "panel", "row": p["row"]}))
-        self._p_combo(f, "출처 이미지", [(t.split(" · ")[0], did) for t, did in others], p["doc"], set_doc).setToolTip(
+        self._p_combo(f, _t("출처 이미지"), [(t.split(" · ")[0], did) for t, did in others], p["doc"], set_doc).setToolTip(
             "\n".join(t for t, _ in others))
         if sd is not None:
             rows = [(r.name, r.name) for r in sd["analysis"].rows]
@@ -3339,37 +3339,37 @@ class FigureEditor(QtWidgets.QWidget):
                 p["src_row"] = name
                 if p.get("label", "").startswith("IB: "):
                     p["label"] = f"IB: {name}"
-            self._p_combo(f, "단백질 줄", rows, p.get("src_row"), set_row)
+            self._p_combo(f, _t("단백질 줄"), rows, p.get("src_row"), set_row)
             lm = figure.panel_lane_map(self.doc.analysis, s, p, sd["analysis"])
             got = sum(1 for j in lm if j is not None)
-            how = "레인 이름으로" if s.get("lane_match", "name") == "name" else "순서대로"
+            how = _t("레인 이름으로") if s.get("lane_match", "name") == "name" else _t("순서대로")
             lab = QtWidgets.QLabel(f"{got} / {len(lm)}")
-            lab.setToolTip(f"{how} 맞춘 레인 수 (없는 레인은 빈 칸)")
-            f.addRow("레인", lab)
-        self._p_line(f, "라벨", p.get("label", ""), lambda v: p.__setitem__("label", v))
+            lab.setToolTip(_t("{0} 맞춘 레인 수 (없는 레인은 빈 칸)").format(how))
+            f.addRow(_t("레인"), lab)
+        self._p_line(f, _t("라벨"), p.get("label", ""), lambda v: p.__setitem__("label", v))
         f = self._p_box("")
-        self._p_check(f, "밝기 범위 자동 (이 이미지만)", p.get("auto_range", True), lambda on: p.__setitem__("auto_range", on))
-        self._p_num(f, "감마", float(p.get("gamma", s["gamma"])), 0.2, 4.0, 0.05, 2, "",
+        self._p_check(f, _t("밝기 범위 자동 (이 이미지만)"), p.get("auto_range", True), lambda on: p.__setitem__("auto_range", on))
+        self._p_num(f, _t("감마"), float(p.get("gamma", s["gamma"])), 0.2, 4.0, 0.05, 2, "",
                     lambda v: p.__setitem__("gamma", float(v)))
-        self._p_num(f, "패널 높이", float(p.get("height_k", 1.0)), 0.3, 4.0, 0.1, 1, " ×",
+        self._p_num(f, _t("패널 높이"), float(p.get("height_k", 1.0)), 0.3, 4.0, 0.1, 1, " ×",
                     lambda v: p.__setitem__("height_k", float(v)))
-        self._p_num(f, "위 여백", int(p.get("pad_top", 0)), -500, 2000, 1, None, " px", lambda v: p.__setitem__("pad_top", int(v)))
-        self._p_num(f, "아래 여백", int(p.get("pad_bottom", 0)), -500, 2000, 1, None, " px",
+        self._p_num(f, _t("위 여백"), int(p.get("pad_top", 0)), -500, 2000, 1, None, " px", lambda v: p.__setitem__("pad_top", int(v)))
+        self._p_num(f, _t("아래 여백"), int(p.get("pad_bottom", 0)), -500, 2000, 1, None, " px",
                     lambda v: p.__setitem__("pad_bottom", int(v)))
         hb = QtWidgets.QHBoxLayout()
         hb.setSpacing(6)
         for text, d_ in (("↑", -1), ("↓", 1)):
             b = QtWidgets.QPushButton(text)
-            b.setToolTip("위로" if d_ < 0 else "아래로")
+            b.setToolTip(_t("위로") if d_ < 0 else _t("아래로"))
             b.setFixedWidth(40)
             b.clicked.connect(lambda _=False, d_=d_: self.move_panel(p, d_))
             hb.addWidget(b)
         hb.addStretch(1)
-        rm = QtWidgets.QPushButton("빼기")
+        rm = QtWidgets.QPushButton(_t("빼기"))
         rm.setStyleSheet(f"color: {theme.color('red').name()};")
         rm.clicked.connect(lambda: self.remove_panel(p))
         hb.addWidget(rm)
-        f.addRow("순서", hb)
+        f.addRow(_t("순서"), hb)
         self._props_multi()
 
     def move_panel(self, p, d):
@@ -3386,19 +3386,19 @@ class FigureEditor(QtWidgets.QWidget):
 
     def _props_strip(self):
         s = self.s
-        f = self._p_box("마커 띠")
+        f = self._p_box(_t("마커 띠"))
         W = self.doc.raw.shape[1] if self.doc is not None and self.doc.raw is not None else 10000
-        self._p_num(f, "가로 시작", int(s["strip_x0"]), 0, W, 1, None, " px", lambda v: s.__setitem__("strip_x0", int(v)))
-        self._p_num(f, "가로 끝", int(s["strip_x1"]), 0, W, 1, None, " px", lambda v: s.__setitem__("strip_x1", int(v)))
-        self._p_num(f, "세로 보정", int(s.get("strip_dy", 0)), -5000, 5000, 1, None, " px", lambda v: s.__setitem__("strip_dy", int(v)))
-        self._p_num(f, "블롯과의 간격", float(s.get("strip_gap_in", 0.0)) * 25.4, 0.0, 50.0, 0.5, 1, " mm",
+        self._p_num(f, _t("가로 시작"), int(s["strip_x0"]), 0, W, 1, None, " px", lambda v: s.__setitem__("strip_x0", int(v)))
+        self._p_num(f, _t("가로 끝"), int(s["strip_x1"]), 0, W, 1, None, " px", lambda v: s.__setitem__("strip_x1", int(v)))
+        self._p_num(f, _t("세로 보정"), int(s.get("strip_dy", 0)), -5000, 5000, 1, None, " px", lambda v: s.__setitem__("strip_dy", int(v)))
+        self._p_num(f, _t("블롯과의 간격"), float(s.get("strip_gap_in", 0.0)) * 25.4, 0.0, 50.0, 0.5, 1, " mm",
                     lambda v: s.__setitem__("strip_gap_in", float(v) / 25.4))
-        self._p_check(f, "반전 (어두운 ladder / 흰 배경)", s.get("marker_invert", True), lambda on: s.__setitem__("marker_invert", on))
-        self._p_check(f, "그림에 표시", s.get("show_strip"), lambda on: s.__setitem__("show_strip", on))
-        b = QtWidgets.QPushButton("마커 영역 자동으로 찾기")
+        self._p_check(f, _t("반전 (어두운 ladder / 흰 배경)"), s.get("marker_invert", True), lambda on: s.__setitem__("marker_invert", on))
+        self._p_check(f, _t("그림에 표시"), s.get("show_strip"), lambda on: s.__setitem__("show_strip", on))
+        b = QtWidgets.QPushButton(_t("마커 영역 자동으로 찾기"))
         b.clicked.connect(lambda: (self.auto_strip(), self.show_props(self.selection)))
         f.addRow(b)
-        b = QtWidgets.QPushButton("마커 보며 영역 직접 정하기")
+        b = QtWidgets.QPushButton(_t("마커 보며 영역 직접 정하기"))
         b.clicked.connect(lambda: (self.right.setCurrentIndex(1), self.ref_region_btn.setChecked(True)))
         f.addRow(b)
 
@@ -3408,12 +3408,12 @@ class FigureEditor(QtWidgets.QWidget):
             return
         k = kda[i]
         unit = self.s.get("unit", "kDa")
-        f = self._p_box(f"크기 눈금 ({unit})")
-        self._p_num(f, "크기", float(k["kda"]), 0.1, 100000.0, 1.0, 1, f" {unit}", lambda v: k.__setitem__("kda", float(v)))
-        self._p_num(f, "위치 y", float(k["y"]), 0.0, 100000.0, 1.0, 0, " px", lambda v: k.__setitem__("y", float(v)))
-        self._p_combo(f, "눈금 위치 (전체)", [("왼쪽", "left"), ("오른쪽", "right")], self.s.get("kda_side", "left"),
+        f = self._p_box(_t("크기 눈금 ({0})").format(unit))
+        self._p_num(f, _t("크기"), float(k["kda"]), 0.1, 100000.0, 1.0, 1, f" {unit}", lambda v: k.__setitem__("kda", float(v)))
+        self._p_num(f, _t("위치 y"), float(k["y"]), 0.0, 100000.0, 1.0, 0, " px", lambda v: k.__setitem__("y", float(v)))
+        self._p_combo(f, _t("눈금 위치 (전체)"), [(_t("왼쪽"), "left"), (_t("오른쪽"), "right")], self.s.get("kda_side", "left"),
                       lambda v: self.s.__setitem__("kda_side", v))
-        b = QtWidgets.QPushButton("이 눈금 삭제")
+        b = QtWidgets.QPushButton(_t("이 눈금 삭제"))
         b.clicked.connect(lambda: (self.s["kda"].remove(k), self.preview.select(None), self.load_from_settings(), self.show_props(None)))
         f.addRow(b)
 
@@ -3421,15 +3421,15 @@ class FigureEditor(QtWidgets.QWidget):
         if ni >= len(self.s.get("numbers", [])):
             return
         n = self.s["numbers"][ni]
-        f = self._p_box("정량 숫자 줄")
-        self._p_combo(f, "값", [(label, key) for key, label, _ in self.number_sources()], n.get("source"),
+        f = self._p_box(_t("정량 숫자 줄"))
+        self._p_combo(f, _t("값"), [(label, key) for key, label, _ in self.number_sources()], n.get("source"),
                       lambda v: n.__setitem__("source", v))
-        self._p_combo(f, "위치", [(label, key) for key, label in self.positions()], n.get("pos", "bottom"),
+        self._p_combo(f, _t("위치"), [(label, key) for key, label in self.positions()], n.get("pos", "bottom"),
                       lambda v: n.__setitem__("pos", v))
-        self._p_line(f, "왼쪽 라벨", n.get("label", ""), lambda v: n.__setitem__("label", v))
-        self._p_num(f, "소수점", int(n.get("decimals", 2)), 0, 6, 1, None, "", lambda v: n.__setitem__("decimals", int(v)))
-        lanes = [("그대로", None)] + [(f"{i + 1}: {l.get('text', '').replace('|', ' ')}", i) for i, l in enumerate(self.s["lanes"])]
-        self._p_combo(f, "기준 레인 = 1", lanes, n.get("rel_lane"), lambda v: n.__setitem__("rel_lane", v))
+        self._p_line(f, _t("왼쪽 라벨"), n.get("label", ""), lambda v: n.__setitem__("label", v))
+        self._p_num(f, _t("소수점"), int(n.get("decimals", 2)), 0, 6, 1, None, "", lambda v: n.__setitem__("decimals", int(v)))
+        lanes = [(_t("그대로"), None)] + [(f"{i + 1}: {l.get('text', '').replace('|', ' ')}", i) for i, l in enumerate(self.s["lanes"])]
+        self._p_combo(f, _t("기준 레인 = 1"), lanes, n.get("rel_lane"), lambda v: n.__setitem__("rel_lane", v))
 
     # ------------------------------------------------------------ crop editing in the preview
     def on_crop_dragged(self, edge, row, d_in):
@@ -3471,24 +3471,24 @@ class FigureEditor(QtWidgets.QWidget):
 
     # ------------------------------------------------------------ numbers under the lanes
     def _build_numbers(self):
-        g = self._group("정량 숫자 넣기 (레인 아래 숫자 줄)")
+        g = self._group(_t("정량 숫자 넣기 (레인 아래 숫자 줄)"))
         l = QtWidgets.QVBoxLayout(g)
-        info = QtWidgets.QLabel("정량한 값을 골라 원하는 위치에 레인별 숫자로 넣습니다. '기준 레인=1'을 고르면 그 레인을 1.00으로 맞춥니다.")
+        info = QtWidgets.QLabel(_t("정량한 값을 골라 원하는 위치에 레인별 숫자로 넣습니다. '기준 레인=1'을 고르면 그 레인을 1.00으로 맞춥니다."))
         info.setWordWrap(True)
         theme.hint(info)
         l.addWidget(info)
         self.num_table = QtWidgets.QTableWidget(0, 5)
-        self.num_table.setHorizontalHeaderLabels(["값", "위치", "왼쪽 라벨", "소수점", "기준 레인=1"])
+        self.num_table.setHorizontalHeaderLabels([_t("값"), _t("위치"), _t("왼쪽 라벨"), _t("소수점"), _t("기준 레인=1")])
         self.num_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
         self.num_table.verticalHeader().setVisible(False)
         self.num_table.setMaximumHeight(170)
         self.num_table.itemChanged.connect(self.on_number_item)
         l.addWidget(self.num_table)
         hb = QtWidgets.QHBoxLayout()
-        b = QtWidgets.QPushButton("숫자 줄 추가")
+        b = QtWidgets.QPushButton(_t("숫자 줄 추가"))
         b.clicked.connect(self.add_number)
         hb.addWidget(b)
-        b = QtWidgets.QPushButton("선택 줄 삭제")
+        b = QtWidgets.QPushButton(_t("선택 줄 삭제"))
         b.clicked.connect(self.delete_number)
         hb.addWidget(b)
         hb.addStretch(1)
@@ -3563,14 +3563,14 @@ class FigureEditor(QtWidgets.QWidget):
             if mean.size != len(common):
                 continue
             vals = np.array([mean[common.index(key)] if key in common else np.nan for key in keys])
-            label = f"{name} (평균, n={int(np.nanmax(r['n']))})" if r.get("n") is not None and np.size(r["n"]) else name
-            out.append((f"multi:{name}", f"[여러 이미지] {label}", vals))
+            label = _t("{0} (평균, n={1})").format(name, int(np.nanmax(r['n']))) if r.get("n") is not None and np.size(r["n"]) else name
+            out.append((f"multi:{name}", _t("[여러 이미지] {0}").format(label), vals))
         return out
 
     def positions(self):
-        out = [("bottom", "맨 아래"), ("top", "맨 위 (레인 이름 아래)")]
+        out = [("bottom", _t("맨 아래")), ("top", _t("맨 위 (레인 이름 아래)"))]
         for p in self.s["panels"]:
-            out += [(f"above:{p['row']}", f"'{p['row']}' 위"), (f"below:{p['row']}", f"'{p['row']}' 아래")]
+            out += [(f"above:{p['row']}", _t("'{0}' 위").format(p['row'])), (f"below:{p['row']}", _t("'{0}' 아래").format(p['row']))]
         return out
 
     def fill_numbers(self):
@@ -3584,7 +3584,7 @@ class FigureEditor(QtWidgets.QWidget):
             for key, label, _ in sources:
                 cb.addItem(label, key)
             if cb.findData(n.get("source")) < 0:
-                cb.addItem(f"(없음) {n.get('source', '')}", n.get("source"))
+                cb.addItem(_t("(없음) {0}").format(n.get('source', '')), n.get("source"))
             cb.setCurrentIndex(cb.findData(n.get("source")))
             cb.currentIndexChanged.connect(lambda _=None, n=n, cb=cb: self._number_source(n, cb))
             t.setCellWidget(i, 0, cb)
@@ -3599,7 +3599,7 @@ class FigureEditor(QtWidgets.QWidget):
             sp.valueChanged.connect(lambda v, n=n: self._number_set(n, "decimals", int(v)))
             t.setCellWidget(i, 3, sp)
             rc = QtWidgets.QComboBox()
-            rc.addItem("그대로", None)
+            rc.addItem(_t("그대로"), None)
             for li, lane in enumerate(self.s["lanes"]):
                 rc.addItem(f"{li + 1}: {lane.get('text', '').replace('|', ' ')}", li)
             rc.setCurrentIndex(0 if n.get("rel_lane") is None else max(0, rc.findData(n.get("rel_lane"))))
@@ -3615,7 +3615,7 @@ class FigureEditor(QtWidgets.QWidget):
     def _number_source(self, n, cb):
         old_default = n.get("_default_label")
         n["source"] = cb.currentData()
-        label = cb.currentText().replace(" (Net, raw)", "").replace("[여러 이미지] ", "")
+        label = cb.currentText().replace(" (Net, raw)", "").replace(_t("[여러 이미지] "), "")
         if not n.get("label") or n.get("label") == old_default:
             n["label"] = label
             n["_default_label"] = label
@@ -3630,7 +3630,7 @@ class FigureEditor(QtWidgets.QWidget):
     def add_number(self):
         sources = self.number_sources()
         if not sources:
-            QtWidgets.QMessageBox.information(self, "정량 숫자", "먼저 정량값이 있어야 합니다 (밴드 박스와 단백질 그룹).")
+            QtWidgets.QMessageBox.information(self, _t("정량 숫자"), _t("먼저 정량값이 있어야 합니다 (밴드 박스와 단백질 그룹)."))
             return
         key, label, _ = sources[0]
         label = label.replace(" (Net, raw)", "")
@@ -3682,13 +3682,13 @@ class FigureEditor(QtWidgets.QWidget):
             StripRegionItem(self.s["strip_x0"], self.s["strip_x1"], int(self.s.get("strip_dy", 0)), H, W,
                             lambda x0, x1, dy: self.set_strip_region(x0, x1, dy), parent=mitem)
             self.ref.marker_w = W
-            t = sc.addSimpleText("마커")
+            t = sc.addSimpleText(_t("마커"))
             t.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations)
             t.setPos(4, -30)
         blot = figure._stretch(self._display_source(), 0.5, 99.8, 0.6)
         item = sc.addPixmap(QtGui.QPixmap.fromImage(_gray_qimage(1 - blot)))
         item.setPos(x_blot, 0)
-        t = sc.addSimpleText("블롯")
+        t = sc.addSimpleText(_t("블롯"))
         t.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations)
         t.setPos(x_blot + 4, -30)
         pen = QtGui.QPen(QtGui.QColor("#e65100"), 1.5, Qt.DashLine)
@@ -3741,10 +3741,10 @@ class FigureEditor(QtWidgets.QWidget):
             pm.loadFromData(buf.getvalue(), "PNG")
             self._png = pm
             w, h = self.fig.get_size_inches()
-            self.size_label.setText(f"그림 크기: {w:.2f} × {h:.2f} in ({w * 2.54:.1f} × {h * 2.54:.1f} cm)")
+            self.size_label.setText(_t("그림 크기: {0:.2f} × {1:.2f} in ({2:.1f} × {3:.1f} cm)").format(w, h, w * 2.54, h * 2.54))
             self._show_preview()
         except Exception as e:  # keep the window usable while settings are half-edited
-            self.size_label.setText(f"그림을 그릴 수 없습니다: {e}")
+            self.size_label.setText(_t("그림을 그릴 수 없습니다: {0}").format(e))
 
     def _show_preview(self):
         if self._png is None:
@@ -3790,10 +3790,10 @@ class FigureEditor(QtWidgets.QWidget):
             return
         m = self.main
         fmt = fmt or m.prefs['export'].get('image_format', 'png')
-        p = m._save_path("그림 저장", f"figure.{fmt}", m._image_filter(fmt))
+        p = m._save_path(_t("그림 저장"), f"figure.{fmt}", m._image_filter(fmt))
         if p:
             self.write_figure(p)
-            self.status(f"저장했습니다: {p}")
+            self.status(_t("저장했습니다: {0}").format(p))
 
     def write_figure(self, p: str, dpi: Optional[int] = None):
         self.render()
@@ -3803,7 +3803,7 @@ class FigureEditor(QtWidgets.QWidget):
         """The numbers rows of the figure as they are shown: (header, rows) per lane."""
         values = {key: v for key, _, v in self.number_sources()}
         lanes = self.s.get("lanes", [])
-        header = ["레인", "레인 이름"]
+        header = [_t("레인"), _t("레인 이름")]
         cols = []
         for n in self.s.get("numbers", []):
             v = values.get(_number_key(n.get("source"), values))
@@ -3812,7 +3812,7 @@ class FigureEditor(QtWidgets.QWidget):
             v = np.concatenate([v, np.full(max(0, len(lanes) - v.size), np.nan)])[: len(lanes)]
             texts, suffix = figure.format_numbers(v, int(n.get("decimals", 2)), n.get("rel_lane"))
             label = (n.get("label") or n.get("source", "")) + suffix
-            header += [f"{label} (표시)", f"{label} (값)"]
+            header += [_t("{0} (표시)").format(label), _t("{0} (값)").format(label)]
             cols.append((texts, v))
         rows = []
         for i, ln in enumerate(lanes):
@@ -3834,9 +3834,9 @@ class FigureEditor(QtWidgets.QWidget):
         header, rows = self.numbers_table()
         with open(p, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow([f"# Figure 숫자 줄 · {self.doc.name if self.doc else ''}"])
+            w.writerow([_t("# Figure 숫자 줄 · {0}").format(self.doc.name if self.doc else '')])
             if len(header) == 2:
-                w.writerow(["# Figure에 숫자 줄이 없습니다 (Figure 만들기 → 정량 숫자 넣기)"])
+                w.writerow([_t("# Figure에 숫자 줄이 없습니다 (Figure 만들기 → 정량 숫자 넣기)")])
             w.writerow(header)
             w.writerows(rows)
 
@@ -3868,22 +3868,22 @@ class FigureWindow(QtWidgets.QMainWindow):
         sp = QtWidgets.QWidget()
         sp.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         tb.addWidget(sp)
-        self.layout_seg = controls.Segmented([("rows", "레인별 자르기"), ("full", "Full blot")])
+        self.layout_seg = controls.Segmented([("rows", _t("레인별 자르기")), ("full", "Full blot")])
         self.layout_seg.changed.connect(self.set_layout)
         tb.addWidget(self.layout_seg)
         sp = QtWidgets.QWidget()
         sp.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         tb.addWidget(sp)
         b = QtWidgets.QToolButton()
-        b.setText("내보내기")
+        b.setText(_t("내보내기"))
         b.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         m = QtWidgets.QMenu(b)
-        im = m.addMenu("Figure 이미지")
+        im = m.addMenu(_t("Figure 이미지"))
         for ext, name in (("png", "PNG"), ("tif", "TIFF"), ("pdf", "PDF"), ("svg", "SVG")):
             im.addAction(f"{name}…", lambda ext=ext: editor.export(fmt=ext))
-        m.addAction("Figure에 쓰인 데이터 (CSV)…", main.export_figure_numbers)
+        m.addAction(_t("Figure에 쓰인 데이터 (CSV)…"), main.export_figure_numbers)
         m.addSeparator()
-        m.addAction("여러 개 골라서 내보내기…", main.open_export_dialog).setShortcut("Ctrl+E")
+        m.addAction(_t("여러 개 골라서 내보내기…"), main.open_export_dialog).setShortcut("Ctrl+E")
         b.setMenu(m)
         tb.addWidget(b)
         editor.setObjectName("hig_floor")  # the window's base around the preview and properties boxes

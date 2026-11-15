@@ -10,10 +10,11 @@ from PySide6 import QtWidgets
 from PySide6.QtCore import Qt
 
 from .ui import controls, glass, theme
+from .i18n import _t  # noqa: E402
 
 
 class QuantWindow(QtWidgets.QMainWindow):
-    PAGES = (("bands", "밴드 값"), ("quant", "정량"), ("multi", "여러 이미지"))
+    PAGES = (("bands", _t("밴드 값")), ("quant", _t("정량")), ("multi", _t("여러 이미지")))
 
     def __init__(self, main):
         super().__init__(main, Qt.Window)
@@ -21,9 +22,9 @@ class QuantWindow(QtWidgets.QMainWindow):
         self.setProperty("hig_titlebar", True)
         self.setProperty("hig_glass", glass.prepare(self))
         self.main = main
-        self.setWindowTitle("정량·그래프")
+        self.setWindowTitle(_t("정량·그래프"))
         self.resize(1440, 900)
-        tb = QtWidgets.QToolBar("정량")
+        tb = QtWidgets.QToolBar(_t("정량"))
         tb.setMovable(False)
         self.addToolBar(Qt.TopToolBarArea, tb)
         self.setUnifiedTitleAndToolBarOnMac(True)
@@ -39,18 +40,18 @@ class QuantWindow(QtWidgets.QMainWindow):
         sp = QtWidgets.QWidget()
         sp.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         tb.addWidget(sp)
-        tb.addAction("측정 다시 하기", self.remeasure).setToolTip("열린 모든 이미지의 박스를 다시 측정합니다")
+        tb.addAction(_t("측정 다시 하기"), self.remeasure).setToolTip(_t("열린 모든 이미지의 박스를 다시 측정합니다"))
         self.export_btn = QtWidgets.QToolButton()
-        self.export_btn.setText("내보내기")
+        self.export_btn.setText(_t("내보내기"))
         self.export_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         m = QtWidgets.QMenu(self.export_btn)
-        m.addAction("이 그래프의 데이터 (CSV)…", main.export_graph_csv)
-        im = m.addMenu("이 그래프 이미지")
+        m.addAction(_t("이 그래프의 데이터 (CSV)…"), main.export_graph_csv)
+        im = m.addMenu(_t("이 그래프 이미지"))
         for ext, name in (("png", "PNG"), ("pdf", "PDF"), ("svg", "SVG")):
             im.addAction(f"{name}…", lambda ext=ext: main.export_plot(fmt=ext))
-        m.addAction("데이터 + 이미지 함께…", main.export_graph_both)
+        m.addAction(_t("데이터 + 이미지 함께…"), main.export_graph_both)
         m.addSeparator()
-        act = m.addAction("여러 개 골라서 내보내기…", main.open_export_dialog)
+        act = m.addAction(_t("여러 개 골라서 내보내기…"), main.open_export_dialog)
         act.setShortcut("Ctrl+E")
         self.export_btn.setMenu(m)
         tb.addWidget(self.export_btn)
@@ -106,7 +107,7 @@ class QuantWindow(QtWidgets.QMainWindow):
             self.seg.set_value(key)
             self._show(key)
         n = len(self.main.loaded_docs())
-        self.sub.setText(f"이미지 {n}개")
+        self.sub.setText(_t("이미지 {0}개").format(n))
         self.main.recompute_results()
         self.show()
         self.raise_()
@@ -117,7 +118,7 @@ class QuantWindow(QtWidgets.QMainWindow):
             self.main.measure_doc(d)
         self.main.recompute_results()
         self.main.recompute_multi()
-        self.main.statusBar().showMessage("열린 모든 이미지를 다시 측정했습니다")
+        self.main.statusBar().showMessage(_t("열린 모든 이미지를 다시 측정했습니다"))
 
     # ---- zoom of the graph ([ ] and the toolbar)
     def zoom(self, k: float):
@@ -167,12 +168,12 @@ class QuantWindow(QtWidgets.QMainWindow):
         if ev.dblclick:
             if kind in ("title", "ylabel"):
                 key = "title" if kind == "title" else "y_title"
-                text, ok = QtWidgets.QInputDialog.getText(self, "글자 편집", "글자:", text=art.get_text())
+                text, ok = QtWidgets.QInputDialog.getText(self, _t("글자 편집"), _t("글자:"), text=art.get_text())
                 if ok:
                     self.main.set_graph_opt(key, text)
             elif kind == "text":
                 i = int(art.get_gid().split(":")[1])
-                text, ok = QtWidgets.QInputDialog.getText(self, "글자 상자", "글자:", text=art.get_text())
+                text, ok = QtWidgets.QInputDialog.getText(self, _t("글자 상자"), _t("글자:"), text=art.get_text())
                 if ok:
                     o["texts"][i]["text"] = text
                     self.main.fill_text_boxes()

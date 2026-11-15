@@ -13,6 +13,7 @@ import matplotlib
 import numpy as np
 
 from . import prefs
+from .i18n import _t  # noqa: E402
 
 PALETTES = {
     "bw": ["#FFFFFF", "#9E9E9E", "#000000", "#D9D9D9", "#616161"],
@@ -82,7 +83,7 @@ def _draw(fig, xlabels: List[str], data: List[Tuple[str, List[np.ndarray]]], yla
         ax = fig.add_subplot(111)
         ax.set_facecolor("white")
         if not data or not xlabels:
-            ax.text(0.5, 0.5, "표시할 결과가 없습니다", ha="center", va="center", transform=ax.transAxes)
+            ax.text(0.5, 0.5, _t("표시할 결과가 없습니다"), ha="center", va="center", transform=ax.transAxes)
             ax.set_axis_off()
             return ax
         pal = PALETTES.get(st.get("colors"), PALETTES["bw"])
@@ -195,7 +196,7 @@ def plot_series(fig, series: Dict[str, np.ndarray], labels, conditions, by_condi
     """Results of one image: one value per lane (or group of a grouping set) for each series."""
     series = {k: np.atleast_1d(np.asarray(v, float)) for k, v in series.items()}
     if series and all(v.size == 1 for v in series.values()):
-        return _draw(fig, ["값"], [(k, [v]) for k, v in series.items()], ylabel, st, title)
+        return _draw(fig, [_t("값")], [(k, [v]) for k, v in series.items()], ylabel, st, title)
     series = {k: v for k, v in series.items() if v.size > 1}
     n = max((v.size for v in series.values()), default=0)
     xg = x_groups(n, labels, conditions, by_condition)
@@ -206,7 +207,7 @@ def plot_series(fig, series: Dict[str, np.ndarray], labels, conditions, by_condi
 def plot_summary(fig, keys: List[str], series: Dict[str, Dict[str, object]], ylabel: str, st: dict):
     """Several images (tab 5): per lane key the values of the member images."""
     if series and all(np.size(s["mean"]) == 1 for s in series.values()):
-        keys = ["값"]
+        keys = [_t("값")]
     data = []
     for name, s in series.items():
         mean = np.atleast_1d(np.asarray(s["mean"], float))
@@ -227,7 +228,7 @@ def series_table(series: Dict[str, np.ndarray], labels, conditions, by_condition
     names = list(series)
     vals = [np.atleast_1d(np.asarray(series[k], float)) for k in names]
     n = max((v.size for v in vals), default=0)
-    header = ["레인", "레인 그룹"] + names
+    header = [_t("레인"), _t("레인 그룹")] + names
     rows = []
     for i in range(n):
         rows.append([str(i + 1), (conditions[i] if i < len(conditions) and conditions[i] else
@@ -237,7 +238,7 @@ def series_table(series: Dict[str, np.ndarray], labels, conditions, by_condition
         lab_err = "SEM" if err == "sem" else "SD"
         for key, idx in x_groups(n, labels, conditions, True):
             stats = [summary(v[[i for i in idx if i < v.size]], err) for v in vals]
-            rows.append(["", f"{key} 평균"] + [_fmt(m) for m, _, _ in stats])
+            rows.append(["", _t("{0} 평균").format(key)] + [_fmt(m) for m, _, _ in stats])
             rows.append(["", f"{key} {lab_err}"] + [_fmt(e) if c > 1 else "" for _, e, c in stats])
             rows.append(["", f"{key} n"] + [str(c) for _, _, c in stats])
     return header, rows
@@ -246,9 +247,9 @@ def series_table(series: Dict[str, np.ndarray], labels, conditions, by_condition
 def summary_table(keys: List[str], series: Dict[str, Dict[str, object]], err: str = "sd"):
     """Tab 5: per lane key the mean, SD/SEM and n of each series."""
     lab_err = "SEM" if err == "sem" else "SD"
-    header = ["레인"]
+    header = [_t("레인")]
     for name in series:
-        header += [f"{name} 평균", f"{name} {lab_err}", f"{name} n"]
+        header += [_t("{0} 평균").format(name), f"{name} {lab_err}", f"{name} n"]
     rows = []
     for i, key in enumerate(keys):
         row = [key]
