@@ -7,7 +7,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 sys.path.insert(0, ROOT)
 
-hidden = ["blot_profiler.figure", "blot_profiler.figure_window"]
+hidden = ["blot_profiler.figure", "blot_profiler.figure_window", "blot_profiler.i18n", "blot_profiler.i18n_en"]
 for pkg in ("skimage.restoration", "skimage.filters", "skimage.measure", "skimage.morphology"):
     hidden += collect_submodules(pkg)
 datas = collect_data_files("skimage", includes=["**/*.pyi"])
