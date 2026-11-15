@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt
 
 from . import theme
 from .flow import FlowLayout
+from ..i18n import _t  # noqa: E402
 
 
 class Segmented(QtWidgets.QWidget):
@@ -216,7 +217,7 @@ class ZoomChip(QtWidgets.QFrame):
         f.setWeight(QtGui.QFont.Medium)
         self.label.setFont(f)
         lay.addWidget(self.label)
-        self.setToolTip("확대 ] · 축소 [ · 눌러서 화면 맞춤 (⌘0)")
+        self.setToolTip(_t("확대 ] · 축소 [ · 눌러서 화면 맞춤 (⌘0)"))
         if fit is not None:
             self.setCursor(Qt.PointingHandCursor)
         self.host = host

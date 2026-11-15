@@ -10,8 +10,12 @@ import copy
 import json
 import os
 import sys
+from .i18n import _t, prefs_path  # noqa: E402
 
 DEFAULTS = {
+    "general": {
+        "language": "system",  # system · ko · en (1.4; applied at the next start)
+    },
     "graph": {
         "font": "Arial",
         "label_size": 14.0,  # axis titles
@@ -48,25 +52,16 @@ DEFAULTS = {
     },
 }
 
-GRAPH_KINDS = [("bar_points", "막대 + 개별 점 (Column bar + scatter)"), ("points_mean", "점 + 평균선 (Scatter dot plot)"),
-               ("bars", "막대만")]
-ERRORS = [("sd", "평균 ± SD"), ("sem", "평균 ± SEM")]
-COLOR_SCHEMES = [("bw", "흑백 (PRISM 기본)"), ("gray", "회색 단계"), ("color", "컬러")]
+GRAPH_KINDS = [("bar_points", _t("막대 + 개별 점 (Column bar + scatter)")), ("points_mean", _t("점 + 평균선 (Scatter dot plot)")),
+               ("bars", _t("막대만"))]
+ERRORS = [("sd", _t("평균 ± SD")), ("sem", _t("평균 ± SEM"))]
+COLOR_SCHEMES = [("bw", _t("흑백 (PRISM 기본)")), ("gray", _t("회색 단계")), ("color", _t("컬러"))]
 IMAGE_FORMATS = [("png", "PNG"), ("pdf", "PDF"), ("svg", "SVG"), ("tif", "TIFF")]
-FOLDERS = [("image", "이미지 파일 옆"), ("last", "마지막으로 저장한 폴더"), ("desktop", "바탕화면")]
+FOLDERS = [("image", _t("이미지 파일 옆")), ("last", _t("마지막으로 저장한 폴더")), ("desktop", _t("바탕화면"))]
 
 
 def path() -> str:
-    env = os.environ.get("BLOT_PROFILER_PREFS")
-    if env:
-        return env
-    if sys.platform == "darwin":
-        base = os.path.expanduser("~/Library/Application Support/BlotProfiler")
-    elif sys.platform.startswith("win"):
-        base = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "BlotProfiler")
-    else:
-        base = os.path.expanduser("~/.config/blotprofiler")
-    return os.path.join(base, "prefs.json")
+    return prefs_path()
 
 
 def _merge(base: dict, over: dict) -> dict:

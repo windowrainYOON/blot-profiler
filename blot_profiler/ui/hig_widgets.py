@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from . import theme
 from .flow import FlowLayout
+from ..i18n import _t  # noqa: E402
 
 # 24 × 24 stroke glyphs (project/assets/Icons/icons.json of the design
 # system; `zoom.region` and `fit` are drawn in the same style because the
@@ -257,7 +258,7 @@ class ChipTabs(QTabWidget):
             closable = self.tabsClosable() and page not in self._fixed
             chip = Chip(self.tabText(i), closable, self.chips)
             if closable:  # a tool tip that only repeats the label would cover the page
-                chip.setToolTip('우클릭 또는 ×: 탭 닫기')
+                chip.setToolTip(_t("우클릭 또는 ×: 탭 닫기"))
             chip.clicked.connect(lambda _=False, p=page: self.setCurrentWidget(p))
             chip.closeClicked.connect(lambda p=page: self._close(p))
             chip.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -277,7 +278,7 @@ class ChipTabs(QTabWidget):
         if not chip.closable:
             return
         m = QMenu(chip)
-        m.addAction('탭 닫기', lambda: self._close(page))
+        m.addAction(_t("탭 닫기"), lambda: self._close(page))
         m.exec(chip.mapToGlobal(pos))
 
     def _sync(self):
