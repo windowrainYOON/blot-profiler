@@ -1861,7 +1861,10 @@ class FigureEditor(QtWidgets.QWidget):
     # ---- several images in one figure (Board B): 그림에 넣을 블롯
     @staticmethod
     def doc_id(d) -> str:
-        return os.path.abspath(d.image_path) if getattr(d, "image_path", None) else f"mem:{id(d)}"
+        """The id panels from other images use (ImageDoc.uid). Up to 1.4.0 this was the file path,
+        so several blot regions of one file (I5 · x #1, I6 · x #2 …) shared it: ticking one image
+        ticked them all, a second one could not be added and unticking removed the others."""
+        return d.uid
 
     def sources(self) -> dict:
         """The other open images a panel may come from: {doc id: signal, analysis, tag, name}."""
@@ -1895,23 +1898,27 @@ class FigureEditor(QtWidgets.QWidget):
                 w.deleteLater()
         m = self.main
         for k, d in enumerate(m.docs):
-            if d.raw is None or not d.analysis.bands:
+            if d.raw is None:
                 continue
             own = d is self.doc
             did = self.doc_id(d)
             panels = [p for p in self.s["panels"] if not p.get("doc")] if own else self._foreign(did)
-            on = own or bool(panels)
+            ready = own or bool(d.analysis.bands)  # an image without bands stays listed, greyed out
+            on = own or (ready and bool(panels))
             row = QtWidgets.QWidget()
             hl = QtWidgets.QHBoxLayout(row)
             hl.setContentsMargins(6, 2, 6, 0)
             cb = QtWidgets.QCheckBox(f"{m.doc_key(k)} · {d.name}")
             cb.setChecked(on)
-            cb.setEnabled(not own)
+            cb.setEnabled(not own and ready)
             cb.setToolTip(d.name)
             hl.addWidget(cb, 1)
             if own:
                 note = _t("기준")
                 color = None
+            elif not ready:
+                note, color = _t("밴드 없음"), None
+                cb.setToolTip(_t("{0}\n이 이미지에서 밴드를 먼저 찾으면 그림에 넣을 수 있습니다").format(d.name))
             elif d.mode == core.MODE_GEL:
                 note, color = _t("겔"), None
             else:
@@ -1925,7 +1932,7 @@ class FigureEditor(QtWidgets.QWidget):
                 theme.hint(nl)
             hl.addWidget(nl)
             self.blot_lay.addWidget(row)
-            if not own:
+            if not own and ready:
                 cb.toggled.connect(lambda c, d=d: self.toggle_image(d, c))
             if not on:
                 continue
