@@ -1749,6 +1749,8 @@ class FigureEditor(QtWidgets.QWidget):
 
     # ------------------------------------------------------------ settings <-> widgets
     def load_from_settings(self):
+        if self.doc is not None and self.doc.figure is self.s and hasattr(self.main, "resolve_panel_refs"):
+            self.main.resolve_panel_refs(self.doc)  # panels pointing at a file / at this image (≤1.4.1)
         s = self.s
         self._loading = True
         try:
@@ -1895,6 +1897,7 @@ class FigureEditor(QtWidgets.QWidget):
         while self.blot_lay.count():
             w = self.blot_lay.takeAt(0).widget()
             if w is not None:
+                w.hide()  # gone at once: the old rows must not stay on screen under the new ones
                 w.deleteLater()
         m = self.main
         for k, d in enumerate(m.docs):
@@ -1964,7 +1967,31 @@ class FigureEditor(QtWidgets.QWidget):
             if line is not None:
                 line.addStretch(1)
             self.blot_lay.addWidget(chips)
+        # panels of images that are not open: listed too, so that unticking takes them out
+        open_ids = {self.doc_id(d) for d in m.docs if d.raw is not None}
+        gone = {}
+        for p in self.s["panels"]:
+            if p.get("doc") and p["doc"] not in open_ids:
+                gone.setdefault(p["doc"], []).append(p)
+        for did, ps in gone.items():
+            row = QtWidgets.QWidget()
+            hl = QtWidgets.QHBoxLayout(row)
+            hl.setContentsMargins(6, 2, 6, 0)
+            names = ", ".join(p.get("src_row") or p.get("label", "") for p in ps)
+            cb = QtWidgets.QCheckBox(_t("닫힌 이미지 · {0}").format(names))
+            cb.setChecked(True)
+            cb.setToolTip(_t("이 패널의 이미지가 열려 있지 않습니다. 체크를 풀면 그림에서 뺍니다"))
+            hl.addWidget(cb, 1)
+            nl = QtWidgets.QLabel(_t("닫힘"))
+            nl.setStyleSheet("color: #c93400; font-size: 11px;")
+            hl.addWidget(nl)
+            self.blot_lay.addWidget(row)
+            cb.toggled.connect(lambda c, did=did: (not c) and self.drop_image(did))
         _ = _ctl
+
+    def drop_image(self, did):
+        self.s["panels"] = [p for p in self.s["panels"] if p.get("doc") != did]
+        self.load_from_settings()
 
     def _new_foreign_panel(self, d, name):
         ri = next((i for i, r in enumerate(d.analysis.rows) if r.name == name), 0)

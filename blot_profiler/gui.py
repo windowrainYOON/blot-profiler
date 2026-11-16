@@ -2592,6 +2592,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_tilt.toggled.connect(lambda on: self.angle_auto.isChecked() != on and self.angle_auto.setChecked(on))
         hb.addWidget(self.angle_auto)
         f.addRow(_t("회전 각도"), hb)
+        # 1.4.2: a red protein line drawn by hand turns the blot (and marker) until the line is level
+        self.level_pline = controls.switch("", True)
+        self.level_pline.setToolTip(_t("단백질 선을 새로 그으면 그 선의 기울기만큼 블롯(마커 포함)을 돌려 선이 수평이 되게 합니다.\n그어 둔 레인 선 · 단백질 선 · 밴드 박스도 같이 돌아갑니다. '회전 각도'에서 확인 · 되돌릴 수 있습니다"))
+        f.addRow(self._row_title(_t("단백질 선으로 수평 맞추기"), _t("선을 그으면 그 기울기만큼 블롯을 돌립니다")), self.level_pline)
         lay.addWidget(g)
 
         g, f = controls.card()
@@ -2981,11 +2985,50 @@ class MainWindow(QtWidgets.QMainWindow):
         row = next((r.name for r in a.rows if r.name not in used), None)
         if row is None:
             row = core.unique_name(f"P{len(a.rows) + 1}", [r.name for r in a.rows] + list(used))
-        a.protein_lines.append({"row": row, "x0": x0, "y0": y0, "x1": x1, "y1": y1, "user": True})
+        line = {"row": row, "x0": x0, "y0": y0, "x1": x1, "y1": y1, "user": True}
+        a.protein_lines.append(line)
+        turned = self.level_by_line(self.doc, line) if getattr(self, "level_pline", None) is None or self.level_pline.isChecked() else 0.0
         a.protein_lines.sort(key=lambda p: (p["y0"] + p["y1"]) / 2.0)
         self.view.rebuild_lines()
         self.refresh_lines_card()
-        self.statusBar().showMessage(_t("단백질 선 '{0}'을 그렸습니다 — 양끝 네모로 기울이고, '밴드 찾기'로 반영합니다").format(row))
+        if turned:
+            self.statusBar().showMessage(_t("단백질 선 '{0}'을 그렸습니다 — 선이 수평이 되게 블롯(마커 포함)을 {1:+.1f}° 돌렸습니다. '회전 각도'에서 되돌릴 수 있습니다").format(row, turned))
+        else:
+            self.statusBar().showMessage(_t("단백질 선 '{0}'을 그렸습니다 — 양끝 네모로 기울이고, '밴드 찾기'로 반영합니다").format(row))
+
+    def level_by_line(self, d: ImageDoc, line: dict, min_deg: float = 0.2, max_deg: float = 20.0) -> float:
+        """Turn image ``d`` (and its marker) so that the protein ``line`` is level. Lane lines, protein
+        lines and boxes already drawn turn with it; the crop keeps its size around the same spot.
+        Returns the angle turned (0 = nothing done)."""
+        if d.raw_orig is None or d.raw is None:
+            return 0.0
+        delta = core.line_angle(line["x0"], line["y0"], line["x1"], line["y1"])
+        if not (min_deg <= abs(delta) <= max_deg):
+            return 0.0
+        old = dict(d.transform)
+        base = core.apply_transform(d.raw_orig, dict(old, angle=0.0, crop=None)).shape
+        new = dict(old, angle=round(float(old.get("angle", 0.0) or 0.0) + delta, 2), crop=None)
+        if old.get("crop"):  # same size, centred on the same spot of the blot
+            x0, y0, x1, y1 = old["crop"]
+            (cx, cy), = core.map_points([((x0 + x1) / 2.0, (y0 + y1) / 2.0)], base, old, new)
+            H, W = core.rotated_shape(base, new["angle"])
+            w, h = x1 - x0, y1 - y0
+            nx0 = int(round(min(max(0, cx - w / 2.0), max(0, W - w))))
+            ny0 = int(round(min(max(0, cy - h / 2.0), max(0, H - h))))
+            new["crop"] = [nx0, ny0, min(W, nx0 + w), min(H, ny0 + h)]
+        a = d.analysis
+        mp = lambda pts: core.map_points(pts, base, old, new)  # noqa: E731
+        a.lane_lines = [[list(q) for q in mp([(p[0], p[1]) for p in ln])] for ln in a.lane_lines]
+        for p in a.protein_lines:
+            (p["x0"], p["y0"]), (p["x1"], p["y1"]) = mp([(p["x0"], p["y0"]), (p["x1"], p["y1"])])
+        for b, (cx, cy) in zip(a.bands, mp([(b.cx, b.cy) for b in a.bands])):
+            b.cx, b.cy = cx, cy
+        ym = (line["y0"] + line["y1"]) / 2.0  # exactly level (interpolation of the angle is rounded)
+        line["y0"] = line["y1"] = ym
+        self.set_transform(d, new, redetect=False)
+        if a.bands:
+            self.measure_doc(d)
+        return float(new["angle"]) - float(old.get("angle", 0.0) or 0.0)
 
     def set_pline_row(self, i, name):
         a = self.analysis
@@ -6168,6 +6211,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "fill_lanes": self.fill_lanes.isChecked(), "snap_lanes": self.snap_lanes.isChecked(),
                 "method": self.method_combo.currentData(),
                 "auto_tilt": self.auto_tilt.isChecked(),
+                "level_by_protein_line": self.level_pline.isChecked(),
             },
             "images": images,
             "big_groups": self.big_groups,
@@ -6363,6 +6407,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.snap_lanes.setChecked(det.get("snap_lanes", True))
             self.method_combo.setCurrentIndex(max(0, self.method_combo.findData(det.get("method", "legacy"))))
             self.auto_tilt.setChecked(bool(det.get("auto_tilt", True)))
+            self.level_pline.setChecked(bool(det.get("level_by_protein_line", True)))
             docs, index = self._project_docs(p, d, embedded, images, proj_name)
             if not docs:
                 return
@@ -6452,7 +6497,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _project_docs(self, p, d, embedded, images, proj_name):
         """ImageDocs of a project file; also {index in the file: index in the list}."""
-        docs, index, legacy = [], {}, {}
+        docs, index = [], {}
         for i, im in enumerate(images):
             path = self._relocate(_t("블롯 이미지"), im.get("image") or im.get("image_path"), p, embedded)
             if not path:
@@ -6484,8 +6529,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     doc.figure["marker_path"] = None
             index[i] = len(docs)
             docs.append(doc)
-            legacy[os.path.abspath(im.get("image_path") or path)] = doc  # ≤1.4.0 panels named the file
-        self._fix_doc_refs(docs, legacy)
+            doc.old_path = os.path.abspath(im.get("image_path") or path)  # ≤1.4.0 panels named the file
+        self._fix_doc_refs(docs)
         # format 2 kept formulas for all images in one list, each with a base image
         for fml in d.get("formulas", []):
             k = index.get(int(fml.get("image", 0)))
@@ -6493,9 +6538,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 docs[k].analysis.formulas.append({x: fml[x] for x in ("name", "expr", "normalize") if x in fml})
         return docs, index
 
-    def _fix_doc_refs(self, docs, legacy):
-        """Panels from other images (Figure) point at ImageDoc.uid. Projects saved by 1.4.0 and
-        older used the file path; a project added twice would repeat uids. Both are fixed here."""
+    def _fix_doc_refs(self, docs):
+        """Panels from other images (Figure) point at ImageDoc.uid. A project added twice would
+        repeat uids: the new copy gets fresh ones. Projects saved by 1.4.0 and older named the file
+        instead; those panels are matched to the right image by resolve_panel_refs."""
         taken = {d.uid for d in self.docs if d.raw is not None and d not in docs}
         renamed = {}
         for d in docs:
@@ -6504,16 +6550,64 @@ class MainWindow(QtWidgets.QMainWindow):
                 renamed[d.uid] = new
                 d.uid = new
             taken.add(d.uid)
-        ids = {d.uid for d in docs}
         for d in docs:
             for p in (d.figure or {}).get("panels", []):
-                ref = p.get("doc")
-                if not ref:
-                    continue
-                if ref in renamed:
-                    p["doc"] = renamed[ref]
-                elif ref not in ids and ref in legacy:
-                    p["doc"] = legacy[ref].uid
+                if p.get("doc") in renamed:
+                    p["doc"] = renamed[p["doc"]]
+        for d in docs:
+            self.resolve_panel_refs(d, docs)
+
+    def resolve_panel_refs(self, owner: ImageDoc, pool=None) -> bool:
+        """Point every panel of ``owner``'s figure that comes from another image at an open image.
+
+        A reference that is not the uid of another open image (a file path from ≤1.4.0, or the
+        figure's own image, as 1.4.1 made of old projects) is matched by file and protein name:
+        among the other images of that file, the one that has the panel's protein (src_row).
+        Panels still pointing at the figure's own image are dropped. Closed images stay as they are.
+        Returns True when something changed."""
+        fig = owner.figure or {}
+        panels = fig.get("panels", [])
+        docs = [d for d in (pool if pool is not None else self.docs) if d.raw is not None]
+        by_id = {d.uid: d for d in docs}
+        others = [d for d in docs if d is not owner]
+        own_paths = {os.path.abspath(owner.image_path)} if owner.image_path else set()
+        changed, keep = False, []
+        taken = {(p.get("doc"), p.get("src_row")) for p in panels if p.get("doc") in by_id and p.get("doc") != owner.uid}
+        for p in panels:
+            ref = p.get("doc")
+            if not ref or (ref in by_id and ref != owner.uid):
+                keep.append(p)
+                continue
+            if ref == owner.uid:
+                paths = own_paths
+            elif os.path.isabs(str(ref)) or ref.startswith("mem:"):
+                paths = {ref}
+            else:  # an image that is not open: stays (shown as closed, removable in the figure)
+                keep.append(p)
+                continue
+
+            def same_file(d):
+                return bool(paths & {os.path.abspath(d.image_path) if d.image_path else "", getattr(d, "old_path", "")})
+
+            cands = [d for d in others if same_file(d)] or (others if ref == owner.uid else [])
+            name = p.get("src_row")
+            hit = [d for d in cands if any(r.name == name for r in d.analysis.rows)]
+            free = [d for d in hit if (d.uid, name) not in taken]
+            pick = (free or hit or ([cands[-1]] if cands and ref != owner.uid else []))
+            if not pick:
+                if ref != owner.uid:  # a file that is not open: keep it for later
+                    keep.append(p)
+                else:
+                    changed = True
+                continue
+            changed = True
+            p["doc"] = pick[0].uid
+            p.pop("lane_map", None)
+            taken.add((p["doc"], name))
+            keep.append(p)
+        if changed:
+            fig["panels"] = keep
+        return changed
 
     def export_csv(self):
         if not any(d.measurements for d in self.loaded_docs()):
