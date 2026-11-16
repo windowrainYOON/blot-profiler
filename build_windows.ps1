@@ -10,10 +10,11 @@ if (-not (Test-Path .venv-win)) {
 }
 $py = '.venv-win\Scripts\python.exe'
 & $py -m pip install --upgrade pip
-& $py -m pip install -r requirements.txt pyinstaller pytest
+& $py -m pip install -r requirements.txt pyinstaller pytest pytest-timeout
 if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
 
-& $py -m pytest -q tests
+# a test that waits on a dialog must fail with its stack, not hang the run
+& $py -m pytest -q -rA --timeout 300 tests
 if ($LASTEXITCODE -ne 0) { throw 'tests failed' }
 
 & $py -m PyInstaller --noconfirm --clean --distpath dist --workpath build packaging\blot_profiler_win.spec
