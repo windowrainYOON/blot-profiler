@@ -285,6 +285,36 @@ class MiniToolbar(QtWidgets.QFrame):
         self.adjustSize()
 
 
+class ElideCheckBox(QtWidgets.QCheckBox):
+    """A check box whose text is cut with … to the width it gets (long image names in the
+    narrow Figure sidebar, 1.4.3); the whole text is in the tooltip."""
+
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self._full = text
+        self.setToolTip(text)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+
+    def full_text(self):
+        return self._full
+
+    def sizeHint(self):
+        sh = super().sizeHint()
+        return QtCore.QSize(min(sh.width(), 120), sh.height())
+
+    def minimumSizeHint(self):
+        sh = super().minimumSizeHint()
+        return QtCore.QSize(40, sh.height())
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        box = self.style().pixelMetric(QtWidgets.QStyle.PM_IndicatorWidth) + \
+            self.style().pixelMetric(QtWidgets.QStyle.PM_CheckBoxLabelSpacing) + 4
+        t = self.fontMetrics().elidedText(self._full, Qt.ElideMiddle, max(10, self.width() - box))
+        if t != self.text():
+            self.setText(t)
+
+
 class PreviewLabel(QtWidgets.QLabel):
     """Rendered figure, edited directly like slides (mockup boards 1–3, 2-1; no edit mode).
 
@@ -1911,10 +1941,9 @@ class FigureEditor(QtWidgets.QWidget):
             row = QtWidgets.QWidget()
             hl = QtWidgets.QHBoxLayout(row)
             hl.setContentsMargins(6, 2, 6, 0)
-            cb = QtWidgets.QCheckBox(f"{m.doc_key(k)} · {d.name}")
+            cb = ElideCheckBox(f"{m.doc_key(k)} · {d.name}")
             cb.setChecked(on)
             cb.setEnabled(not own and ready)
-            cb.setToolTip(d.name)
             hl.addWidget(cb, 1)
             if own:
                 note = _t("기준")
@@ -1954,6 +1983,10 @@ class FigureEditor(QtWidgets.QWidget):
                 b.toggled.connect(lambda c, d=d, name=r.name: self.toggle_protein(d, name, c))
                 b.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
                 bw = b.fontMetrics().horizontalAdvance(r.name) + 22
+                if bw > 190:  # one long protein name: cut to the sidebar
+                    b.setText(b.fontMetrics().elidedText(r.name, Qt.ElideRight, 190 - 22))
+                    b.setToolTip(r.name)
+                    bw = 190
                 b.setFixedWidth(bw)
                 if line is None or used_w + bw > 190:
                     if line is not None:
@@ -1978,9 +2011,9 @@ class FigureEditor(QtWidgets.QWidget):
             hl = QtWidgets.QHBoxLayout(row)
             hl.setContentsMargins(6, 2, 6, 0)
             names = ", ".join(p.get("src_row") or p.get("label", "") for p in ps)
-            cb = QtWidgets.QCheckBox(_t("닫힌 이미지 · {0}").format(names))
+            cb = ElideCheckBox(_t("닫힌 이미지 · {0}").format(names))
             cb.setChecked(True)
-            cb.setToolTip(_t("이 패널의 이미지가 열려 있지 않습니다. 체크를 풀면 그림에서 뺍니다"))
+            cb.setToolTip(cb.full_text() + "\n" + _t("이 패널의 이미지가 열려 있지 않습니다. 체크를 풀면 그림에서 뺍니다"))
             hl.addWidget(cb, 1)
             nl = QtWidgets.QLabel(_t("닫힘"))
             nl.setStyleSheet("color: #c93400; font-size: 11px;")

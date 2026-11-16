@@ -5833,13 +5833,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _fill_series_list(lst, names):
         prev = {lst.item(i).text(): lst.item(i).checkState() for i in range(lst.count())}
         lst.blockSignals(True)
-        lst.clear()
-        for name in names:
-            it = QtWidgets.QListWidgetItem(name)
-            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-            it.setCheckState(prev.get(name, Qt.Checked))
-            lst.addItem(it)
-        lst.blockSignals(False)
+        try:
+            controls.sync_items(lst, [(n, n) for n in names], check=prev)  # no clear(): 1.4.3 crash fix
+        finally:
+            lst.blockSignals(False)
 
     @staticmethod
     def _checked(lst):
@@ -6952,8 +6949,28 @@ class App(QtWidgets.QApplication):
         return super().event(e)
 
 
+def _crash_log():
+    """1.4.3: a native crash leaves the Python stack in crash.log next to prefs.json
+    (macOS: ~/Library/Application Support/BlotProfiler/crash.log)."""
+    import faulthandler
+
+    try:
+        from . import i18n
+
+        folder = os.path.dirname(i18n.prefs_path())
+        os.makedirs(folder, exist_ok=True)
+        f = open(os.path.join(folder, "crash.log"), "a", encoding="utf-8")
+        f.write(f"\n--- Blot Profiler {__version__} started {__import__('time').strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.flush()
+        faulthandler.enable(f, all_threads=True)
+        return f
+    except Exception:
+        return None
+
+
 def main(argv=None):
     argv = sys.argv if argv is None else argv
+    _log = _crash_log()  # noqa: F841 (kept open while the app runs)
     QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = App(argv)
     app.setApplicationName("Blot Profiler")
