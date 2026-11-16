@@ -185,3 +185,136 @@ def test_project_keeps_which_image(tmp_path):
     assert len(d4) == 6 and len({d.uid for d in d4}) == 6
     refs = [p["doc"] for p in d4[5].figure["panels"] if p.get("doc")]
     assert refs == [d4[4].uid]
+
+
+# ---- 1.4.2: panels that pointed at the file or at the figure's own image (the user's project)
+def _named(w):
+    """Each region its own protein names, as in a real multi-region picture."""
+    for k, d in enumerate(w.loaded_docs()):
+        old = [r.name for r in d.analysis.rows]
+        for j, r in enumerate(d.analysis.rows):
+            r.name = f"R{k + 1}-{j + 1}"
+        ren = dict(zip(old, (r.name for r in d.analysis.rows)))
+        for p in d.analysis.protein_lines:
+            p["row"] = ren.get(p.get("row"), p.get("row"))
+        if d.figure:
+            d.figure["panels"] = [p for p in d.figure["panels"] if p.get("doc")]
+            from blot_profiler import figure
+            figure.sync_settings(d.figure, d.analysis, d.raw.shape)
+
+
+def _checked(ed):
+    return {k for k, b in _boxes(ed).items() if b.isChecked() and b.isEnabled()}
+
+
+def _key_of(w, d):
+    return w.doc_key(w.docs.index(d))
+
+
+def test_broken_refs_from_older_versions_are_mended(tmp_path):
+    w, ed = _window(tmp_path)
+    _named(w)
+    docs = w.loaded_docs()
+    own = docs[3]
+    ed.set_doc(own)
+    # 1.4.1 moved the panels of an old project onto the figure's own image: shown as 'not open'
+    for d in docs[:3]:
+        ed.s["panels"].append(ed._new_foreign_panel(d, d.analysis.rows[0].name))
+        ed.s["panels"][-1]["doc"] = own.uid
+    ed.load_from_settings()
+    assert _in_figure(ed) == {d.uid for d in docs[:3]}
+    assert _checked(ed) == {"I1", "I2", "I3"}
+    for p in ed.s["panels"]:
+        if p.get("doc"):
+            d = next(x for x in docs if x.uid == p["doc"])
+            assert p["src_row"] in [r.name for r in d.analysis.rows]
+    # the figure follows the boxes whatever is clicked
+    import random
+    rnd = random.Random(3)
+    for _ in range(12):
+        key = rnd.choice(["I1", "I2", "I3"])
+        _boxes(ed)[key].click()
+        want = {d.uid for d in docs[:3] if _key_of(w, d) in _checked(ed)}
+        assert _in_figure(ed) == want
+
+
+def test_closed_image_panel_can_be_taken_out(tmp_path):
+    w, ed = _window(tmp_path, n=2)
+    _named(w)
+    p = ed._new_foreign_panel(w.docs[0], w.docs[0].analysis.rows[0].name)
+    p["doc"] = "0" * 32  # an image of the project that is not open now
+    ed.s["panels"].append(p)
+    ed.load_from_settings()
+    box = _boxes(ed)
+    gone = [k for k in box if k.startswith("닫힌 이미지")]
+    assert len(gone) == 1 and box[gone[0]].isChecked()
+    box[gone[0]].click()
+    assert not any(q.get("doc") == "0" * 32 for q in ed.s["panels"])
+    assert not any(k.startswith("닫힌 이미지") for k in _boxes(ed))
+
+
+def test_old_project_with_file_refs_finds_each_region(tmp_path):
+    from blot_profiler import gui
+
+    w, ed = _window(tmp_path)
+    _named(w)
+    docs = w.loaded_docs()
+    ed.set_doc(docs[3])
+    for key in ("I1", "I3"):
+        _boxes(ed)[key].click()
+    proj = str(tmp_path / "p.blotproj")
+    w.write_project(proj, embed=True)
+    with zipfile.ZipFile(proj) as z:
+        items = {n: z.read(n) for n in z.namelist()}
+    jname = next(n for n in items if n.endswith(".json"))
+    data = json.loads(items[jname])
+    for im in data["images"]:  # as 1.4.0 saved it
+        im.pop("uid", None)
+        for p in (im.get("figure") or {}).get("panels", []):
+            if p.get("doc"):
+                p["doc"] = os.path.abspath(im["image_path"])
+    items[jname] = json.dumps(data).encode()
+    old = str(tmp_path / "old.blotproj")
+    with zipfile.ZipFile(old, "w") as z:
+        for n, b in items.items():
+            z.writestr(n, b)
+    w2 = gui.MainWindow()
+    w2.load_project(old, ask_save=False)
+    d2 = w2.loaded_docs()
+    refs = sorted((p["doc"], p["src_row"]) for p in d2[3].figure["panels"] if p.get("doc"))
+    assert refs == sorted([(d2[0].uid, "R1-1"), (d2[2].uid, "R3-1")]) or \
+        {r[0] for r in refs} == {d2[0].uid, d2[2].uid}
+
+
+def test_protein_line_levels_the_blot(tmp_path):
+    import numpy as np
+    from PySide6 import QtWidgets
+    import tifffile
+    from blot_profiler import core, gui
+
+    app = QtWidgets.QApplication.instance() or gui.App([])  # noqa: F841
+    raw, _ = synth.chemi_blot()
+    raw = raw.astype(np.float32)
+    raw[40, 60] = raw.max() * 4  # a landmark
+    path = str(tmp_path / "t.tif")
+    tifffile.imwrite(path, raw)
+    w = gui.MainWindow()
+    w.ask_marker.setChecked(False)
+    w.load_image(path)
+    d = w.doc
+    d.analysis.lane_lines = [[[60.0, 40.0], [60.0, 200.0]]]  # a lane line through the landmark
+    H, W = d.raw.shape
+    w.add_protein_line(20.0, 100.0, W - 20.0, 100.0 + (W - 40) * np.tan(np.deg2rad(3.0)))
+    assert abs(float(d.transform["angle"]) - 3.0) < 0.05
+    p = next(q for q in d.analysis.protein_lines if q.get("user"))
+    assert abs(p["y0"] - p["y1"]) < 1e-6  # the drawn line is level now
+    lx, ly = d.analysis.lane_lines[0][0]
+    yy, xx = np.unravel_index(int(np.argmax(d.raw)), d.raw.shape)
+    assert abs(lx - xx) <= 1.5 and abs(ly - yy) <= 1.5  # the lane line turned with the blot
+    # nearly level lines and the switch off: nothing turns
+    w.add_protein_line(20.0, 300.0, W - 20.0, 300.4)
+    assert abs(float(d.transform["angle"]) - 3.0) < 0.05
+    w.level_pline.setChecked(False)
+    w.add_protein_line(20.0, 200.0, W - 20.0, 240.0)
+    assert abs(float(d.transform["angle"]) - 3.0) < 0.05
+    assert core.rotated_shape(raw.shape, 0) == raw.shape

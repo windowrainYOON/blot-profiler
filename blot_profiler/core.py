@@ -22,7 +22,7 @@ import ast
 import math
 import operator
 from dataclasses import asdict, dataclass, field, replace
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy import ndimage as ndi
@@ -1593,6 +1593,47 @@ def line_angle(x0, y0, x1, y1) -> float:
     elif ang < -90:
         ang += 180
     return ang
+
+
+def _rotation(shape, ang):
+    """What ndimage.rotate(img, ang, reshape=True) does to coordinates: (R, offset, output shape),
+    input (row, col) = R @ output (row, col) + offset."""
+    a = np.deg2rad(float(ang))
+    c, s = np.cos(a), np.sin(a)
+    R = np.array([[c, s], [-s, c]])
+    iy, ix = shape[:2]
+    ob = R @ np.array([[0, 0, iy, iy], [0, ix, 0, ix]])
+    osh = (np.ptp(ob, axis=1) + 0.5).astype(int)
+    off = (np.array([iy, ix], float) - 1) / 2 - R @ ((osh - 1) / 2)
+    return R, off, (int(osh[0]), int(osh[1]))
+
+
+def rotated_shape(shape, ang) -> Tuple[int, int]:
+    if abs(float(ang)) <= 1e-6:
+        return int(shape[0]), int(shape[1])
+    return _rotation(shape, ang)[2]
+
+
+def map_points(points, base_shape, tf_old: dict, tf_new: dict):
+    """Image positions [(x, y), …] shown under ``tf_old`` → the same spots of the blot under ``tf_new``.
+
+    ``base_shape`` is the picture before the fine angle (region and quarter turns applied);
+    the two transforms may differ in fine angle and crop only (1.4.2: level by a protein line)."""
+    out = []
+    a0, a1 = float(tf_old.get("angle", 0.0) or 0.0), float(tf_new.get("angle", 0.0) or 0.0)
+    c0, c1 = tf_old.get("crop"), tf_new.get("crop")
+    r0 = _rotation(base_shape, a0) if abs(a0) > 1e-6 else None
+    r1 = _rotation(base_shape, a1) if abs(a1) > 1e-6 else None
+    for x, y in points:
+        x, y = float(x) + (c0[0] if c0 else 0), float(y) + (c0[1] if c0 else 0)
+        if r0 is not None:  # back to the picture before the fine angle
+            iy, ix = r0[0] @ np.array([y, x]) + r0[1]
+            y, x = float(iy), float(ix)
+        if r1 is not None:
+            oy, ox = np.linalg.solve(r1[0], np.array([y, x]) - r1[1])
+            y, x = float(oy), float(ox)
+        out.append((x - (c1[0] if c1 else 0), y - (c1[1] if c1 else 0)))
+    return out
 
 
 # --------------------------------------------------------------------------
