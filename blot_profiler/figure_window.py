@@ -336,6 +336,7 @@ class PreviewLabel(QtWidgets.QLabel):
     textRotated = QtCore.Signal(str, float)  # key, angle (degrees, counter-clockwise)
     groupResized = QtCore.Signal(int, int, int, int)  # tier, group, first lane, last lane
     tierMoved = QtCore.Signal(int, int)  # tier index, new index
+    panelMoved = QtCore.Signal(str, int)  # 1.4.5: panel row, insertion point among the panels shown
     keyAction = QtCore.Signal(str, dict)  # "delete" | "bold" | "italic" | "bigger" | "smaller" | "dup", selection
     toolAction = QtCore.Signal(str, object, dict)  # mini toolbar: action, value, selection
 
@@ -444,6 +445,24 @@ class PreviewLabel(QtWidgets.QLabel):
         h = max(14.0, y1 - y0 - 2)
         cy = (y0 + y1) / 2
         return QtCore.QRectF(ox - self.PAPER_PAD + 4, cy - h / 2, self.GRIP_W, h)
+
+    def movable_panels(self):
+        """Panels that can be dragged up/down (two or more blots in the figure)."""
+        ps = self.layout_.get("panels", []) if self.layout_ else []
+        return ps if len(ps) > 1 else []
+
+    def panel_grip_rect_screen(self, pn) -> QtCore.QRectF:
+        k, ox, oy = self._k()
+        y0, y1 = oy + pn["y"] * k, oy + (pn["y"] + pn["h"]) * k
+        h = max(14.0, y1 - y0 - 2)
+        cy = (y0 + y1) / 2
+        return QtCore.QRectF(ox - self.PAPER_PAD + 4, cy - h / 2, self.GRIP_W, h)
+
+    def _panel_drop_index(self, y) -> Optional[int]:
+        ps = self.movable_panels()
+        if not ps:
+            return None
+        return sum(1 for p in ps if p["y"] + p["h"] / 2 < y)
 
     def lane_at(self, x_in) -> Optional[int]:
         xs = self.lane_xs()
@@ -742,6 +761,9 @@ class PreviewLabel(QtWidgets.QLabel):
             g = self.grip_rect_screen(t["ti"])
             if g is not None and g.adjusted(-3, 0, 3, 0).contains(pf):
                 return {"type": "grip", "ti": t["ti"]}
+        for pn in self.movable_panels():
+            if self.panel_grip_rect_screen(pn).adjusted(-3, 0, 3, 0).contains(pf):
+                return {"type": "pgrip", "row": pn["row"]}
         sel = self.selected or {}
         t = self.single_text()
         if t is not None and sel.get("kind") == "text":
@@ -800,7 +822,7 @@ class PreviewLabel(QtWidgets.QLabel):
             return
         h = self.hit_handle(pos)
         if h:
-            cur = {"grip": Qt.OpenHandCursor, "rotate": Qt.CrossCursor, "bar_end": Qt.SizeHorCursor}.get(h["type"])
+            cur = {"grip": Qt.OpenHandCursor, "pgrip": Qt.OpenHandCursor, "rotate": Qt.CrossCursor, "bar_end": Qt.SizeHorCursor}.get(h["type"])
             if h["type"] == "resize":
                 cur = Qt.SizeFDiagCursor if h["corner"] in ("tl", "br") else Qt.SizeBDiagCursor
             if h["type"] == "edge":
@@ -835,6 +857,9 @@ class PreviewLabel(QtWidgets.QLabel):
         if h:
             if h["type"] == "grip":
                 self.select({"kind": "tier", "ti": h["ti"]})
+                self.setCursor(Qt.ClosedHandCursor)
+            elif h["type"] == "pgrip":
+                self.select({"kind": "panel", "row": h["row"]})
                 self.setCursor(Qt.ClosedHandCursor)
             self.drag = dict(h, start=start)
             self.cur = pos
@@ -882,7 +907,7 @@ class PreviewLabel(QtWidgets.QLabel):
         pn = self.hit_panel(pos)
         if pn:
             self.select({"kind": "panel", "row": pn["row"]})
-            self.drag = {"type": "panel", "start": start}
+            self.drag = {"type": "panel", "row": pn["row"], "start": start}
             self.cur = pos
             return
         self.select(None)
@@ -907,7 +932,12 @@ class PreviewLabel(QtWidgets.QLabel):
                 self.selected = {"kind": "cells", "ti": d["ti"], "lanes": list(range(min(a, li), max(a, li) + 1)), "anchor": a}
                 self._place_overlays()
         elif d["type"] == "panel":
-            if abs(pos.x() - self._press.x()) > 6 and self._lane_tier_for_panels() is not None:
+            ddx, ddy = abs(pos.x() - self._press.x()), abs(pos.y() - self._press.y())
+            if not d.get("lanes") and (d.get("vmove") or (ddy > 5 and ddy > ddx)) and self.movable_panels():
+                d["vmove"] = True  # 1.4.5: drag the blot up/down
+                self.setCursor(Qt.ClosedHandCursor)
+                self.update()
+            elif not d.get("vmove") and ddx > 6 and self._lane_tier_for_panels() is not None:
                 a, b = self.nearest_lane(d["start"][0]), self.nearest_lane(now[0])
                 if a is not None and b is not None:
                     d["lanes"] = True
@@ -1003,6 +1033,10 @@ class PreviewLabel(QtWidgets.QLabel):
                     shift = max(-first, min(n - 1 - last, shift))
                     if shift:
                         self.groupResized.emit(d["ti"], d["gi"], first + shift, last + shift)
+        elif typ == "pgrip" or (typ == "panel" and d.get("vmove")):
+            n = self._panel_drop_index(end[1])
+            if n is not None:
+                self.panelMoved.emit(d["row"], n)
         elif typ == "grip":
             n = self._tier_drop_index(end[1])
             if n is not None:
@@ -1160,6 +1194,16 @@ class PreviewLabel(QtWidgets.QLabel):
         qp.setBrush(Qt.NoBrush)
 
     def paintEvent(self, e):
+        # 1.4.5: an error while painting left the painter open and Qt crashed (the app quit);
+        # now the error is printed and the painters are closed when the frame goes
+        try:
+            self._paint(e)
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+
+    def _paint(self, e):
         k, ox, oy = self._k()
         if k:
             pm = self.pixmap()
@@ -1205,6 +1249,21 @@ class PreviewLabel(QtWidgets.QLabel):
             dot = QtGui.QColor("white") if on else QtGui.QColor(0, 0, 0, 70)
             qp.setPen(Qt.NoPen)
             qp.setBrush(dot)
+            for j in range(3):
+                for i in range(2):
+                    qp.drawEllipse(QtCore.QPointF(g.center().x() - 2.2 + 4.4 * i, g.center().y() - 4.5 + 4.5 * j), 1.1, 1.1)
+            qp.setBrush(Qt.NoBrush)
+        # panel grips (⋮⋮) in the paper margin, as for the tiers (1.4.5)
+        for pn in self.movable_panels():
+            g = self.panel_grip_rect_screen(pn)
+            on = sel.get("kind") == "panel" and sel.get("row") == pn["row"]
+            if on:
+                qp.setPen(Qt.NoPen)
+                qp.setBrush(self.BLUE)
+                qp.drawRoundedRect(g, 3, 3)
+                qp.setBrush(Qt.NoBrush)
+            qp.setPen(Qt.NoPen)
+            qp.setBrush(QtGui.QColor("white") if on else QtGui.QColor(0, 0, 0, 70))
             for j in range(3):
                 for i in range(2):
                     qp.drawEllipse(QtCore.QPointF(g.center().x() - 2.2 + 4.4 * i, g.center().y() - 4.5 + 4.5 * j), 1.1, 1.1)
@@ -1283,6 +1342,25 @@ class PreviewLabel(QtWidgets.QLabel):
             elif d["type"] in ("bar_end", "bar_move") and now is not None:
                 qp.setPen(QtGui.QPen(orange, 2))
                 qp.drawLine(self.cur.x(), 0, self.cur.x(), self.height())
+            elif (d["type"] == "pgrip" or (d["type"] == "panel" and d.get("vmove"))) and now is not None:
+                to = self._panel_drop_index(now[1])
+                ps = self.movable_panels()
+                pw = self.layout_.get("panel_w", 0)
+                if ps and to is not None:
+                    if 0 < to < len(ps):
+                        y = (ps[to - 1]["y"] + ps[to - 1]["h"] + ps[to]["y"]) / 2
+                    elif to == 0:
+                        y = ps[0]["y"]
+                    else:
+                        y = ps[-1]["y"] + ps[-1]["h"]
+                    x0, x1 = ox + ps[0]["x_blot"] * k, ox + (ps[0]["x_blot"] + pw) * k
+                    qp.setPen(QtGui.QPen(self.BLUE, 2))
+                    qp.drawLine(QtCore.QPointF(x0, oy + y * k), QtCore.QPointF(x1, oy + y * k))
+                    self._handle(qp, QtCore.QPointF(x0, oy + y * k), round_=True)
+                    pn = next((p for p in ps if p["row"] == d.get("row")), None)
+                    if pn is not None:
+                        ghost = self.to_screen((pn["x_blot"], pn["y"], pw, pn["h"])).translated(0, self.cur.y() - self._press.y())
+                        self._outline(qp, ghost, self.BLUE, 1.5, fill=QtGui.QColor(255, 255, 255, 140), radius=2)
             elif d["type"] == "grip" and now is not None:
                 to = self._tier_drop_index(now[1])
                 ts = self.tiers()
@@ -1409,6 +1487,7 @@ class FigureEditor(QtWidgets.QWidget):
         self.preview.textRotated.connect(lambda key, a: self.apply_style({"kind": "text", "key": key}, rot=a))
         self.preview.groupResized.connect(self.on_group_resized)
         self.preview.tierMoved.connect(self.move_tier_to)
+        self.preview.panelMoved.connect(self.move_panel_to)
         self.preview.keyAction.connect(self.on_key_action)
         self.preview.toolAction.connect(self.on_tool_action)
         self.preview.text_getter = self.sel_text
@@ -2663,6 +2742,33 @@ class FigureEditor(QtWidgets.QWidget):
             else:
                 t["texts"][li] = v
         self.load_from_settings()
+
+    def move_panel_to(self, row: str, n: int):
+        """A blot dragged up/down in the preview (1.4.5): ``n`` = insertion point among the panels
+        shown (0 = top). Hidden panels keep their places in the list."""
+        shown = [p["row"] for p in (self.preview.layout_ or {}).get("panels", [])]
+        if row not in shown:
+            return
+        i = shown.index(row)
+        if n in (i, i + 1):
+            return
+        panels = list(self.s["panels"])
+        me = next((p for p in panels if p["row"] == row), None)
+        if me is None:
+            return
+        panels.remove(me)
+        if n < len(shown):
+            at = next(j for j, p in enumerate(panels) if p["row"] == shown[n])
+        else:
+            at = next(j for j, p in enumerate(panels) if p["row"] == shown[-1]) + 1
+        panels.insert(at, me)
+        self.s["panels"] = panels
+        self.load_from_settings()
+        self.render()
+        sel = {"kind": "panel", "row": row}
+        self.preview.select(sel)
+        self.on_object_selected(sel)
+        self.status(_t("블롯을 {0}로 옮겼습니다").format(_t("위") if n < i else _t("아래")))
 
     def move_tier_to(self, ti: int, to: int):
         tiers = list(self.s["tiers"])
