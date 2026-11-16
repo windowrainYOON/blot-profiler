@@ -212,9 +212,50 @@ def layout_panels(a: core.Analysis, s: dict, shape, sources: Optional[dict] = No
         y0, y1 = max(0, int(y0)), min(H, int(y1))
         if x1 - x0 < 4 or y1 - y0 < 4:
             x0, y0, x1, y1 = default_gel_crop(a, shape)
-        return [({"row": GEL_ROW, "label": s.get("gel_label", ""), "show": True}, -1, y0, y1)], x0, x1
+        out = [({"row": GEL_ROW, "label": s.get("gel_label", ""), "show": True}, -1, y0, y1)]
+        return out + _foreign_gels(s, sources), x0, x1
     x0, x1 = crop_x(a, s, W)
     return panel_rows(a, s, H, sources), x0, x1
+
+
+def _foreign_gels(s: dict, sources: Optional[dict]):
+    """1.4.7 Full blot with several images: each ticked image (one with panels in this
+    figure) as one whole-blot panel under this image's, in the order of its first panel."""
+    if not sources:
+        return []
+    out, seen = [], set()
+    for p in s.get("panels", []):
+        did = p.get("doc")
+        if not did or did in seen or not p.get("show", True):
+            continue
+        seen.add(did)
+        row = f"{GEL_ROW}:{did}"
+        src = sources.get(did)
+        if src is None:
+            out.append(({"row": row, "doc": did, "label": "", "show": True, "gel": True}, MISSING, 0, 0))
+            continue
+        sa, (sh, sw) = src["analysis"], src["signal"].shape
+        fs = src.get("figure") or {}
+        crop = fs.get("gel_crop") or default_gel_crop(sa, (sh, sw))
+        y0, y1 = max(0, int(crop[1])), min(sh, int(crop[3]))
+        if y1 - y0 < 4:
+            _, y0, _, y1 = default_gel_crop(sa, (sh, sw))
+        out.append(({"row": row, "doc": did, "label": "", "show": True, "gel": True}, -1, y0, y1))
+    return out
+
+
+def _foreign_full_names(s: dict, did: str, sa: core.Analysis):
+    """Full blot of another image: (panel settings, y in that image) of its proteins in this figure."""
+    names = {r.name: i for i, r in enumerate(sa.rows)}
+    out = []
+    for p in s.get("panels", []):
+        if p.get("doc") != did or not p.get("show", True):
+            continue
+        ri = names.get(p.get("src_row"))
+        ys = [b.cy for b in sa.bands if b.row == ri] if ri is not None else []
+        if ys:
+            out.append((p, float(np.mean(ys))))
+    return out
 
 
 def _full_blot_names(a: core.Analysis, s: dict):
@@ -441,13 +482,15 @@ def foreign_place(src_a: core.Analysis, own_centres) -> Tuple[float, float, floa
 
 
 def foreign_shifted(src_sig: np.ndarray, src_a: core.Analysis, y0: int, y1: int, own_centres,
-                    x0px: int, x1px: int) -> Tuple[np.ndarray, float, float]:
+                    x0px: int, x1px: int, span=None) -> Tuple[np.ndarray, float, float]:
     """The other image's rows y0:y1 as one piece, moved by ``foreign_place``, on this figure's
     columns x0px:x1px (whole pixels, same scale). Columns outside its lane span are NaN.
     Also returns the span in this figure's pixels (for the frame)."""
     width = max(1, x1px - x0px)
     out = np.full((max(1, y1 - y0), width), np.nan)
     off, a, b = foreign_place(src_a, own_centres)
+    if span is not None:  # Full blot: the other image's whole-blot crop instead of its lane span
+        a, b = span
     block = src_sig[y0:y1].astype(float)
     W2 = block.shape[1]
     sh = int(round(off))
@@ -503,20 +546,48 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             return float(o.get("size") or 0.7 * fonts.get("protein", s["font_size"]))
         return float(o.get("size") or fonts.get(cat, s["font_size"]))
 
-    show_strip = bool(s.get("show_strip")) and marker is not None and s["strip_x1"] > s["strip_x0"]
-    strip_w = (s["strip_x1"] - s["strip_x0"]) * scale if show_strip else 0.0
+    def marker_of(p):
+        """(marker image, its figure settings) of the image a panel comes from; each image
+        keeps its own marker strip and kDa ticks (1.4.7: also the other images in the figure)."""
+        if p.get("doc"):
+            src_d = (sources or {}).get(p["doc"]) or {}
+            return src_d.get("marker"), src_d.get("figure") or {}
+        return marker, s
+
+    def strip_of(p):  # this figure's switch turns every image's strip on or off
+        m, fs = marker_of(p)
+        if m is None or not s.get("show_strip") or int(fs.get("strip_x1", 0)) <= int(fs.get("strip_x0", 0)):
+            return None
+        return m, fs
+
+    def kda_of(p):
+        _, fs = marker_of(p)
+        if not s.get("show_kda"):
+            return []
+        return sorted((k for k in fs.get("kda", []) if k.get("kda") not in (None, "")), key=lambda k: k["y"])
+
+    shown_p = [p for p, ri, *_ in panels if ri != MISSING]
+    strips = [strip_of(p) for p in shown_p]
+    show_strip = any(st is not None for st in strips)
+    strip_w = max(((int(fs["strip_x1"]) - int(fs["strip_x0"])) * scale for st in strips if st for _, fs in [st]),
+                  default=0.0)
     strip_gap = float(s.get("strip_gap_in", 0.0)) if show_strip else 0.0
-    kda = sorted((k for k in s.get("kda", []) if k.get("kda") not in (None, "")), key=lambda k: k["y"])
-    show_kda = bool(s.get("show_kda")) and bool(kda)
+    all_kda = [k for p in shown_p for k in kda_of(p)]
+    show_kda = bool(all_kda)
     kda_side = s.get("kda_side", "left")
     prot_side = s.get("protein_side", "left")
     tick = 0.05
-    kda_w = (max(_text_w(_fmt_kda(k["kda"]), fonts["kda"]) for k in kda) + tick + 0.04) if show_kda else 0.0
+    kda_w = (max(_text_w(_fmt_kda(k["kda"]), fonts["kda"]) for k in all_kda) + tick + 0.04) if show_kda else 0.0
 
     # widths of the label columns left and right of the blot
     left_items, right_items = [], []
     full_names = _full_blot_names(a, s) if s.get("layout") == "full" else []
     for p, *_ in panels:
+        if p.get("gel"):
+            for fp, _ in _foreign_full_names(s, p["doc"], sources[p["doc"]]["analysis"]) if p["doc"] in (sources or {}) else []:
+                (left_items if prot_side == "left" else right_items).append(
+                    _text_w(fp["label"], fsize(f"protein:{fp['row']}", "protein")))
+            continue
         (left_items if prot_side == "left" else right_items).append(_text_w(p["label"], fsize(f"protein:{p['row']}", "protein")))
     for p, _ in full_names:
         (left_items if prot_side == "left" else right_items).append(_text_w(p["label"], fsize(f"protein:{p['row']}", "protein")))
@@ -710,7 +781,12 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             continue
         if foreign:
             src_d = sources[p["doc"]]
-            crop, fa, fb = foreign_shifted(src_d["signal"], src_d["analysis"], y0, y1, centres, x0px, x1px)
+            span = None
+            if p.get("gel"):
+                sa_ = src_d["analysis"]
+                gc = (src_d.get("figure") or {}).get("gel_crop") or default_gel_crop(sa_, src_d["signal"].shape)
+                span = (float(gc[0]), float(gc[2]))
+            crop, fa, fb = foreign_shifted(src_d["signal"], src_d["analysis"], y0, y1, centres, x0px, x1px, span)
             ok = np.isfinite(crop)
             ref = crop[ok] if ok.any() else np.zeros(1)
             if not p.get("auto_range", True):
@@ -735,41 +811,45 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             if tag:
                 side_text(f"src:{p['row']}", "src", prot_side, y + h / 2 + fsize(f"protein:{p['row']}", "protein") / 72.0 * 0.95,
                           tag, color="#8e8e93")
-        if foreign:  # marker strip and kDa ticks belong to the top image only
-            side_text(f"protein:{p['row']}", "protein", prot_side, y + h / 2, p["label"], weight=weight)
-            layout["panels"].append({"row": p["row"], "doc": p.get("doc"), "x": left, "x_blot": left, "y": y,
-                                     "w": panel_w, "h": h, "y0": y0, "y1": y1})
-            y += h
-            prev = kind
-            continue
-        if show_strip:
-            mcrop = marker_crop(marker, y0 + int(s.get("strip_dy", 0)), y1 + int(s.get("strip_dy", 0)),
-                                s["strip_x0"], s["strip_x1"])
-            sx = fig.add_axes([sx0 / total_w, (total_h - y - h) / total_h, strip_w / total_w, h / total_h])
-            md = _stretch(mcrop, 1, 99.5, 1.0, marker[:, s["strip_x0"]:s["strip_x1"]])
-            sx.imshow(1.0 - md if s.get("marker_invert", True) else md, cmap="gray", vmin=0, vmax=1, aspect="auto",
+        st = strip_of(p)
+        if st is not None:  # each image's own marker strip, right-aligned next to its blot
+            m_, fs = st
+            sw_ = (int(fs["strip_x1"]) - int(fs["strip_x0"])) * scale
+            dy_ = int(fs.get("strip_dy", 0))
+            mcrop = marker_crop(m_, y0 + dy_, y1 + dy_, int(fs["strip_x0"]), int(fs["strip_x1"]))
+            sx = fig.add_axes([(left - strip_gap - sw_) / total_w, (total_h - y - h) / total_h, sw_ / total_w, h / total_h])
+            md = _stretch(mcrop, 1, 99.5, 1.0, m_[:, int(fs["strip_x0"]):int(fs["strip_x1"])])
+            sx.imshow(1.0 - md if fs.get("marker_invert", True) else md, cmap="gray", vmin=0, vmax=1, aspect="auto",
                       interpolation="antialiased")
             _frame(sx, s["frame_lw"])
-            layout["strips"].append({"x": sx0, "y": y, "w": strip_w, "h": h})
-        side_text(f"protein:{p['row']}", "protein", prot_side, y + h / 2, p["label"], weight=weight)
-        for fp, ry in full_names:  # Full blot (Western): every protein's name at its own height
+            layout["strips"].append({"x": left - strip_gap - sw_, "y": y, "w": sw_, "h": h, "doc": p.get("doc")})
+        if p.get("gel"):  # Full blot of another image: its proteins' names at their own heights
+            names_ = _foreign_full_names(s, p["doc"], sources[p["doc"]]["analysis"])
+        else:
+            side_text(f"protein:{p['row']}", "protein", prot_side, y + h / 2, p["label"], weight=weight)
+            names_ = [] if foreign else full_names
+        for fp, ry in names_:  # Full blot (Western): every protein's name at its own height
             if y0 <= ry <= y1:
                 side_text(f"protein:{fp['row']}", "protein", prot_side, y + (ry - y0) * scale, fp["label"], weight=weight)
-        if show_kda:
-            for ki, k in enumerate(kda):
-                if not y0 <= k["y"] <= y1:
-                    continue
-                ky = y + (k["y"] - y0) * scale
-                if kda_side == "left":
-                    xr = sx0 if show_strip else left
-                    hline(xr - tick, xr, ky, 0.6)
-                    text(f"kda:{ki}", "kda", xr - tick - 0.02, ky, _fmt_kda(k["kda"]), ha="right", va="center")
-                else:
-                    xr = left + panel_w
-                    hline(xr, xr + tick, ky, 0.6)
-                    text(f"kda:{ki}", "kda", xr + tick + 0.02, ky, _fmt_kda(k["kda"]), ha="left", va="center")
-        layout["panels"].append({"row": p["row"], "x": sx0 if show_strip else left, "x_blot": left, "y": y,
-                                 "w": panel_w + strip_w + strip_gap, "h": h, "y0": y0, "y1": y1})
+        for ki, k in enumerate(kda_of(p)):
+            if not y0 <= k["y"] <= y1:
+                continue
+            ky = y + (k["y"] - y0) * scale
+            key = f"kda:{ki}" if not foreign else f"xkda:{p['doc']}:{ki}"
+            if kda_side == "left":
+                xr = sx0 if show_strip else left
+                hline(xr - tick, xr, ky, 0.6)
+                text(key, "kda", xr - tick - 0.02, ky, _fmt_kda(k["kda"]), ha="right", va="center")
+            else:
+                xr = left + panel_w
+                hline(xr, xr + tick, ky, 0.6)
+                text(key, "kda", xr + tick + 0.02, ky, _fmt_kda(k["kda"]), ha="left", va="center")
+        if foreign:
+            layout["panels"].append({"row": p["row"], "doc": p.get("doc"), "x": left, "x_blot": left, "y": y,
+                                     "w": panel_w, "h": h, "y0": y0, "y1": y1})
+        else:
+            layout["panels"].append({"row": p["row"], "x": sx0 if show_strip else left, "x_blot": left, "y": y,
+                                     "w": panel_w + strip_w + strip_gap, "h": h, "y0": y0, "y1": y1})
         y += h
         prev = kind
 

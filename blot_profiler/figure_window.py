@@ -1985,7 +1985,11 @@ class FigureEditor(QtWidgets.QWidget):
             if d.raw is None or d is self.doc or not d.analysis.bands:
                 continue
             sig = m.get_corrected(d) if self.s.get("use_corrected") else d.signal
-            out[self.doc_id(d)] = {"signal": sig, "analysis": d.analysis, "tag": m.doc_key(k), "name": d.name, "doc": d}
+            mk = getattr(d, "marker", None)
+            if mk is not None and d.figure is not None and int(d.figure.get("strip_x1", 0)) <= int(d.figure.get("strip_x0", 0)):
+                d.figure["strip_x0"], d.figure["strip_x1"] = figure.guess_ladder_x(mk, d.analysis)  # its marker strip
+            out[self.doc_id(d)] = {"signal": sig, "analysis": d.analysis, "tag": m.doc_key(k), "name": d.name, "doc": d,
+                               "figure": d.figure or {}, "marker": getattr(d, "marker", None)}
         if self.doc in m.docs:
             out["__own__"] = {"tag": m.doc_key(m.docs.index(self.doc)), "name": self.doc.name}
         return out
