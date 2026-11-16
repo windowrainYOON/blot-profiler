@@ -17,7 +17,7 @@ Layout, top to bottom::
 from __future__ import annotations
 
 import copy
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 from matplotlib.lines import Line2D
@@ -425,34 +425,37 @@ def lane_pitch(a: core.Analysis) -> float:
     return float(np.median(np.diff(sorted(c)))) if len(c) > 1 else 0.0
 
 
-def foreign_strip(src_sig: np.ndarray, src_a: core.Analysis, y0: int, y1: int, lane_map, own_centres,
-                  x0px: int, x1px: int, k: float) -> np.ndarray:
-    """A panel cut from another image, laid out on this figure's columns: every figure column
-    shows its mapped source lane (scaled by ``k`` = source pitch / own pitch, so the lane
-    spacing matches); columns without a lane are NaN (drawn white)."""
+def foreign_place(src_a: core.Analysis, own_centres) -> Tuple[float, float, float]:
+    """1.4.6: a blot from another image is neither cut per lane nor resized; it is only moved
+    sideways so that its first and last lanes sit as near as they can to this figure's first and
+    last lanes (the difference, when the spacing differs, is split between both ends).
+    Returns (offset, a, b): own x = source x + offset; the source's lane span is [a, b)."""
+    own = sorted(c for c in own_centres if np.isfinite(c))
+    src = sorted(c for c in lane_centres(src_a) if np.isfinite(c))
+    if not own or not src:
+        return 0.0, -np.inf, np.inf
+    off = (own[0] + own[-1]) / 2.0 - (src[0] + src[-1]) / 2.0
+    half = (float(np.median(np.diff(src))) if len(src) > 1 else
+            float(np.median(np.diff(own))) if len(own) > 1 else 20.0) / 2.0
+    return off, src[0] - half, src[-1] + half
+
+
+def foreign_shifted(src_sig: np.ndarray, src_a: core.Analysis, y0: int, y1: int, own_centres,
+                    x0px: int, x1px: int) -> Tuple[np.ndarray, float, float]:
+    """The other image's rows y0:y1 as one piece, moved by ``foreign_place``, on this figure's
+    columns x0px:x1px (whole pixels, same scale). Columns outside its lane span are NaN.
+    Also returns the span in this figure's pixels (for the frame)."""
     width = max(1, x1px - x0px)
     out = np.full((max(1, y1 - y0), width), np.nan)
-    own = np.asarray(own_centres, float)
-    valid = [i for i, c in enumerate(own) if np.isfinite(c)]
-    if not valid:
-        return out
-    src_c = lane_centres(src_a)
-    xs = np.arange(width, dtype=float) + x0px
-    cv = own[valid]
-    col = np.asarray(valid)[np.argmin(np.abs(xs[:, None] - cv[None, :]), axis=1)]
+    off, a, b = foreign_place(src_a, own_centres)
     block = src_sig[y0:y1].astype(float)
     W2 = block.shape[1]
-    for x in range(width):
-        i = int(col[x])
-        j = lane_map[i] if i < len(lane_map) else None
-        if j is None or j >= len(src_c) or not np.isfinite(src_c[j]):
-            continue
-        sx = src_c[j] + (xs[x] - own[i]) * k
-        if 0 <= sx < W2 - 1:
-            f = int(sx)
-            t = sx - f
-            out[:, x] = (1 - t) * block[:, f] + t * block[:, f + 1]
-    return out
+    sh = int(round(off))
+    xs = np.arange(width) + x0px - sh  # source column of every figure column
+    lo, hi = max(0, int(np.floor(a))), min(W2, int(np.ceil(b)))
+    ok = (xs >= lo) & (xs < hi)
+    out[:, ok] = block[:, xs[ok]]
+    return out, lo + sh, hi + sh
 
 
 def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[np.ndarray] = None,
@@ -530,17 +533,14 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
     left = 0.04 + label_w + kda_l + strip_w + strip_gap  # x of the blot panels
     total_w = left + panel_w + kda_r + right_w + 0.08
     gap = float(s["panel_gap_in"])
-    own_pitch = lane_pitch(a)
+
     multi = bool(sources) and any(p.get("doc") for p, *_ in panels)
     image_gap = float(s.get("image_gap_pt", 6.0)) / 72.0
     MISSING_H = 0.22
 
     def k_of(p, ri):
-        """Source pitch / own pitch of a panel from another image (1 for this image's own)."""
-        if not p.get("doc") or ri == MISSING or not sources or own_pitch <= 0:
-            return 1.0
-        sp = lane_pitch(sources[p["doc"]]["analysis"])
-        return sp / own_pitch if sp > 0 else 1.0
+        """1.4.6: blots from other images keep their own size (no scaling)."""
+        return 1.0
 
     def panel_h(it):
         p, ri, y0, y1 = it
@@ -710,8 +710,7 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             continue
         if foreign:
             src_d = sources[p["doc"]]
-            lmap = panel_lane_map(a, s, p, src_d["analysis"])
-            crop = foreign_strip(src_d["signal"], src_d["analysis"], y0, y1, lmap, centres, x0px, x1px, k_of(p, ri))
+            crop, fa, fb = foreign_shifted(src_d["signal"], src_d["analysis"], y0, y1, centres, x0px, x1px)
             ok = np.isfinite(crop)
             ref = crop[ok] if ok.any() else np.zeros(1)
             if not p.get("auto_range", True):
@@ -723,15 +722,11 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             crop = src[y0:y1, x0px:x1px]
             disp = _stretch(crop, s["lo_pct"], s["hi_pct"], s["gamma"], None if s.get("per_panel", True) else ref_all)
         px0, pw_ = left, panel_w
-        if foreign and p.get("missing") == "cut":  # 잘라내기: the frame spans only the matched lanes
-            lmap = panel_lane_map(a, s, p, sources[p["doc"]]["analysis"])
-            cols = [i for i, j in enumerate(lmap) if j is not None and i < len(xs) and np.isfinite(xs[i])]
-            if cols:
-                xa = max(left, xs[cols[0]] - 0.5 * pitch)
-                xb = min(left + panel_w, xs[cols[-1]] + 0.5 * pitch)
-                c0, c1 = int(round((xa - left) / scale)), int(round((xb - left) / scale))
-                disp = disp[:, max(0, c0):max(c0 + 1, c1)]
-                px0, pw_ = xa, max(xb - xa, 0.01)
+        if foreign:  # the frame spans the other blot's lanes only (first to last lane)
+            c0 = int(max(0, min(fa - x0px, x1px - x0px - 1)))
+            c1 = int(max(c0 + 1, min(fb - x0px, x1px - x0px)))
+            disp = disp[:, c0:c1]
+            px0, pw_ = left + c0 * scale, max((c1 - c0) * scale, 0.01)
         ax = fig.add_axes([px0 / total_w, (total_h - y - h) / total_h, pw_ / total_w, h / total_h])
         ax.imshow(1.0 - disp, cmap="gray", vmin=0, vmax=1, aspect="auto", interpolation="antialiased")
         _frame(ax, s["frame_lw"])

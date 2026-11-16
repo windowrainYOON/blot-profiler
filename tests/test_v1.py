@@ -214,7 +214,7 @@ def test_red_lines_lead_detection():
 
 def test_multi_blot_figure_panels():
     """Panels from another image stack under this image's panels on the same lane columns;
-    a missing lane is a white cell; a panel whose image is not open keeps a grey place."""
+    only moved sideways (not cut, not resized); a panel whose image is not open keeps a grey place."""
     from matplotlib.figure import Figure
     from blot_profiler import figure
 
@@ -236,10 +236,17 @@ def test_multi_blot_figure_panels():
     docs = [p.get("doc") for p in lay["panels"]]
     assert docs.count("/x/other.tif") == 1 and docs.count("/x/gone.tif") == 1
     own_c = figure.lane_centres(a)
-    strip = figure.foreign_strip(b_sig, b, 0, 10, figure.default_lane_map(len(own_c), b.n_lanes), own_c,
-                                 int(min(c for c in own_c) - 5), int(max(own_c) + 5), 1.0)
-    if b.n_lanes < a.n_lanes:
-        assert np.isnan(strip[:, -1]).all()  # the last figure column has no lane in the other image
+    x0, x1 = int(min(own_c) - 5), int(max(own_c) + 5)
+    strip, fa, fb = figure.foreign_shifted(b_sig, b, 0, 10, own_c, x0, x1)
+    off, a0, b0 = figure.foreign_place(b, own_c)
+    src_c = figure.lane_centres(b)
+    # moved only: the midpoint of the first and last lanes lands on the figure's midpoint
+    assert abs((src_c[0] + src_c[-1]) / 2 + off - (own_c[0] + own_c[-1]) / 2) < 1e-6
+    # not cut and not resized: every shown column is the other image's own column, shifted
+    sh = int(round(off))
+    cols = [c for c in range(x1 - x0) if np.isfinite(strip[0, c])]
+    assert cols and all(np.allclose(strip[:, c], b_sig[0:10, c + x0 - sh]) for c in cols)
+    assert cols == list(range(cols[0], cols[-1] + 1))  # one piece, no empty cells inside
     # without sources (export of an old project): the other images' panels are left out
     lay2 = figure.render(Figure(), corr, a, s)
     assert all(not p.get("doc") for p in lay2["panels"])

@@ -1993,10 +1993,6 @@ class FigureEditor(QtWidgets.QWidget):
     def _foreign(self, did):
         return [p for p in self.s["panels"] if p.get("doc") == did]
 
-    def _match_count(self, d):
-        lm = figure.match_lanes(self.doc.analysis, d.analysis, self.s.get("lane_match", "name"))
-        return sum(1 for j in lm if j is not None), len(lm)
-
     def refresh_blots(self):
         """그림에 넣을 블롯: every open image with a check box and its protein chips."""
         if self.doc is None or not hasattr(self, "blot_lay"):
@@ -2033,9 +2029,7 @@ class FigureEditor(QtWidgets.QWidget):
             elif d.mode == core.MODE_GEL:
                 note, color = _t("겔"), None
             else:
-                got, n = self._match_count(d)
-                note = _t("레인 {0}/{1}").format(got, n)
-                color = "#c93400" if got < n else None
+                note, color = _t("레인 {0}개").format(len(figure.lane_centres(d.analysis))), None
             nl = QtWidgets.QLabel(note)
             if color:
                 nl.setStyleSheet(f"color: {color}; font-size: 11px;")
@@ -2149,15 +2143,10 @@ class FigureEditor(QtWidgets.QWidget):
             if sd is None:
                 msgs.append(_t("'{0}'의 이미지가 열려 있지 않습니다").format(p.get('label')))
                 continue
-            lm = figure.panel_lane_map(a, self.s, p, sd["analysis"])
-            miss = [a.lane_labels[i] for i, j in enumerate(lm) if j is None and i < len(a.lane_labels)]
-            if miss:
-                names = list(dict.fromkeys(miss))
-                msgs.append(_t("{0}에는 {1} 레인이 없어 그 칸을 비웠습니다").format(sd['tag'], ', '.join(names)))
         msgs = list(dict.fromkeys(msgs))
         if msgs:
             self.status(msgs[0] + (_t(" (외 {0}개)").format(len(msgs) - 1) if len(msgs) > 1 else ""))
-        elif self.foot_msg.text().startswith("● ") and _t("레인이 없어") in self.foot_msg.text():
+        elif self.foot_msg.text().startswith("● ") and _t("열려 있지 않습니다") in self.foot_msg.text():
             self.status("")
 
     def select_from_list(self, row):
@@ -3476,7 +3465,7 @@ class FigureEditor(QtWidgets.QWidget):
         s = self.s
         src = self.sources()
         f = self._p_box(_t("여러 블롯 · 그림 전체"))
-        self._p_combo(f, _t("레인 맞추기"), [(_t("레인 이름"), "name"), (_t("순서대로"), "order")], s.get("lane_match", "name"),
+        self._p_combo(f, _t("숫자 줄 레인 맞추기"), [(_t("레인 이름"), "name"), (_t("순서대로"), "order")], s.get("lane_match", "name"),
                       lambda v: s.__setitem__("lane_match", v))
         ref = QtWidgets.QLabel(src.get("__own__", {}).get("tag", ""))
         ref.setToolTip(_t("레인 이름 줄 · 그룹 막대 · 조건 글자 · kDa 눈금은 기준 이미지 것을 씁니다.\n기준을 바꾸려면 메인 창에서 그 이미지를 고른 뒤 Figure를 여세요."))
@@ -3513,11 +3502,9 @@ class FigureEditor(QtWidgets.QWidget):
                 if p.get("label", "").startswith("IB: "):
                     p["label"] = f"IB: {name}"
             self._p_combo(f, _t("단백질 줄"), rows, p.get("src_row"), set_row)
-            lm = figure.panel_lane_map(self.doc.analysis, s, p, sd["analysis"])
-            got = sum(1 for j in lm if j is not None)
-            how = _t("레인 이름으로") if s.get("lane_match", "name") == "name" else _t("순서대로")
-            lab = QtWidgets.QLabel(f"{got} / {len(lm)}")
-            lab.setToolTip(_t("{0} 맞춘 레인 수 (없는 레인은 빈 칸)").format(how))
+            lab = QtWidgets.QLabel(_t("자르거나 늘리지 않고 첫·끝 레인 위치만 맞춤"))
+            lab.setWordWrap(True)
+            lab.setStyleSheet("color: #6b7280;")
             f.addRow(_t("레인"), lab)
         self._p_line(f, _t("라벨"), p.get("label", ""), lambda v: p.__setitem__("label", v))
         f = self._p_box("")
