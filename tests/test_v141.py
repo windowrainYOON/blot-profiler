@@ -35,8 +35,9 @@ def _window(tmp_path, n=4):
 def _boxes(ed):
     """{image key (I1 …): check box} of the 그림에 넣을 블롯 list as it is shown now."""
     from PySide6 import QtCore, QtWidgets
+    from PySide6.QtTest import QTest
 
-    QtCore.QCoreApplication.processEvents()
+    QTest.qWait(30)  # time-bounded: a bare processEvents() never returned on the Windows runner
     QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
     out = {}
     for i in range(ed.blot_lay.count()):
@@ -44,7 +45,7 @@ def _boxes(ed):
         if wd is None:
             continue
         for cb in wd.findChildren(QtWidgets.QCheckBox):
-            out[cb.text().split(" · ")[0]] = cb
+            out[cb.full_text().split(" · ")[0]] = cb
     return out
 
 
@@ -54,6 +55,8 @@ def _in_figure(ed):
 
 
 def test_each_region_is_its_own_image(tmp_path):
+    from PySide6 import QtWidgets
+
     w, ed = _window(tmp_path)
     docs = w.loaded_docs()
     assert len({ed.doc_id(d) for d in docs}) == len(docs)  # one file, four ids
@@ -78,10 +81,28 @@ def test_each_region_is_its_own_image(tmp_path):
         _boxes(ed)[key].click()
     assert not _in_figure(ed)
     assert not any(b.isChecked() for k, b in _boxes(ed).items() if k != "I4")
+    # the window settles: no endless stream of events once the list is rebuilt
+    from PySide6 import QtCore
+    from PySide6.QtTest import QTest
+
+    class Count(QtCore.QObject):
+        n = 0
+
+        def eventFilter(self, obj, ev):
+            Count.n += 1
+            return False
+
+    c = Count()
+    app = QtWidgets.QApplication.instance()
+    QTest.qWait(300)
+    app.installEventFilter(c)
+    QTest.qWait(500)
+    app.removeEventFilter(c)
+    assert Count.n < 5000, Count.n
 
 
 def test_protein_chips_follow_their_image(tmp_path):
-    from PySide6 import QtCore, QtWidgets
+    from PySide6 import QtWidgets
 
     w, ed = _window(tmp_path, n=3)
     docs = w.loaded_docs()
@@ -97,7 +118,7 @@ def test_protein_chips_follow_their_image(tmp_path):
             wd = ed.blot_lay.itemAt(i).widget()
             cbs = wd.findChildren(QtWidgets.QCheckBox)
             if cbs:
-                key = cbs[0].text().split(" · ")[0]
+                key = cbs[0].full_text().split(" · ")[0]
                 continue
             out[key] = {b.text(): b.isChecked() for b in wd.findChildren(QtWidgets.QPushButton)}
         return out
@@ -109,7 +130,8 @@ def test_protein_chips_follow_their_image(tmp_path):
     btn = next(b for b in ed.blot_lay.parentWidget().findChildren(QtWidgets.QPushButton)
                if b.text() == extra and b.isVisible() and _owner(ed, b) == "I1")
     btn.click()
-    QtCore.QCoreApplication.processEvents()
+    from PySide6.QtTest import QTest
+    QTest.qWait(30)
     after = chips()
     assert after["I1"][extra] and sum(after["I1"].values()) == 2
     assert after["I2"] == before["I2"]  # I2 untouched
@@ -125,7 +147,7 @@ def _owner(ed, button):
 
         cbs = wd.findChildren(QtWidgets.QCheckBox)
         if cbs:
-            key = cbs[0].text().split(" · ")[0]
+            key = cbs[0].full_text().split(" · ")[0]
         elif button in wd.findChildren(QtWidgets.QPushButton):
             return key
     return None
