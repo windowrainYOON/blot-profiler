@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import uuid
 import re
 import sys
 import traceback
@@ -2252,6 +2253,9 @@ class ImageDoc:
 
     def __init__(self, invert: int = 0, bg: Optional[core.BackgroundSettings] = None):
         self.image_path: Optional[str] = None
+        # 1.4.1: own id, saved with the project. Panels from other images in a Figure point at it;
+        # the file path is not enough (several blot regions of one file, the same file twice)
+        self.uid: str = uuid.uuid4().hex
         self.project: str = ""  # name of the project file the image came from (several projects open together)
         self.raw: Optional[np.ndarray] = None
         self.signal: Optional[np.ndarray] = None
@@ -4897,6 +4901,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, _t("열기 실패"), _t("이미지를 열 수 없습니다:\n{0}").format(e))
             return
         d = doc or self.new_doc()
+        d.uid = uuid.uuid4().hex  # a new picture in this tab: figures must not take it for the old one
         d.raw_orig = raw
         d.transform = core.default_transform()
         d.marker_orig = None
@@ -6143,6 +6148,7 @@ class MainWindow(QtWidgets.QMainWindow):
             marker = (d.figure or {}).get("marker_path") if d.marker is not None else None
             images.append({
                 "image_path": d.image_path,  # older versions read this
+                "uid": d.uid,
                 "image": projfile.file_ref(d.image_path, pp, arc.get(d.image_path)),
                 "marker": projfile.file_ref(marker, pp, arc.get(marker)) if marker else None,
                 "invert": d.invert, "background": vars(d.bg), "reference_lane": d.ref_lane,
@@ -6446,13 +6452,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _project_docs(self, p, d, embedded, images, proj_name):
         """ImageDocs of a project file; also {index in the file: index in the list}."""
-        docs, index = [], {}
+        docs, index, legacy = [], {}, {}
         for i, im in enumerate(images):
             path = self._relocate(_t("블롯 이미지"), im.get("image") or im.get("image_path"), p, embedded)
             if not path:
                 continue
             doc = ImageDoc(invert=int(im.get("invert") or 0), bg=core.BackgroundSettings(**(im.get("background") or {})))
             doc.project = im.get("project") or proj_name
+            if im.get("uid"):
+                doc.uid = str(im["uid"])
             doc.raw_orig = core.load_image(path)
             doc.transform = dict(core.default_transform(), **(im.get("transform") or {}))
             doc.raw = core.apply_transform(doc.raw_orig, doc.transform)
@@ -6476,12 +6484,36 @@ class MainWindow(QtWidgets.QMainWindow):
                     doc.figure["marker_path"] = None
             index[i] = len(docs)
             docs.append(doc)
+            legacy[os.path.abspath(im.get("image_path") or path)] = doc  # ≤1.4.0 panels named the file
+        self._fix_doc_refs(docs, legacy)
         # format 2 kept formulas for all images in one list, each with a base image
         for fml in d.get("formulas", []):
             k = index.get(int(fml.get("image", 0)))
             if k is not None:
                 docs[k].analysis.formulas.append({x: fml[x] for x in ("name", "expr", "normalize") if x in fml})
         return docs, index
+
+    def _fix_doc_refs(self, docs, legacy):
+        """Panels from other images (Figure) point at ImageDoc.uid. Projects saved by 1.4.0 and
+        older used the file path; a project added twice would repeat uids. Both are fixed here."""
+        taken = {d.uid for d in self.docs if d.raw is not None and d not in docs}
+        renamed = {}
+        for d in docs:
+            if d.uid in taken:
+                new = uuid.uuid4().hex
+                renamed[d.uid] = new
+                d.uid = new
+            taken.add(d.uid)
+        ids = {d.uid for d in docs}
+        for d in docs:
+            for p in (d.figure or {}).get("panels", []):
+                ref = p.get("doc")
+                if not ref:
+                    continue
+                if ref in renamed:
+                    p["doc"] = renamed[ref]
+                elif ref not in ids and ref in legacy:
+                    p["doc"] = legacy[ref].uid
 
     def export_csv(self):
         if not any(d.measurements for d in self.loaded_docs()):
