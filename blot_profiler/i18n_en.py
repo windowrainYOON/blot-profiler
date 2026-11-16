@@ -699,6 +699,8 @@ EN = {
     "각도": "Angle",
     "크기 (pt):": "Size (pt):",
     "그림에 넣을 블롯": "Blots in the figure",
+    "밴드 없음": "no bands",
+    "{0}\n이 이미지에서 밴드를 먼저 찾으면 그림에 넣을 수 있습니다": "{0}\nFind the bands in this image first to add it to the figure",
     "추가": "Add",
     "이름 층 (위에 한 줄)": "Name tier (one row on top)",
     "그룹 막대": "Group bar",
