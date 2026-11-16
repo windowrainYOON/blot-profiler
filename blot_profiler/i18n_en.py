@@ -700,6 +700,7 @@ EN = {
     "크기 (pt):": "Size (pt):",
     "그림에 넣을 블롯": "Blots in the figure",
     "밴드 없음": "no bands",
+    "블롯을 {0}로 옮겼습니다": "Moved the blot {0}",
     "닫힌 이미지 · {0}": "Closed image · {0}",
     "이 패널의 이미지가 열려 있지 않습니다. 체크를 풀면 그림에서 뺍니다": "This panel's image is not open. Untick to take it out of the figure",
     "단백질 선을 새로 그으면 그 선의 기울기만큼 블롯(마커 포함)을 돌려 선이 수평이 되게 합니다.\n그어 둔 레인 선 · 단백질 선 · 밴드 박스도 같이 돌아갑니다. '회전 각도'에서 확인 · 되돌릴 수 있습니다": "Drawing a new protein line turns the blot (with its marker) by the line's slope so that the line is level.\nLane lines, protein lines and band boxes already drawn turn with it. Check or undo it in 'Rotation angle'",
