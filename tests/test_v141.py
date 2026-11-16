@@ -45,7 +45,7 @@ def _boxes(ed):
         if wd is None:
             continue
         for cb in wd.findChildren(QtWidgets.QCheckBox):
-            out[cb.text().split(" · ")[0]] = cb
+            out[cb.full_text().split(" · ")[0]] = cb
     return out
 
 
@@ -118,7 +118,7 @@ def test_protein_chips_follow_their_image(tmp_path):
             wd = ed.blot_lay.itemAt(i).widget()
             cbs = wd.findChildren(QtWidgets.QCheckBox)
             if cbs:
-                key = cbs[0].text().split(" · ")[0]
+                key = cbs[0].full_text().split(" · ")[0]
                 continue
             out[key] = {b.text(): b.isChecked() for b in wd.findChildren(QtWidgets.QPushButton)}
         return out
@@ -147,7 +147,7 @@ def _owner(ed, button):
 
         cbs = wd.findChildren(QtWidgets.QCheckBox)
         if cbs:
-            key = cbs[0].text().split(" · ")[0]
+            key = cbs[0].full_text().split(" · ")[0]
         elif button in wd.findChildren(QtWidgets.QPushButton):
             return key
     return None

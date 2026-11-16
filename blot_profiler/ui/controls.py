@@ -153,6 +153,36 @@ class Collapsible(QtWidgets.QWidget):
         self.body.setVisible(on)
 
 
+def sync_items(lst: QtWidgets.QListWidget, rows, check=None):
+    """Make the rows of ``lst`` read ``rows`` [(text, tooltip)] without QListWidget.clear().
+
+    1.4.3: clear() deleted every item at once, often inside the click that changed them (a
+    release on the Figure preview, a click on a row); PySide then crashed in the item's
+    destructor (SIGSEGV / heap corruption: 'the app quits on its own'). Rows are now rewritten
+    in place; extra rows are taken out and kept alive until the next call, so nothing is
+    deleted while Qt still delivers an event to it. ``check``: {text: Qt.CheckState} for
+    check-box rows."""
+    old = getattr(lst, "_spare_items", [])
+    lst._spare_items = []  # the ones taken out last time may go now
+    del old
+    for i, (text, tip) in enumerate(rows):
+        it = lst.item(i)
+        if it is None:
+            it = QtWidgets.QListWidgetItem(text)
+            if check is not None:
+                it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            lst.addItem(it)
+        elif it.text() != text:
+            it.setText(text)
+        it.setToolTip(tip or "")
+        if check is not None:
+            st = check.get(text, Qt.Checked)
+            if it.checkState() != st:
+                it.setCheckState(st)
+    while lst.count() > len(rows):
+        lst._spare_items.append(lst.takeItem(lst.count() - 1))
+
+
 class SideList(QtWidgets.QListWidget):
     """Rows of the sidebar (selection = accent pill); a row may carry a grey note on the right."""
 
@@ -169,11 +199,7 @@ class SideList(QtWidgets.QListWidget):
 
     def set_rows(self, rows: List[Tuple[str, str]], current: int = -1):
         self.blockSignals(True)
-        self.clear()
-        for text, note in rows:
-            it = QtWidgets.QListWidgetItem(f"{text}    {note}" if note else text)
-            it.setToolTip(text)
-            self.addItem(it)
+        sync_items(self, [(f"{text}    {note}" if note else text, text) for text, note in rows])
         if 0 <= current < self.count():
             self.setCurrentRow(current)
         self.blockSignals(False)
