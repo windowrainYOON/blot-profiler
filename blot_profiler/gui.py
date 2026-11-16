@@ -373,21 +373,37 @@ class BlotView(QtWidgets.QGraphicsView):
         if not r.isEmpty():
             self.scene().setSceneRect(r.adjusted(-20, -30, 20, 20))
 
+    def _scrollbars(self, on: bool):
+        pol = Qt.ScrollBarAsNeeded if on else Qt.ScrollBarAlwaysOff
+        if self.horizontalScrollBarPolicy() != pol:
+            self.setHorizontalScrollBarPolicy(pol)
+            self.setVerticalScrollBarPolicy(pol)
+
     def fit(self):
-        r = self.content_rect()
-        if not r.isEmpty():
-            self.fitInView(r.adjusted(-10, -26, 10, 10), Qt.KeepAspectRatio)
-        self.auto_fit = True
+        if getattr(self, "_fitting", False):
+            return
+        self._fitting = True
+        try:
+            # 1.4.3: a fitted picture needs no scroll bars. With them, Windows (scroll bars that
+            # take room) went round for ever: fit → bar shows → view smaller → fit → bar hides …
+            self._scrollbars(False)
+            r = self.content_rect()
+            if not r.isEmpty():
+                self.fitInView(r.adjusted(-10, -26, 10, 10), Qt.KeepAspectRatio)
+            self.auto_fit = True
+        finally:
+            self._fitting = False
         self.zoomChanged.emit(self.transform().m11())
 
     def zoom(self, factor: float):
         self.auto_fit = False
+        self._scrollbars(True)
         self.scale(factor, factor)
         self.zoomChanged.emit(self.transform().m11())
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        if self.auto_fit:  # the image follows the size of the window until the user zooms
+        if self.auto_fit and not getattr(self, "_fitting", False):  # follows the window until the user zooms
             self.fit()
 
     def set_analysis(self, a: core.Analysis):
@@ -937,7 +953,9 @@ class BlotView(QtWidgets.QGraphicsView):
             self._pan = e.position()
             self.horizontalScrollBar().setValue(int(self.horizontalScrollBar().value() - d_.x()))
             self.verticalScrollBar().setValue(int(self.verticalScrollBar().value() - d_.y()))
-            self.auto_fit = False
+            if self.auto_fit:
+                self.auto_fit = False
+                self._scrollbars(True)
             return
         if self._tool_move(e):
             return
