@@ -789,14 +789,15 @@ class PreviewLabel(QtWidgets.QLabel):
             rows = [p for p in self.layout_["panels"]
                     if sel.get("kind") == "blot" and not p.get("doc") or p["row"] == sel.get("row")]
             for p in rows:
-                xr = p["x_blot"] + pw
-                if p["x_blot"] - tol <= x <= xr + tol:
+                xl = p.get("fx", p["x_blot"])  # another image's blot: its frame as drawn
+                xr = xl + p.get("fw", pw)
+                if xl - tol <= x <= xr + tol:
                     if abs(y - p["y"]) < tol:
                         return {"type": "edge", "edge": "top", "panel": p}
                     if abs(y - (p["y"] + p["h"])) < tol:
                         return {"type": "edge", "edge": "bottom", "panel": p}
                 if p["y"] - tol <= y <= p["y"] + p["h"] + tol:
-                    if abs(x - p["x_blot"]) < tol:
+                    if abs(x - xl) < tol:
                         return {"type": "edge", "edge": "left", "panel": p}
                     if abs(x - xr) < tol:
                         return {"type": "edge", "edge": "right", "panel": p}
@@ -2745,6 +2746,21 @@ class FigureEditor(QtWidgets.QWidget):
         i = shown.index(row)
         if n in (i, i + 1):
             return
+        if row.startswith(figure.GEL_ROW):  # Full blot: a whole image moves (all its panels, as a block)
+            doc_of = lambda r: r.split(":", 1)[1] if ":" in r else ""  # noqa: E731
+            me_doc = doc_of(row)
+            block = [p for p in self.s["panels"] if (p.get("doc") or "") == me_doc]
+            rest = [p for p in self.s["panels"] if (p.get("doc") or "") != me_doc]
+            if n < len(shown):
+                tgt = doc_of(shown[n])
+                at = next((j for j, p in enumerate(rest) if (p.get("doc") or "") == tgt), len(rest))
+            else:
+                at = len(rest)
+            self.s["panels"] = rest[:at] + block + rest[at:]
+            self.load_from_settings()
+            self.render()
+            self.status(_t("블롯을 {0}로 옮겼습니다").format(_t("위") if n < i else _t("아래")))
+            return
         panels = list(self.s["panels"])
         me = next((p for p in panels if p["row"] == row), None)
         if me is None:
@@ -3602,6 +3618,26 @@ class FigureEditor(QtWidgets.QWidget):
         if not scale:
             return
         d = int(round(d_in / scale))  # blot pixels
+        if row.startswith(figure.GEL_ROW + ":"):  # Full blot of another image: its own crop
+            sd = self.sources().get(row.split(":", 1)[1])
+            if sd is None:
+                return
+            od = sd["doc"]
+            if od.figure is None:
+                od.figure = figure.default_settings()
+            H, W = sd["signal"].shape
+            x0, y0, x1, y1 = od.figure.get("gel_crop") or figure.default_gel_crop(od.analysis, (H, W))
+            if edge == "top":
+                y0 = min(max(0, y0 + d), y1 - 4)
+            elif edge == "bottom":
+                y1 = max(min(H, y1 + d), y0 + 4)
+            elif edge == "left":
+                x0 = min(max(0, x0 + d), x1 - 4)
+            else:
+                x1 = max(min(W, x1 + d), x0 + 4)
+            od.figure["gel_crop"] = [int(x0), int(y0), int(x1), int(y1)]
+            self.render()
+            return
         if self.s.get("layout") == "full":
             H, W = self.doc.raw.shape
             x0, y0, x1, y1 = self.s.get("gel_crop") or figure.default_gel_crop(self.doc.analysis, (H, W))

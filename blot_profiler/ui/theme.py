@@ -429,7 +429,7 @@ def unify(page: QWidget):
         root.setSpacing(PAGE_SPACING)
     for w in page.findChildren(QWidget):
         lay = w.layout()
-        if lay is None:
+        if lay is None or not isinstance(lay, QLayout):  # a stale wrapper (seen once as QWidgetItem): skip
             continue
         if isinstance(w, QGroupBox):
             lay.setContentsMargins(*GROUP_MARGINS)
