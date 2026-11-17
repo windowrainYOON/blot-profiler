@@ -212,8 +212,11 @@ def layout_panels(a: core.Analysis, s: dict, shape, sources: Optional[dict] = No
         y0, y1 = max(0, int(y0)), min(H, int(y1))
         if x1 - x0 < 4 or y1 - y0 < 4:
             x0, y0, x1, y1 = default_gel_crop(a, shape)
-        out = [({"row": GEL_ROW, "label": s.get("gel_label", ""), "show": True}, -1, y0, y1)]
-        return out + _foreign_gels(s, sources), x0, x1
+        own_at = next((i for i, p in enumerate(s.get("panels", [])) if not p.get("doc")), -1)
+        out = [({"row": GEL_ROW, "label": s.get("gel_label", ""), "show": True, "at": own_at}, -1, y0, y1)]
+        out += _foreign_gels(s, sources)
+        out.sort(key=lambda it: it[0]["at"])  # 1.4.8: the images in the order of their panels (draggable)
+        return out, x0, x1
     x0, x1 = crop_x(a, s, W)
     return panel_rows(a, s, H, sources), x0, x1
 
@@ -224,7 +227,7 @@ def _foreign_gels(s: dict, sources: Optional[dict]):
     if not sources:
         return []
     out, seen = [], set()
-    for p in s.get("panels", []):
+    for at, p in enumerate(s.get("panels", [])):
         did = p.get("doc")
         if not did or did in seen or not p.get("show", True):
             continue
@@ -232,7 +235,7 @@ def _foreign_gels(s: dict, sources: Optional[dict]):
         row = f"{GEL_ROW}:{did}"
         src = sources.get(did)
         if src is None:
-            out.append(({"row": row, "doc": did, "label": "", "show": True, "gel": True}, MISSING, 0, 0))
+            out.append(({"row": row, "doc": did, "label": "", "show": True, "gel": True, "at": at}, MISSING, 0, 0))
             continue
         sa, (sh, sw) = src["analysis"], src["signal"].shape
         fs = src.get("figure") or {}
@@ -240,7 +243,7 @@ def _foreign_gels(s: dict, sources: Optional[dict]):
         y0, y1 = max(0, int(crop[1])), min(sh, int(crop[3]))
         if y1 - y0 < 4:
             _, y0, _, y1 = default_gel_crop(sa, (sh, sw))
-        out.append(({"row": row, "doc": did, "label": "", "show": True, "gel": True}, -1, y0, y1))
+        out.append(({"row": row, "doc": did, "label": "", "show": True, "gel": True, "at": at}, -1, y0, y1))
     return out
 
 
@@ -466,39 +469,52 @@ def lane_pitch(a: core.Analysis) -> float:
     return float(np.median(np.diff(sorted(c)))) if len(c) > 1 else 0.0
 
 
-def foreign_place(src_a: core.Analysis, own_centres) -> Tuple[float, float, float]:
-    """1.4.6: a blot from another image is neither cut per lane nor resized; it is only moved
-    sideways so that its first and last lanes sit as near as they can to this figure's first and
-    last lanes (the difference, when the spacing differs, is split between both ends).
-    Returns (offset, a, b): own x = source x + offset; the source's lane span is [a, b)."""
+def foreign_place(src_a: core.Analysis, own_centres) -> Tuple[float, float, float, float]:
+    """How a blot from another image sits under this figure's lanes (never cut per lane).
+
+    1.4.8: it is scaled so its lane spacing equals this figure's, with its aspect ratio kept
+    (the same factor across and down), and moved sideways so its first and last lanes sit as
+    near as they can to this figure's first and last lanes.
+    Returns (f, offset, a, b): own x = f * source x + offset; the source's lane span is [a, b)."""
     own = sorted(c for c in own_centres if np.isfinite(c))
     src = sorted(c for c in lane_centres(src_a) if np.isfinite(c))
     if not own or not src:
-        return 0.0, -np.inf, np.inf
-    off = (own[0] + own[-1]) / 2.0 - (src[0] + src[-1]) / 2.0
-    half = (float(np.median(np.diff(src))) if len(src) > 1 else
-            float(np.median(np.diff(own))) if len(own) > 1 else 20.0) / 2.0
-    return off, src[0] - half, src[-1] + half
+        return 1.0, 0.0, -np.inf, np.inf
+    f = 1.0
+    if len(own) > 1 and len(src) > 1:
+        sp, op = float(np.median(np.diff(src))), float(np.median(np.diff(own)))
+        if sp > 0 and op > 0:
+            f = float(min(5.0, max(0.2, op / sp)))
+    off = (own[0] + own[-1]) / 2.0 - f * (src[0] + src[-1]) / 2.0
+    pitch = float(np.median(np.diff(src))) if len(src) > 1 else (
+        float(np.median(np.diff(own))) / f if len(own) > 1 else 20.0)
+    return f, off, src[0] - pitch / 2.0, src[-1] + pitch / 2.0
 
 
 def foreign_shifted(src_sig: np.ndarray, src_a: core.Analysis, y0: int, y1: int, own_centres,
-                    x0px: int, x1px: int, span=None) -> Tuple[np.ndarray, float, float]:
-    """The other image's rows y0:y1 as one piece, moved by ``foreign_place``, on this figure's
-    columns x0px:x1px (whole pixels, same scale). Columns outside its lane span are NaN.
-    Also returns the span in this figure's pixels (for the frame)."""
-    width = max(1, x1px - x0px)
-    out = np.full((max(1, y1 - y0), width), np.nan)
-    off, a, b = foreign_place(src_a, own_centres)
+                    x0px: int, x1px: int, span=None):
+    """The other image's rows y0:y1 as one piece, scaled and moved by ``foreign_place``, on this
+    figure's columns x0px:x1px; its rows are scaled by the same factor (aspect ratio kept).
+    Columns outside its lane span (or ``span``, in source pixels) are NaN.
+    Returns (image, frame start, frame end in this figure's pixels, factor)."""
+    f, off, a, b = foreign_place(src_a, own_centres)
     if span is not None:  # Full blot: the other image's whole-blot crop instead of its lane span
         a, b = span
+    width = max(1, x1px - x0px)
+    n = max(1, int(round((y1 - y0) * f)))
     block = src_sig[y0:y1].astype(float)
-    W2 = block.shape[1]
-    sh = int(round(off))
-    xs = np.arange(width) + x0px - sh  # source column of every figure column
-    lo, hi = max(0, int(np.floor(a))), min(W2, int(np.ceil(b)))
-    ok = (xs >= lo) & (xs < hi)
-    out[:, ok] = block[:, xs[ok]]
-    return out, lo + sh, hi + sh
+    H2, W2 = block.shape
+    lo, hi = max(0.0, float(np.floor(a))), min(float(W2), float(np.ceil(b)))
+    xs = (np.arange(width) + x0px - off) / f  # source column of every figure column
+    ok = (xs >= lo) & (xs <= hi - 1)
+    out = np.full((n, width), np.nan)
+    if ok.any() and H2:
+        from scipy import ndimage as ndi
+
+        ys = np.clip((np.arange(n) + 0.5) / f - 0.5, 0, H2 - 1)
+        yy, xx = np.meshgrid(ys, xs[ok], indexing="ij")
+        out[:, ok] = ndi.map_coordinates(block, [yy, xx], order=1, mode="nearest")
+    return out, lo * f + off, hi * f + off, f
 
 
 def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[np.ndarray] = None,
@@ -566,10 +582,23 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             return []
         return sorted((k for k in fs.get("kda", []) if k.get("kda") not in (None, "")), key=lambda k: k["y"])
 
+    own_c = lane_centres(a)
+    _fac = {}
+
+    def fac(p):
+        """Size factor of a panel's blot: 1 for this image; another image's blot is scaled to
+        this figure's lane spacing (1.4.8, aspect ratio kept)."""
+        did = p.get("doc")
+        if not did or did not in (sources or {}):
+            return 1.0
+        if did not in _fac:
+            _fac[did] = foreign_place(sources[did]["analysis"], own_c)[0]
+        return _fac[did]
+
     shown_p = [p for p, ri, *_ in panels if ri != MISSING]
-    strips = [strip_of(p) for p in shown_p]
-    show_strip = any(st is not None for st in strips)
-    strip_w = max(((int(fs["strip_x1"]) - int(fs["strip_x0"])) * scale for st in strips if st for _, fs in [st]),
+    strips = [(strip_of(p), fac(p)) for p in shown_p]
+    show_strip = any(st is not None for st, _ in strips)
+    strip_w = max(((int(st[1]["strip_x1"]) - int(st[1]["strip_x0"])) * scale * k for st, k in strips if st),
                   default=0.0)
     strip_gap = float(s.get("strip_gap_in", 0.0)) if show_strip else 0.0
     all_kda = [k for p in shown_p for k in kda_of(p)]
@@ -610,8 +639,8 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
     MISSING_H = 0.22
 
     def k_of(p, ri):
-        """1.4.6: blots from other images keep their own size (no scaling)."""
-        return 1.0
+        """Source pixels per figure pixel of a panel (another image's blot is scaled, 1.4.8)."""
+        return 1.0 if ri == MISSING else 1.0 / fac(p)
 
     def panel_h(it):
         p, ri, y0, y1 = it
@@ -786,7 +815,7 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
                 sa_ = src_d["analysis"]
                 gc = (src_d.get("figure") or {}).get("gel_crop") or default_gel_crop(sa_, src_d["signal"].shape)
                 span = (float(gc[0]), float(gc[2]))
-            crop, fa, fb = foreign_shifted(src_d["signal"], src_d["analysis"], y0, y1, centres, x0px, x1px, span)
+            crop, fa, fb, _ = foreign_shifted(src_d["signal"], src_d["analysis"], y0, y1, centres, x0px, x1px, span)
             ok = np.isfinite(crop)
             ref = crop[ok] if ok.any() else np.zeros(1)
             if not p.get("auto_range", True):
@@ -814,7 +843,7 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
         st = strip_of(p)
         if st is not None:  # each image's own marker strip, right-aligned next to its blot
             m_, fs = st
-            sw_ = (int(fs["strip_x1"]) - int(fs["strip_x0"])) * scale
+            sw_ = (int(fs["strip_x1"]) - int(fs["strip_x0"])) * scale * fac(p)
             dy_ = int(fs.get("strip_dy", 0))
             mcrop = marker_crop(m_, y0 + dy_, y1 + dy_, int(fs["strip_x0"]), int(fs["strip_x1"]))
             sx = fig.add_axes([(left - strip_gap - sw_) / total_w, (total_h - y - h) / total_h, sw_ / total_w, h / total_h])
@@ -830,11 +859,11 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             names_ = [] if foreign else full_names
         for fp, ry in names_:  # Full blot (Western): every protein's name at its own height
             if y0 <= ry <= y1:
-                side_text(f"protein:{fp['row']}", "protein", prot_side, y + (ry - y0) * scale, fp["label"], weight=weight)
+                side_text(f"protein:{fp['row']}", "protein", prot_side, y + (ry - y0) * scale * fac(p), fp["label"], weight=weight)
         for ki, k in enumerate(kda_of(p)):
             if not y0 <= k["y"] <= y1:
                 continue
-            ky = y + (k["y"] - y0) * scale
+            ky = y + (k["y"] - y0) * scale * fac(p)
             key = f"kda:{ki}" if not foreign else f"xkda:{p['doc']}:{ki}"
             if kda_side == "left":
                 xr = sx0 if show_strip else left
@@ -844,9 +873,9 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
                 xr = left + panel_w
                 hline(xr, xr + tick, ky, 0.6)
                 text(key, "kda", xr + tick + 0.02, ky, _fmt_kda(k["kda"]), ha="left", va="center")
-        if foreign:
+        if foreign:  # fx/fw: the frame as drawn (its edges are the resize handles)
             layout["panels"].append({"row": p["row"], "doc": p.get("doc"), "x": left, "x_blot": left, "y": y,
-                                     "w": panel_w, "h": h, "y0": y0, "y1": y1})
+                                     "w": panel_w, "h": h, "y0": y0, "y1": y1, "fx": px0, "fw": pw_})
         else:
             layout["panels"].append({"row": p["row"], "x": sx0 if show_strip else left, "x_blot": left, "y": y,
                                      "w": panel_w + strip_w + strip_gap, "h": h, "y0": y0, "y1": y1})
