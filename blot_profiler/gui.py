@@ -2596,7 +2596,7 @@ class MainWindow(QtWidgets.QMainWindow):
         hb = QtWidgets.QHBoxLayout()
         self.angle_main = _spin(-45.0, 45.0, 0.0, 0.1, 1, "°")
         self.angle_main.setProperty("hig_plain", True)  # a small value field, as in the mockup
-        self.angle_main.setFixedWidth(84)
+        self.angle_main.setFixedWidth(72)
         self.angle_main.setKeyboardTracking(False)
         self.angle_main.valueChanged.connect(lambda v: abs(self.angle_spin.value() - v) > 1e-6 and self.angle_spin.setValue(v))
         self.angle_spin.valueChanged.connect(lambda v: (self.angle_main.blockSignals(True), self.angle_main.setValue(v),
@@ -2617,7 +2617,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(g)
 
         g, f = controls.card()
-        self.lines_title = QtWidgets.QLabel()
+        self.lines_title = QtWidgets.QLabel(_t("레인 선 {0}개 · 단백질 선 {1}개").format(0, 0))
         self.lines_title.setStyleSheet("font-weight: 600;")
         f.addRow(self.lines_title)
         b2 = controls.prominent(QtWidgets.QPushButton(_t("밴드 찾기")))
@@ -2697,7 +2697,9 @@ class MainWindow(QtWidgets.QMainWindow):
         v = QtWidgets.QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(2)
-        v.addWidget(QtWidgets.QLabel(title))
+        t = QtWidgets.QLabel(title)
+        t.setWordWrap(True)  # 1.4.7: a long title wraps instead of widening the card past the inspector
+        v.addWidget(t)
         d = QtWidgets.QLabel(desc)
         d.setWordWrap(True)
         theme.hint(d)
