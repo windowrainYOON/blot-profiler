@@ -32,7 +32,9 @@ jobs:
       - name: Smoke test
         run: |
           QT_QPA_PLATFORM=offscreen .venv-build/bin/python -m pip install -q pytest
-          QT_QPA_PLATFORM=offscreen .venv-build/bin/python -m pytest -q tests
+          # pytest passes, then Qt sometimes crashes while Python shuts down (segfault 139) on the
+          # Intel runner: leave with pytest's own result before that teardown runs
+          QT_QPA_PLATFORM=offscreen .venv-build/bin/python -c "import os, sys, pytest; sys.stdout.flush(); c = pytest.main(['-q', 'tests']); sys.stdout.flush(); sys.stderr.flush(); os._exit(int(c))"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BUILD_NAME }}
