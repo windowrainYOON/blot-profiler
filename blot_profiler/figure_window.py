@@ -321,7 +321,9 @@ class PreviewLabel(QtWidgets.QLabel):
     Click: select a text, a lane cell, a tier (its ⋮⋮ grip), a panel or the marker strip.
     Drag a text: move it; its corner squares: font size; the circle above it: angle.
     Drag across lane cells (or across a panel): select several lanes; right-click for groups.
-    Drag a tier's grip up/down: move the whole tier. Drag on empty paper: select by rectangle.
+    Drag a tier's grip up/down: move the whole tier (also between or under the blots).
+    Drag a group bar up/down: only that bar goes to another group tier, or to a new one between
+    two rows (1.4.9). Drag on empty paper: select by rectangle.
     Double-click, Enter or just typing: edit the text in place (several cells at once).
     """
 
@@ -335,8 +337,8 @@ class PreviewLabel(QtWidgets.QLabel):
     textResized = QtCore.Signal(str, float)  # key, factor
     textRotated = QtCore.Signal(str, float)  # key, angle (degrees, counter-clockwise)
     groupResized = QtCore.Signal(int, int, int, int)  # tier, group, first lane, last lane
-    tierMoved = QtCore.Signal(int, int)  # tier index, new index
-    panelMoved = QtCore.Signal(str, int)  # 1.4.5: panel row, insertion point among the panels shown
+    stackMoved = QtCore.Signal(str, object, int)  # 1.4.9: "tier"/"panel", tier index / row, insertion point in stack_items()
+    barMoved = QtCore.Signal(int, int, object, int)  # 1.4.9: tier, group, ("tier", ti) | ("new", insertion point), lane shift
     keyAction = QtCore.Signal(str, dict)  # "delete" | "bold" | "italic" | "bigger" | "smaller" | "dup", selection
     toolAction = QtCore.Signal(str, object, dict)  # mini toolbar: action, value, selection
 
@@ -464,6 +466,74 @@ class PreviewLabel(QtWidgets.QLabel):
             return None
         return sum(1 for p in ps if p["y"] + p["h"] / 2 < y)
 
+    def stack_items(self) -> List[dict]:
+        """Everything stacked from top to bottom (1.4.9): tiers, blot panels and number rows,
+        each {kind, id, y0, y1} (id: tier index, panel row, number row index)."""
+        lay = self.layout_ or {}
+        items = [{"kind": "tier", "id": t["ti"], "y0": t["y0"], "y1": t["y1"]} for t in lay.get("tiers", [])]
+        items += [{"kind": "panel", "id": p["row"], "y0": p["y"], "y1": p["y"] + p["h"]} for p in lay.get("panels", [])]
+        items += [{"kind": "num", "id": n["idx"], "y0": n["y0"], "y1": n["y1"]} for n in lay.get("nums", [])]
+        return sorted(items, key=lambda it: it["y0"])
+
+    def stack_drop_index(self, y) -> Optional[int]:
+        items = self.stack_items()
+        if not items:
+            return None
+        return sum(1 for it in items if (it["y0"] + it["y1"]) / 2 < y)
+
+    def stack_drop_y(self, n) -> float:
+        items = self.stack_items()
+        if n <= 0:
+            return items[0]["y0"] - 0.01
+        if n >= len(items):
+            return items[-1]["y1"] + 0.01
+        return (items[n - 1]["y1"] + items[n]["y0"]) / 2
+
+    def stack_index(self, kind, ident) -> Optional[int]:
+        return next((i for i, it in enumerate(self.stack_items()) if it["kind"] == kind and it["id"] == ident), None)
+
+    def bar_lanes(self, b):
+        p = self.pitch()
+        return self.nearest_lane(b["xa"] + 0.42 * p), self.nearest_lane(b["xb"] - 0.42 * p)
+
+    def bar_target(self, d, now):
+        """Where a dragged group bar would go: {"to": ("same",) | ("tier", ti) | ("new", n), "shift", "ok"}."""
+        b = next((b for b in self.layout_.get("bars", []) if b["ti"] == d["ti"] and b["gi"] == d["gi"]), None)
+        if b is None:
+            return None
+        first, last = self.bar_lanes(b)
+        n = len(self.lane_xs())
+        if first is None or last is None:
+            return None
+        shift = int(round((now[0] - d["start"][0]) / max(self.pitch(), 1e-6)))
+        shift = max(-first, min(n - 1 - last, shift))
+        lo, hi = first + shift, last + shift
+        k, _, _ = self._k()
+        y = now[1]
+        if abs(y - d["start"][1]) * k < 6:  # mostly sideways: the bar stays in its tier
+            return {"to": ("same",), "shift": shift, "ok": True, "lanes": (lo, hi)}
+        for t in self.tiers():
+            if not t["y0"] <= y <= t["y1"]:
+                continue
+            f = (y - t["y0"]) / max(t["y1"] - t["y0"], 1e-6)
+            if t["kind"] == "groups" and 0.25 <= f <= 0.75:  # the middle of a group tier: into it
+                if t["ti"] == d["ti"]:
+                    return {"to": ("same",), "shift": shift, "ok": True, "lanes": (lo, hi)}
+                ok = True
+                for o in self.layout_.get("bars", []):
+                    if o["ti"] == t["ti"]:
+                        a_, b_ = self.bar_lanes(o)
+                        if a_ is not None and b_ is not None and not (b_ < lo or a_ > hi):
+                            ok = False
+                return {"to": ("tier", t["ti"]), "shift": shift, "ok": ok, "lanes": (lo, hi)}
+            i = self.stack_index("tier", t["ti"])  # its upper / lower edge: a new tier there
+            if i is not None:
+                return {"to": ("new", i + (0 if f < 0.5 else 1)), "shift": shift, "ok": True, "lanes": (lo, hi)}
+        ni = self.stack_drop_index(y)
+        if ni is None:
+            return None
+        return {"to": ("new", ni), "shift": shift, "ok": True, "lanes": (lo, hi)}
+
     def lane_at(self, x_in) -> Optional[int]:
         xs = self.lane_xs()
         best = None
@@ -511,14 +581,15 @@ class PreviewLabel(QtWidgets.QLabel):
                     best = (area, t)
         return best[1] if best else None
 
-    def hit_bar(self, pos):
+    def hit_bar(self, pos, tight=False):
         p = self.to_in(pos)
         if p is None:
             return None
         k, _, _ = self._k()
         x, y = p
+        tol = 3.5 if tight else 5
         for b in self.layout_.get("bars", []):
-            if b["xa"] - 3 / k <= x <= b["xb"] + 3 / k and abs(y - b["y"]) <= 5 / k:
+            if b["xa"] - 3 / k <= x <= b["xb"] + 3 / k and abs(y - b["y"]) <= tol / k:
                 return b
         return None
 
@@ -831,7 +902,10 @@ class PreviewLabel(QtWidgets.QLabel):
             self.setCursor(cur)
         else:
             obj = self.hit_object(pos)
-            self.setCursor(Qt.SizeAllCursor if obj and obj["kind"] == "text" else Qt.ArrowCursor)
+            if self.hit_bar(pos, tight=True):
+                self.setCursor(Qt.OpenHandCursor)  # 1.4.9: a group bar is picked up by its line
+            else:
+                self.setCursor(Qt.SizeAllCursor if obj and obj["kind"] == "text" else Qt.ArrowCursor)
             rects = self._selected_rects(obj) if obj else []
             hov = rects[0] if rects else None
             if hov != self.hover:
@@ -880,6 +954,12 @@ class PreviewLabel(QtWidgets.QLabel):
             else:
                 self.select({"kind": "cells", "ti": ti, "lanes": [li], "anchor": li})
             self.drag = {"type": "cells", "ti": ti, "anchor": li, "start": start}
+            self.cur = pos
+            return
+        b = self.hit_bar(pos, tight=True)  # 1.4.9: right on a group bar's line: drag the bar, not its text
+        if b:
+            self.select({"kind": "text", "key": f"group:{b['ti']}:{b['gi']}"})
+            self.drag = {"type": "bar_move", "ti": b["ti"], "gi": b["gi"], "start": start}
             self.cur = pos
             return
         t = self.hit_text(pos)
@@ -945,6 +1025,10 @@ class PreviewLabel(QtWidgets.QLabel):
                     self.selected = {"kind": "cells", "ti": self._lane_tier_for_panels(),
                                      "lanes": list(range(min(a, b), max(a, b) + 1)), "anchor": a}
                     self._place_overlays()
+        elif d["type"] == "bar_move":
+            d["target"] = self.bar_target(d, now)
+            self.setCursor(Qt.ClosedHandCursor)
+            self.minibar.hide()
         elif d["type"] == "move":
             self._snap_x = None
             if len(d["keys"]) == 1:
@@ -1024,26 +1108,23 @@ class PreviewLabel(QtWidgets.QLabel):
                     last = max(li, first)
                 self.groupResized.emit(d["ti"], d["gi"], first, last)
         elif typ == "bar_move":
-            b = next((b for b in self.layout_.get("bars", []) if b["ti"] == d["ti"] and b["gi"] == d["gi"]), None)
-            if b is not None:
-                shift = int(round(dx / max(self.pitch(), 1e-6)))
-                first = self.nearest_lane(b["xa"] + 0.42 * self.pitch())
-                last = self.nearest_lane(b["xb"] - 0.42 * self.pitch())
-                n = len(self.lane_xs())
-                if shift and first is not None and last is not None:
-                    shift = max(-first, min(n - 1 - last, shift))
-                    if shift:
-                        self.groupResized.emit(d["ti"], d["gi"], first + shift, last + shift)
+            tg = self.bar_target(d, end)
+            if tg is None:
+                return
+            if tg["to"][0] == "same":
+                b = next((b for b in self.layout_.get("bars", []) if b["ti"] == d["ti"] and b["gi"] == d["gi"]), None)
+                if b is not None and tg["shift"]:
+                    self.groupResized.emit(d["ti"], d["gi"], *tg["lanes"])
+            elif tg["ok"]:
+                self.barMoved.emit(d["ti"], d["gi"], tg["to"], tg["shift"])
         elif typ == "pgrip" or (typ == "panel" and d.get("vmove")):
-            n = self._panel_drop_index(end[1])
+            n = self.stack_drop_index(end[1])
             if n is not None:
-                self.panelMoved.emit(d["row"], n)
+                self.stackMoved.emit("panel", d["row"], n)
         elif typ == "grip":
-            n = self._tier_drop_index(end[1])
+            n = self.stack_drop_index(end[1])
             if n is not None:
-                to = n if n <= d["ti"] else n - 1  # insertion point -> new index
-                if to != d["ti"]:
-                    self.tierMoved.emit(d["ti"], to)
+                self.stackMoved.emit("tier", d["ti"], n)
         elif typ == "band":
             x0, x1 = sorted((d["start"][0], end[0]))
             y0, y1 = sorted((d["start"][1], end[1]))
@@ -1098,15 +1179,21 @@ class PreviewLabel(QtWidgets.QLabel):
             self.setCursor(Qt.OpenHandCursor)
             return
         if key == Qt.Key_Escape:
+            if self.drag:  # cancel a drag
+                self.drag, self.cur = None, None
+                self.unsetCursor()
+                self.update()
+                return
             self.select(None)
             self.objectSelected.emit({})
             return
         cmd = bool(mods & Qt.ControlModifier)
         if cmd and key in (Qt.Key_Up, Qt.Key_Down) and sel.get("kind") in ("tier", "cells"):
-            ti = sel["ti"]
-            to = ti - 1 if key == Qt.Key_Up else ti + 1
-            if 0 <= to < len(self.tiers()):
-                self.tierMoved.emit(ti, to)
+            i = self.stack_index("tier", sel["ti"])  # one step up/down the whole stack (1.4.9)
+            if i is not None:
+                n = i - 1 if key == Qt.Key_Up else i + 2
+                if 0 <= n <= len(self.stack_items()):
+                    self.stackMoved.emit("tier", sel["ti"], n)
             return
         if cmd and key in (Qt.Key_B, Qt.Key_I, Qt.Key_D, Qt.Key_G, Qt.Key_Plus, Qt.Key_Equal, Qt.Key_Minus):
             act = {Qt.Key_B: "bold", Qt.Key_I: "italic", Qt.Key_D: "dup", Qt.Key_G: "group", Qt.Key_Plus: "bigger",
@@ -1194,6 +1281,67 @@ class PreviewLabel(QtWidgets.QLabel):
             qp.drawRoundedRect(r, 1.5, 1.5)
         qp.setBrush(Qt.NoBrush)
 
+    def _lanes_span(self):
+        xs = [x for x in self.lane_xs() if np.isfinite(x)]
+        return (min(xs) - self.pitch() / 2, max(xs) + self.pitch() / 2) if xs else (0.0, 1.0)
+
+    def _paint_stack_drop(self, qp, y_in):
+        """The blue line where a dragged tier / blot / bar would land."""
+        n = self.stack_drop_index(y_in)
+        if n is None:
+            return None
+        k, ox, oy = self._k()
+        y = oy + self.stack_drop_y(n) * k
+        x0, x1 = self._lanes_span()
+        x0, x1 = ox + x0 * k, ox + x1 * k
+        qp.setPen(QtGui.QPen(self.BLUE, 2))
+        qp.drawLine(QtCore.QPointF(x0, y), QtCore.QPointF(x1, y))
+        self._handle(qp, QtCore.QPointF(x0, y), round_=True)
+        self._handle(qp, QtCore.QPointF(x1, y), round_=True)
+        return y
+
+    def _paint_bar_drag(self, qp, d, tg):
+        k, ox, oy = self._k()
+        b = next((b for b in self.layout_.get("bars", []) if b["ti"] == d["ti"] and b["gi"] == d["gi"]), None)
+        me = self.tier(d["ti"])
+        if b is None or me is None:
+            return
+        red = QtGui.QColor("#d63a2f")
+        # the bar where it was: faded
+        src = self.to_screen((b["xa"] - 0.01, me["y0"], b["xb"] - b["xa"] + 0.02, me["y1"] - me["y0"]))
+        qp.fillRect(src, QtGui.QColor(255, 255, 255, 190))
+        self._outline(qp, src, QtGui.QColor(0, 0, 0, 90), 1, Qt.DotLine, radius=3)
+        lo, hi = tg["lanes"]
+        xs, p = self.lane_xs(), self.pitch()
+        xa, xb = ox + (xs[lo] - 0.42 * p) * k, ox + (xs[hi] + 0.42 * p) * k
+        col = self.BLUE if tg["ok"] else red
+        kind = tg["to"][0]
+        if kind in ("same", "tier"):
+            t = me if kind == "same" else self.tier(tg["to"][1])
+            if t is None:
+                return
+            if kind == "tier":
+                fill = QtGui.QColor(col)
+                fill.setAlpha(30)
+                self._outline(qp, self.to_screen(self.tier_rect(t["ti"])), col, 1.5, fill=fill, radius=3)
+            y = oy + ((t["y0"] + 0.035) if t.get("down") else (t["y1"] - 0.035)) * k
+        else:
+            y = self._paint_stack_drop(qp, self.stack_drop_y(tg["to"][1]))
+            if y is None:
+                return
+            y += 3
+        qp.setPen(QtGui.QPen(col, 3))
+        qp.drawLine(QtCore.QPointF(xa, y), QtCore.QPointF(xb, y))
+        txt = next((t_["text"] for t_ in self.texts() if t_["key"] == f"group:{d['ti']}:{d['gi']}"), "")
+        if txt:
+            f = QtGui.QFont(self.font())
+            f.setBold(True)
+            qp.setFont(f)
+            qp.setPen(col)
+            qp.drawText(QtCore.QRectF(xa, y - 20, xb - xa, 18), Qt.AlignHCenter | Qt.AlignBottom, txt)
+        box = QtCore.QRectF(xa - 4, y - 22, xb - xa + 8, 27)
+        self._outline(qp, box, col, 1.2, Qt.DashLine, radius=3)
+
     def paintEvent(self, e):
         # 1.4.5: an error while painting left the painter open and Qt crashed (the app quit);
         # now the error is printed and the painters are closed when the frame goes
@@ -1236,6 +1384,16 @@ class PreviewLabel(QtWidgets.QLabel):
                     r = self.cell_rect(t["ti"], li)
                     if r:
                         self._outline(qp, self.to_screen(r), faint, 1, Qt.DotLine, radius=1)
+        # 1.4.9: an empty group tier, a dashed box to drop bars into (screen only, never exported)
+        for t in self.tiers():
+            if t.get("empty"):
+                r = self.to_screen(self.tier_rect(t["ti"])).adjusted(2, 2, -2, -2)
+                self._outline(qp, r, QtGui.QColor(0, 0, 0, 90), 1, Qt.DashLine, radius=3)
+                f = QtGui.QFont(self.font())
+                f.setPixelSize(max(9, min(12, int(r.height() * 0.6))))
+                qp.setFont(f)
+                qp.setPen(QtGui.QColor(0, 0, 0, 120))
+                qp.drawText(r, Qt.AlignCenter, _t("빈 그룹 층 · 막대를 여기로 끌어 놓으세요"))
         # tier grips (⋮⋮) in the paper margin
         for t in self.tiers():
             g = self.grip_rect_screen(t["ti"])
@@ -1340,43 +1498,24 @@ class PreviewLabel(QtWidgets.QLabel):
                     qp.setPen(QtGui.QPen(self.PINK, 1))
                     x = ox + self._snap_x[0] * k
                     qp.drawLine(QtCore.QPointF(x, oy - self.PAPER_PAD + 4), QtCore.QPointF(x, oy + self.pixmap().height() + self.PAPER_PAD - 4))
-            elif d["type"] in ("bar_end", "bar_move") and now is not None:
+            elif d["type"] == "bar_end" and now is not None:
                 qp.setPen(QtGui.QPen(orange, 2))
                 qp.drawLine(self.cur.x(), 0, self.cur.x(), self.height())
+            elif d["type"] == "bar_move" and now is not None and d.get("target"):
+                self._paint_bar_drag(qp, d, d["target"])
             elif (d["type"] == "pgrip" or (d["type"] == "panel" and d.get("vmove"))) and now is not None:
-                to = self._panel_drop_index(now[1])
-                ps = self.movable_panels()
-                pw = self.layout_.get("panel_w", 0)
-                if ps and to is not None:
-                    if 0 < to < len(ps):
-                        y = (ps[to - 1]["y"] + ps[to - 1]["h"] + ps[to]["y"]) / 2
-                    elif to == 0:
-                        y = ps[0]["y"]
-                    else:
-                        y = ps[-1]["y"] + ps[-1]["h"]
-                    x0, x1 = ox + ps[0]["x_blot"] * k, ox + (ps[0]["x_blot"] + pw) * k
-                    qp.setPen(QtGui.QPen(self.BLUE, 2))
-                    qp.drawLine(QtCore.QPointF(x0, oy + y * k), QtCore.QPointF(x1, oy + y * k))
-                    self._handle(qp, QtCore.QPointF(x0, oy + y * k), round_=True)
-                    pn = next((p for p in ps if p["row"] == d.get("row")), None)
-                    if pn is not None:
-                        ghost = self.to_screen((pn["x_blot"], pn["y"], pw, pn["h"])).translated(0, self.cur.y() - self._press.y())
-                        self._outline(qp, ghost, self.BLUE, 1.5, fill=QtGui.QColor(255, 255, 255, 140), radius=2)
+                pn = next((p for p in self.layout_.get("panels", []) if p["row"] == d.get("row")), None)
+                self._paint_stack_drop(qp, now[1])
+                if pn is not None:
+                    pw = self.layout_.get("panel_w", 0)
+                    ghost = self.to_screen((pn["x_blot"], pn["y"], pw, pn["h"])).translated(0, self.cur.y() - self._press.y())
+                    self._outline(qp, ghost, self.BLUE, 1.5, fill=QtGui.QColor(255, 255, 255, 140), radius=2)
             elif d["type"] == "grip" and now is not None:
-                to = self._tier_drop_index(now[1])
-                ts = self.tiers()
-                if ts and to is not None:
-                    y = ts[to]["y0"] if to < len(ts) else ts[-1]["y1"]
-                    xs = [x for x in self.lane_xs() if np.isfinite(x)]
-                    x0 = ox + (min(xs) - self.pitch() / 2) * k if xs else ox
-                    x1 = ox + (max(xs) + self.pitch() / 2) * k if xs else ox + self.pixmap().width()
-                    qp.setPen(QtGui.QPen(self.BLUE, 2))
-                    qp.drawLine(QtCore.QPointF(x0, oy + y * k), QtCore.QPointF(x1, oy + y * k))
-                    self._handle(qp, QtCore.QPointF(x0, oy + y * k), round_=True)
-                    tr = self.tier_rect(d["ti"])
-                    if tr:
-                        ghost = self.to_screen(tr).translated(0, self.cur.y() - self._press.y())
-                        self._outline(qp, ghost, self.BLUE, 1.5, fill=QtGui.QColor(255, 255, 255, 170), radius=3)
+                self._paint_stack_drop(qp, now[1])
+                tr = self.tier_rect(d["ti"])
+                if tr:
+                    ghost = self.to_screen(tr).translated(0, self.cur.y() - self._press.y())
+                    self._outline(qp, ghost, self.BLUE, 1.5, fill=QtGui.QColor(255, 255, 255, 170), radius=3)
         qp.end()
 
 
@@ -1434,7 +1573,7 @@ class FigureEditor(QtWidgets.QWidget):
         sl.addSpacing(6)
         sl.addWidget(_ctl.section(_t("추가")))
         self.add_list = _ctl.SideList()
-        self.ADD_ROWS = [("lanes", _t("이름 층 (위에 한 줄)")), ("groups", _t("그룹 막대")), ("cond", _t("조건 글자")),
+        self.ADD_ROWS = [("lanes", _t("이름 층 (위에 한 줄)")), ("groups", _t("그룹 막대")), ("gtier", _t("그룹 층 (빈 층)")), ("cond", _t("조건 글자")),
                          ("kda", _t("마커 kDa 눈금")), ("number", _t("정량 숫자 줄")), ("image", _t("이미지 (끌어다 놓기)"))]
         self.add_list.set_rows([(t, "") for _, t in self.ADD_ROWS])
         self.add_list.itemClicked.connect(lambda it: (self.add_from_list(self.ADD_ROWS[self.add_list.row(it)][0]),
@@ -1487,8 +1626,8 @@ class FigureEditor(QtWidgets.QWidget):
         self.preview.textResized.connect(self.on_text_resized)
         self.preview.textRotated.connect(lambda key, a: self.apply_style({"kind": "text", "key": key}, rot=a))
         self.preview.groupResized.connect(self.on_group_resized)
-        self.preview.tierMoved.connect(self.move_tier_to)
-        self.preview.panelMoved.connect(self.move_panel_to)
+        self.preview.stackMoved.connect(self.on_stack_moved)
+        self.preview.barMoved.connect(self.on_bar_moved)
         self.preview.keyAction.connect(self.on_key_action)
         self.preview.toolAction.connect(self.on_tool_action)
         self.preview.text_getter = self.sel_text
@@ -1905,70 +2044,101 @@ class FigureEditor(QtWidgets.QWidget):
 
     # ---- sidebar lists (mockup 1.0.1): 추가 / 그림 안의 것
     def refresh_objects(self):
-        """그림 안의 것: the blot, its panels (with their source image when several images
-        are in the figure), tiers, kDa marks, number rows and the marker strip."""
+        """그림 안의 것 (1.4.9): one list in the figure's order from top to bottom — tiers (with their
+        group bars, which are only selected here), blots and number rows, each dragged by ⋮⋮ —
+        then the blot settings and the things beside the blots."""
         s = self.s
         objs = []
         full = s.get("layout") == "full"
         src = self.sources() if self.doc is not None else {}
         own_tag = src.get("__own__", {}).get("tag", "")
         multi = any(p.get("doc") for p in s.get("panels", []))
-        n_own = sum(1 for p in s.get("panels", []) if not p.get("doc"))
-        objs.append((_t("블롯 · {0}").format(own_tag) + (" (Full)" if full else ""), _t("패널 {0}").format(n_own) if not full else "",
-                     {"kind": "blot"}))
-        if not full:
-            for p in s.get("panels", []):
-                if p.get("doc"):
-                    tag = (src.get(p["doc"]) or {}).get("tag", _t("닫힘"))
-                else:
-                    tag = own_tag
-                if not p.get("show", True):
+        by_row = {p["row"]: p for p in s.get("panels", [])}
+        items = self.preview.stack_items() if self.preview.layout_ else []
+        if not items:  # nothing drawn yet: the tiers in their order
+            items = [{"kind": "tier", "id": ti} for ti in range(len(s.get("tiers", [])))]
+        for it in items:
+            kind, ident = it["kind"], it["id"]
+            if kind == "tier":
+                if not 0 <= ident < len(s["tiers"]):
                     continue
-                objs.append((("" if multi else "   ") + (p.get("label") or p["row"]), tag if multi else "",
-                             {"kind": "panel", "row": p["row"]}))
-        for ti, t in enumerate(s.get("tiers", [])):  # ⋮⋮ rows: drag to change the order of the tiers
-            if t.get("kind") == "lanes":
-                if t.get("auto"):
-                    name = _t("레인 이름")
+                t = s["tiers"][ident]
+                if t.get("kind") == "lanes":
+                    name = _t("레인 이름") if t.get("auto") else _t("이름 층 · ") + (
+                        (t.get("condition") or "").strip() or " ".join(x for x in figure.tier_texts(s, t)[:4] if x))
+                    objs.append((f"⋮⋮ {name}"[:40], own_tag if multi and t.get("auto") else "", {"kind": "tier", "ti": ident}))
                 else:
-                    name = _t("이름 층 · ") + ((t.get("condition") or "").strip() or
-                                          " ".join(x for x in figure.tier_texts(s, t)[:4] if x))
-            else:
-                name = _t("그룹 막대 · ") + " · ".join(g.get("text", "") for g in t.get("groups", [])[:2])
-            objs.append((f"⋮⋮ {name}"[:40], own_tag if multi and t.get("auto") else "", {"kind": "tier", "ti": ti}))
+                    gs = t.get("groups", [])
+                    title = _t("그룹 층 {0}").format(ident + 1)
+                    if (t.get("condition") or "").strip():
+                        title += f" · {t['condition'].strip()}"
+                    objs.append((f"⋮⋮ {title}"[:40], _t("막대 {0}").format(len(gs)) if gs else _t("비어 있음"),
+                                 {"kind": "tier", "ti": ident}))
+                    for gi, g in enumerate(gs):
+                        objs.append((f"      ━ {str(g.get('text', '')).replace('|', ' ')}"[:40],
+                                     f"L{int(g['first']) + 1}–L{int(g['last']) + 1}",
+                                     {"kind": "text", "key": f"group:{ident}:{gi}", "child": True}))
+            elif kind == "panel":
+                p = by_row.get(ident)
+                if ident.startswith(figure.GEL_ROW):
+                    did = ident.split(":", 1)[1] if ":" in ident else ""
+                    tag = (src.get(did) or {}).get("tag", "") if did else own_tag
+                    label = _t("블롯 (Full)") + (f" · {tag}" if tag else "")
+                    objs.append((f"⋮⋮ {label}", "", {"kind": "panel", "row": ident}))
+                    continue
+                if p is None:
+                    continue
+                tag = (src.get(p["doc"]) or {}).get("tag", _t("닫힘")) if p.get("doc") else own_tag
+                objs.append((f"⋮⋮ {p.get('label') or p['row']}", tag if multi else "", {"kind": "panel", "row": ident}))
+            elif kind == "num" and 0 <= ident < len(s.get("numbers", [])):
+                n = s["numbers"][ident]
+                objs.append((_t("⋮⋮ 정량 숫자 · {0}").format(n.get('label', '')), "", {"kind": "num", "idx": ident}))
+        n_own = sum(1 for p in s.get("panels", []) if not p.get("doc"))
+        objs.append((_t("블롯 설정 · {0}").format(own_tag) + (" (Full)" if full else ""),
+                     _t("패널 {0}").format(n_own) if not full else "", {"kind": "blot"}))
         if any(k.get("kda") not in (None, "") for k in s.get("kda", [])):
             objs.append((_t("   kDa 눈금"), "", {"kind": "text", "key": "kda:0"}))
         if self.doc is not None and getattr(self.doc, "marker", None) is not None and s.get("show_strip"):
             objs.append((_t("   마커 띠"), "", {"kind": "strip"}))
-        for ni, n in enumerate(s.get("numbers", [])):
-            objs.append((_t("   정량 숫자 · {0}").format(n.get('label', '')), "", {"kind": "text", "key": f"numlabel:{ni}"}))
         self._objects = objs
-        self.obj_title.setText(_t("그림 안의 것 · 끌어서 순서") if multi else _t("그림 안의 것"))
-        cur = next((i for i, o in enumerate(objs) if o[2] == self.selection), -1)
+        self.obj_title.setText(_t("그림 안의 것 · 끌어서 순서"))
+        cur = next((i for i, o in enumerate(objs) if self._list_sel(o[2]) == self.selection), -1)
+        self.obj_list.blockSignals(True)
         self.obj_list.set_rows([(t, n) for t, n, _ in objs], cur)
-        for i, (_, _, sel) in enumerate(objs):  # only panel rows can be dragged
+        grey = QtGui.QColor(142, 142, 147)
+        for i, (_, _, sel) in enumerate(objs):  # tiers, blots and number rows can be dragged; bars only on the canvas
             it = self.obj_list.item(i)
             it.setData(Qt.UserRole, sel)
             fl = it.flags() & ~Qt.ItemIsDropEnabled
-            it.setFlags(fl | Qt.ItemIsDragEnabled if sel.get("kind") in ("panel", "tier") else fl & ~Qt.ItemIsDragEnabled)
+            it.setFlags(fl | Qt.ItemIsDragEnabled if sel.get("kind") in ("panel", "tier", "num") else fl & ~Qt.ItemIsDragEnabled)
+            it.setForeground(grey if sel.get("child") else QtGui.QBrush())
+        self.obj_list.blockSignals(False)
 
     def _on_objects_moved(self):
-        """Panel rows were dragged in 그림 안의 것: the panels follow the new order."""
-        order, tier_order = [], []
+        """A row was dragged in 그림 안의 것: the figure follows the list's order (group bars go
+        with their tier; they move between tiers only on the canvas)."""
+        order = []
         for i in range(self.obj_list.count()):
             sel = self.obj_list.item(i).data(Qt.UserRole) or {}
-            if sel.get("kind") == "panel":
-                order.append(sel["row"])
-            elif sel.get("kind") == "tier":
-                tier_order.append(sel["ti"])
-        tiers = self.s["tiers"]
-        if sorted(tier_order) == list(range(len(tiers))) and tier_order != sorted(tier_order):
-            self._set_tiers([tiers[i] for i in tier_order])
-        by = {p["row"]: p for p in self.s["panels"]}
-        moved = [by[r] for r in order if r in by]
-        rest = [p for p in self.s["panels"] if p["row"] not in order]
-        self.s["panels"] = moved + rest
-        self.load_from_settings()
+            k = sel.get("kind")
+            if k == "tier" and 0 <= sel["ti"] < len(self.s["tiers"]):
+                order.append(("tier", self.s["tiers"][sel["ti"]]))
+            elif k == "panel":
+                order.append(("panel", sel["row"]))
+            elif k == "num":
+                order.append(("num", sel["idx"]))
+        old = self.stack_order()
+        if [(k, id(v) if k == "tier" else v) for k, v in order] == [(k, id(v) if k == "tier" else v) for k, v in old]:
+            self.refresh_objects()  # e.g. a tier dropped among its own bars
+            return
+        sel = self.preview.selected
+        tier = self.s["tiers"][sel["ti"]] if sel and sel.get("kind") == "tier" and 0 <= sel["ti"] < len(self.s["tiers"]) else None
+        self.apply_stack(order)
+        if tier is not None:
+            ti = next(j for j, t in enumerate(self.s["tiers"]) if t is tier)
+            sel = {"kind": "tier", "ti": ti}
+            self.preview.select(sel)
+            self.on_object_selected(sel)
 
     # ---- several images in one figure (Board B): 그림에 넣을 블롯
     @staticmethod
@@ -2154,9 +2324,16 @@ class FigureEditor(QtWidgets.QWidget):
         elif self.foot_msg.text().startswith("● ") and _t("열려 있지 않습니다") in self.foot_msg.text():
             self.status("")
 
+    @staticmethod
+    def _list_sel(sel: dict) -> dict:
+        """The selection a row of 그림 안의 것 stands for."""
+        if sel.get("kind") == "num":
+            return {"kind": "text", "key": f"numlabel:{sel['idx']}"}
+        return {k: v for k, v in sel.items() if k != "child"}
+
     def select_from_list(self, row):
         if 0 <= row < len(self._objects):
-            sel = self._objects[row][2]
+            sel = self._list_sel(self._objects[row][2])
             if not sel:
                 return
             self.preview.select(sel)
@@ -2179,6 +2356,8 @@ class FigureEditor(QtWidgets.QWidget):
             n = len(s["lanes"])
             self.make_group(ti, list(range(min(2, n))))
             self.status(_t("레인 이름을 마우스로 긁어 고른 뒤 우클릭 › ‘그룹 막대로 묶기’ 로도 만들 수 있습니다"))
+        elif what == "gtier":
+            self.add_empty_group_tier()
         elif what == "cond":
             if not s["tiers"]:
                 self.add_tier_at(0)
@@ -2711,6 +2890,8 @@ class FigureEditor(QtWidgets.QWidget):
         if below is not None:
             tier["texts"] = figure.fill_texts("copy", len(self.s["lanes"]), below)
         i = max(0, min(i, len(tiers)))
+        if i < len(tiers):
+            tier["pos"] = tiers[i].get("pos", "top")  # right above that tier, wherever it is (1.4.9)
         tiers.insert(i, tier)
         self._set_tiers(tiers)
         self.cur_tier = i
@@ -2780,18 +2961,175 @@ class FigureEditor(QtWidgets.QWidget):
         self.status(_t("블롯을 {0}로 옮겼습니다").format(_t("위") if n < i else _t("아래")))
 
     def move_tier_to(self, ti: int, to: int):
-        tiers = list(self.s["tiers"])
-        if not (0 <= ti < len(tiers)) or not (0 <= to < len(tiers)) or ti == to:
+        """한 층 위로 / 아래로: one step up or down the whole stack (1.4.9)."""
+        i = self.preview.stack_index("tier", ti)
+        if i is None or to == ti:
             return
-        t = tiers.pop(ti)
-        tiers.insert(to, t)
-        self._set_tiers(tiers)
-        self.cur_tier = to
+        self.on_stack_moved("tier", ti, i - 1 if to < ti else i + 2)
+
+    # ---- the vertical stack: tiers, blots and number rows in one order (1.4.9)
+    def stack_order(self) -> list:
+        """[(kind, item)] from top to bottom as drawn: ("tier", tier dict), ("panel", row), ("num", index)."""
+        out = []
+        for it in self.preview.stack_items():
+            if it["kind"] == "tier":
+                if 0 <= it["id"] < len(self.s["tiers"]):
+                    out.append(("tier", self.s["tiers"][it["id"]]))
+            else:
+                out.append((it["kind"], it["id"]))
+        return out
+
+    def apply_stack(self, order: list, sel: Optional[dict] = None):
+        """Put everything in ``order`` (from stack_order, rearranged): every tier and number row
+        gets its place (pos) between the blots, the tiers and the blots their order."""
+        pos = figure.stack_positions([(k, id(v) if k == "tier" else v) for k, v in order])
+        new_tiers = [v for k, v in order if k == "tier"]
+        new_tiers += [t for t in self.s["tiers"] if all(t is not u for u in new_tiers)]
+        for (k, v), ps in zip(order, pos):
+            if k == "tier":
+                v["pos"] = ps
+            elif k == "num" and 0 <= int(v) < len(self.s["numbers"]):
+                self.s["numbers"][int(v)]["pos"] = ps
+        self._set_tiers(new_tiers)
+        rows = [v for k, v in order if k == "panel"]
+        if any(r.startswith(figure.GEL_ROW) for r in rows):  # Full blot: whole images move as blocks
+            doc_of = lambda r: r.split(":", 1)[1] if ":" in r else ""  # noqa: E731
+            docs = [doc_of(r) for r in rows]
+            self.s["panels"] = sorted(self.s["panels"], key=lambda p: docs.index(p.get("doc") or "")
+                                      if (p.get("doc") or "") in docs else len(docs))
+        else:
+            it = iter(rows)
+            by = {p["row"]: p for p in self.s["panels"]}
+            self.s["panels"] = [by[next(it)] if p["row"] in rows else p for p in self.s["panels"]]
         self.load_from_settings()
-        sel = {"kind": "tier", "ti": to}
+        self.render()
+        if sel:
+            self.preview.select(sel)
+            self.on_object_selected(sel)
+
+    def on_stack_moved(self, kind: str, ident, n: int):
+        """A tier or a blot dragged (canvas ⋮⋮, 그림 안의 것, ⌘↑/⌘↓) to insertion point ``n``."""
+        order = self.stack_order()
+        tier = self.s["tiers"][ident] if kind == "tier" and 0 <= ident < len(self.s["tiers"]) else None
+        i = next((j for j, (k, v) in enumerate(order) if k == kind and (v is tier if tier is not None else v == ident)), None)
+        if i is None or n in (i, i + 1):
+            return
+        item = order.pop(i)
+        order.insert(n - 1 if n > i else n, item)
+        self.apply_stack(order)
+        if tier is not None:
+            ti = next(j for j, t in enumerate(self.s["tiers"]) if t is tier)
+            self.cur_tier = ti
+            sel = {"kind": "tier", "ti": ti}
+        else:
+            sel = {"kind": "panel", "row": ident} if kind == "panel" else None
+        if sel:
+            self.preview.select(sel)
+            self.on_object_selected(sel)
+        self.status(_t("순서를 바꿨습니다"))
+
+    def bar_fits(self, tier: dict, first: int, last: int, skip=None) -> bool:
+        return all(g is skip or int(g["last"]) < first or int(g["first"]) > last for g in tier.get("groups", []))
+
+    def on_bar_moved(self, ti: int, gi: int, to, shift: int = 0):
+        """One group bar dragged to another group tier, or to a new tier at stack insertion point
+        ``to[1]`` (1.4.9). The tier it leaves stays, even when empty."""
+        try:
+            src = self.s["tiers"][ti]
+            g = src["groups"][gi]
+        except (IndexError, KeyError):
+            return
+        n = len(self.s["lanes"])
+        first, last = int(g["first"]) + shift, int(g["last"]) + shift
+        if first < 0 or last >= n:
+            return
+        if to[0] == "tier":
+            dst = self.s["tiers"][to[1]]
+            if dst["kind"] != "groups" or not self.bar_fits(dst, first, last, skip=g if dst is src else None):
+                self.status(_t("그 층에는 같은 레인에 막대가 있어 놓을 수 없습니다"))
+                return
+            held = self._hold_group_overrides()
+            src["groups"].remove(g)
+            g["first"], g["last"] = first, last
+            dst["groups"].append(g)
+            dst["groups"].sort(key=lambda x: int(x["first"]))
+            self._put_group_overrides(held)
+            self.load_from_settings()
+            self.render()
+        else:
+            order = self.stack_order()
+            dst = figure.default_tier("groups", n)
+            held = self._hold_group_overrides()
+            src["groups"].remove(g)
+            g["first"], g["last"] = first, last
+            dst["groups"] = [g]
+            order.insert(max(0, min(int(to[1]), len(order))), ("tier", dst))
+            self.apply_stack(order)
+            self._put_group_overrides(held)
+            self.render()
+        tj = next(j for j, t in enumerate(self.s["tiers"]) if t is dst)
+        gj = next(j for j, x in enumerate(dst["groups"]) if x is g)
+        sel = {"kind": "text", "key": f"group:{tj}:{gj}"}
         self.preview.select(sel)
         self.on_object_selected(sel)
-        self.status(_t("층을 {0}로 옮겼습니다").format(_t("위") if to < ti else _t("아래")))
+        self.status(_t("그룹 막대를 옮겼습니다"))
+
+    def _hold_group_overrides(self) -> list:
+        """Take the per-bar text adjustments out, tied to their bars (put back with _put_group_overrides)."""
+        held = []
+        for key in [k for k in self.s["overrides"] if k.startswith("group:")]:
+            _, ti, gi = key.split(":")
+            o = self.s["overrides"].pop(key)
+            try:
+                t = self.s["tiers"][int(ti)]
+                held.append((t["groups"][int(gi)], o))
+            except (IndexError, KeyError, ValueError):
+                pass
+        return held
+
+    def _put_group_overrides(self, held: list):
+        for g, o in held:
+            for ti, t in enumerate(self.s["tiers"]):
+                gi = next((j for j, x in enumerate(t.get("groups", [])) if x is g), None)
+                if gi is not None:
+                    self.s["overrides"][f"group:{ti}:{gi}"] = o
+                    break
+
+    def add_empty_group_tier(self):
+        """추가 › 그룹 층 (빈 층): an empty group tier above the selected tier (else on top)."""
+        sel = self.preview.selected or {}
+        tiers = list(self.s["tiers"])
+        t = figure.default_tier("groups", len(self.s["lanes"]))
+        if sel.get("kind") in ("tier", "cells") and 0 <= sel["ti"] < len(tiers):
+            i = sel["ti"]
+            t["pos"] = tiers[i].get("pos", "top")
+        else:
+            i = 0
+        tiers.insert(i, t)
+        self._set_tiers(tiers)
+        self.cur_tier = i
+        self.load_from_settings()
+        self.render()
+        sel = {"kind": "tier", "ti": i}
+        self.preview.select(sel)
+        self.on_object_selected(sel)
+        self.status(_t("빈 그룹 층을 넣었습니다. 그룹 막대를 끌어다 놓으세요 (필요 없으면 층 삭제)"))
+
+    def move_bar_menu(self, menu, ti: int, gi: int):
+        """그룹 막대 우클릭 › 다른 층으로 옮기기 ▸"""
+        g = self.s["tiers"][ti]["groups"][gi]
+        sub = menu.addMenu(_t("다른 층으로 옮기기"))
+        for tj, t in enumerate(self.s["tiers"]):
+            if t["kind"] != "groups" or tj == ti:
+                continue
+            names = " · ".join(x.get("text", "") for x in t.get("groups", [])[:3]) or _t("비어 있음")
+            a = sub.addAction(_t("그룹 층 {0} ({1})").format(tj + 1, names), lambda tj=tj: self.on_bar_moved(ti, gi, ("tier", tj)))
+            a.setEnabled(self.bar_fits(t, int(g["first"]), int(g["last"])))
+        sub.addSeparator()
+        i = self.preview.stack_index("tier", ti)
+        if i is not None:
+            sub.addAction(_t("새 층 (위)"), lambda: self.on_bar_moved(ti, gi, ("new", i)))
+            sub.addAction(_t("새 층 (아래)"), lambda: self.on_bar_moved(ti, gi, ("new", i + 1)))
 
     def duplicate_tier(self, ti: int):
         import copy as _copy
@@ -2829,11 +3167,14 @@ class FigureEditor(QtWidgets.QWidget):
             return
         first, last = min(lanes), max(lanes)
         tiers = list(self.s["tiers"])
-        above = ti - 1
-        free = above >= 0 and tiers[above]["kind"] == "groups" and all(
-            int(g["last"]) < first or int(g["first"]) > last for g in tiers[above].get("groups", []))
+        order = self.stack_order()
+        i = next((j for j, (k, v) in enumerate(order) if k == "tier" and v is tiers[ti]), None)
+        up = order[i - 1] if i else None  # the row right above in the figure
+        above = next((j for j, t in enumerate(tiers) if up and up[0] == "tier" and t is up[1]), -1)
+        free = above >= 0 and tiers[above]["kind"] == "groups" and self.bar_fits(tiers[above], first, last)
         if not free:
             tier = figure.default_tier("groups", len(self.s["lanes"]))
+            tier["pos"] = tiers[ti].get("pos", "top")
             tiers.insert(ti, tier)
             self._set_tiers(tiers)
             above = ti
@@ -2935,6 +3276,7 @@ class FigureEditor(QtWidgets.QWidget):
                 a.setCheckable(True)
                 a.setChecked(bool(tier.get("bar", True)))
                 a.toggled.connect(lambda on: (tier.__setitem__("bar", on), self.render()))
+                self.move_bar_menu(menu, int(ti), int(gi))
                 menu.addAction(_t("이 그룹 지우기"), lambda: self.delete_selection(sel))
             cat = self.key_cat(keys[0])
             if cat in figure.FONT_CATEGORIES:
@@ -3001,11 +3343,28 @@ class FigureEditor(QtWidgets.QWidget):
         f.addRow(theme_lab)
         self._props_style(f, sel)
 
-    def _props_tier_card(self, ti):
+    def _props_tier_card(self, ti, content: bool = False):
         t = self.s["tiers"][ti]
         kind = _t("이름 층") if t["kind"] == "lanes" else _t("그룹 막대 층")
+        if content:  # 1.4.9: 내용 — the tier's title and every name in it, edited here
+            c = self._p_box(_t("내용 · {0} {1}").format(kind, ti + 1))
+            self._p_line(c, _t("조건 이름 (제목)"), t.get("condition", ""), lambda v: t.__setitem__("condition", v))
+            if t["kind"] == "lanes":
+                for li in range(len(self.s["lanes"])):
+                    acc = self._text_access(f"lane:{ti}:{li}")
+                    if acc:
+                        self._p_line(c, f"L{li + 1}", acc[0](), acc[1])
+            else:
+                for gi, g in enumerate(t.get("groups", [])):
+                    self._p_line(c, f"L{int(g['first']) + 1}–L{int(g['last']) + 1}", g.get("text", ""),
+                                 lambda v, g=g: g.__setitem__("text", v))
+                if not t.get("groups"):
+                    lab = QtWidgets.QLabel(_t("빈 층입니다. 캔버스에서 그룹 막대를 끌어다 놓으세요."))
+                    lab.setWordWrap(True)
+                    c.addRow(lab)
         f = self._p_box(f"{kind} {ti + 1}" + (_t(" (레인 이름)") if t.get("auto") else ""))
-        self._p_line(f, _t("조건 이름"), t.get("condition", ""), lambda v: t.__setitem__("condition", v))
+        if not content:
+            self._p_line(f, _t("조건 이름"), t.get("condition", ""), lambda v: t.__setitem__("condition", v))
         self._p_combo(f, _t("조건 위치"), [(_t("왼쪽"), "left"), (_t("오른쪽"), "right")], t.get("cond_side", "left"),
                       lambda v: t.__setitem__("cond_side", v))
         self._p_combo(f, _t("회전 (층 전체)"), [(f"{r}°", r) for r in self.ROTATIONS], int(t.get("rotation", 0)),
@@ -3021,9 +3380,7 @@ class FigureEditor(QtWidgets.QWidget):
         else:
             self._p_check(f, _t("막대 표시"), t.get("bar", True), lambda on: t.__setitem__("bar", on))
         hb = QtWidgets.QHBoxLayout()
-        for label, fn, ok in ((_t("한 층 위"), lambda: self.move_tier_to(ti, ti - 1), ti > 0),
-                              (_t("한 층 아래"), lambda: self.move_tier_to(ti, ti + 1), ti + 1 < len(self.s["tiers"])),
-                              (_t("복제"), lambda: self.duplicate_tier(ti), True),
+        for label, fn, ok in ((_t("복제"), lambda: self.duplicate_tier(ti), True),
                               (_t("삭제"), lambda: self.delete_tier_at(ti), not t.get("auto"))):
             b = QtWidgets.QPushButton(label)
             b.setEnabled(ok)
@@ -3261,7 +3618,7 @@ class FigureEditor(QtWidgets.QWidget):
         self.selection = sel
         self.show_props(sel)
         self.props_tabs.setCurrentIndex(0)
-        cur = next((i for i, o in enumerate(getattr(self, "_objects", [])) if o[2] == sel), -1)
+        cur = next((i for i, o in enumerate(getattr(self, "_objects", [])) if self._list_sel(o[2]) == sel), -1)
         if hasattr(self, "obj_list"):
             self.obj_list.blockSignals(True)
             if cur >= 0:
@@ -3289,7 +3646,7 @@ class FigureEditor(QtWidgets.QWidget):
                 self._props_cells(sel)
         elif kind == "tier":
             if 0 <= sel["ti"] < len(s["tiers"]):
-                self._props_tier_card(sel["ti"])
+                self._props_tier_card(sel["ti"], content=True)
         elif kind == "texts":
             self._props_texts(sel)
         elif kind == "text":
@@ -3935,6 +4292,7 @@ class FigureEditor(QtWidgets.QWidget):
                                    self.resolve_numbers(), sources=src)
             self._report_missing(src)
             self.preview.set_layout(layout)
+            self.refresh_objects()  # 그림 안의 것 follows the figure's order (1.4.9)
             buf = io.BytesIO()
             self.fig.savefig(buf, format="png", dpi=PREVIEW_DPI, facecolor="white")
             pm = QtGui.QPixmap()

@@ -376,7 +376,7 @@ def fill_texts(pattern: str, n: int, below: Optional[List[str]] = None) -> List[
 
 
 def default_tier(kind: str, n_lanes: int = 0, pattern: str = "dash") -> dict:
-    t = {"kind": kind, "condition": "", "cond_side": "left", "rotation": 0, "italic": False}
+    t = {"kind": kind, "condition": "", "cond_side": "left", "rotation": 0, "italic": False, "pos": "top"}
     if kind == "lanes":
         t["texts"] = fill_texts(pattern, n_lanes)
         t["condition"] = "Condition"
@@ -517,6 +517,68 @@ def foreign_shifted(src_sig: np.ndarray, src_a: core.Analysis, y0: int, y1: int,
     return out, lo * f + off, hi * f + off, f
 
 
+def stack_sequence(s: dict, rows: List[str], numbers: Optional[List[dict]] = None) -> List[Tuple[str, object]]:
+    """The figure from top to bottom (1.4.9): ("tier", tier index), ("num", (i, number row)) and
+    ("panel", row name), for the shown panel ``rows`` in their order.
+
+    A tier's ``pos`` (like a number row's) is "top", "above:<row>", "below:<row>" or "bottom";
+    a tier whose panel is not shown stays on top.  Around one panel: tiers, number rows, the
+    panel, number rows, tiers."""
+    tiers = s.get("tiers", [])
+    numbers = list(enumerate(numbers or []))
+    shown = set(rows)
+
+    def tpos(t):
+        p = str(t.get("pos") or "top")
+        return p if p in ("top", "bottom") or p.split(":", 1)[-1] in shown else "top"
+
+    def npos(n):
+        p = str(n.get("pos") or "bottom")
+        return p if p in ("top", "bottom") or p.split(":", 1)[-1] in shown else "bottom"
+
+    T = lambda p: [("tier", ti) for ti, t in enumerate(tiers) if tpos(t) == p]  # noqa: E731
+    N = lambda p: [("num", (i, n)) for i, n in numbers if npos(n) == p]  # noqa: E731
+    seq = T("top") + N("top")
+    for r in rows:
+        seq += T(f"above:{r}") + N(f"above:{r}") + [("panel", r)] + N(f"below:{r}") + T(f"below:{r}")
+    return seq + N("bottom") + T("bottom")
+
+
+def stack_positions(order: List[Tuple[str, object]]) -> List[Optional[str]]:
+    """``pos`` of every tier and number row for a top-to-bottom ``order`` of ("tier", …),
+    ("num", …) and ("panel", row) (a drag in 그림 안의 것 or on the canvas); None for panels.
+    Between two panels, number rows before the first tier stay under the upper panel; tiers and
+    the rest go above the lower panel.  Before the first panel: "top"; after the last: "bottom"
+    (number rows right under the last panel: "below:<it>")."""
+    out: List[Optional[str]] = [None] * len(order)
+    prev_panel = None
+    gap: List[int] = []
+
+    def flush(next_panel):
+        seen_tier = False
+        for i in gap:
+            kind = order[i][0]
+            seen_tier = seen_tier or kind == "tier"
+            first_nums = kind == "num" and not seen_tier
+            if prev_panel is None:
+                pos = "top"
+            elif next_panel is None:
+                pos = f"below:{prev_panel}" if first_nums else "bottom"
+            else:
+                pos = f"below:{prev_panel}" if first_nums else f"above:{next_panel}"
+            out[i] = pos
+
+    for i, (kind, ident) in enumerate(order):
+        if kind == "panel":
+            flush(ident)
+            gap = []
+            prev_panel = ident
+        else:
+            gap.append(i)
+    flush(None)
+    return out
+
+
 def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[np.ndarray] = None,
            numbers: Optional[List[dict]] = None, sources: Optional[dict] = None, preview: bool = False) -> dict:
     """Draw the figure into the matplotlib ``fig`` (it is cleared and resized).
@@ -653,7 +715,7 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             return gap
         return gap + (image_gap if (prev_p.get("doc") or "") != (p.get("doc") or "") else 0.0)
 
-    # header tier heights
+    # tier heights
     bar_gap, bar_lw = 0.035, float(s.get("group_bar_lw", 2.2))
     tier_h = []
     for ti, t in enumerate(tiers):
@@ -664,33 +726,41 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
         else:
             hs = [_text_h(str(g["text"]).replace("|", "\n"), fsize(f"group:{ti}:{gi}", "group"), rot)
                   for gi, g in enumerate(t.get("groups", [])) if g.get("text")]
-            h = (max(hs) if hs else 0.0) + 2 * bar_gap + 0.02
+            # 1.4.9: an empty group tier keeps one line of room (a blank space until it is deleted)
+            h = (max(hs) if hs else fonts["group"] * 1.2 / 72.0) + 2 * bar_gap + 0.02
         ch = _text_h(str(t.get("condition", "")).replace("|", "\n"), fsize(f"cond:{ti}", "cond"), 0) if t.get("condition") else 0
         tier_h.append(max(h, ch + 0.02))
-    header_h = sum(tier_h) + 0.04
     num_h = fonts["number"] * 1.3 / 72.0
 
-    # vertical sequence: number rows and panels
-    seq = [("num", (i, n)) for i, n in enumerate(numbers) if n.get("pos") == "top"]
-    for item in panels:
-        name = item[0]["row"]
-        seq += [("num", (i, n)) for i, n in enumerate(numbers) if n.get("pos") == f"above:{name}"]
-        seq.append(("panel", item))
-        seq += [("num", (i, n)) for i, n in enumerate(numbers) if n.get("pos") == f"below:{name}"]
-    shown = {p["row"] for p, *_ in panels}
-    seq += [("num", (i, n)) for i, n in enumerate(numbers)
-            if n.get("pos") == "bottom" or (n.get("pos", "").split(":", 1)[-1] not in shown and n.get("pos") != "top")]
+    seq = stack_sequence(s, [it[0]["row"] for it in panels], numbers)
+    by_row = {it[0]["row"]: it for it in panels}
+    seq = [(k, by_row[v] if k == "panel" else v) for k, v in seq]
+
+    def step(prev, kind):
+        """Room between two neighbours of the vertical stack."""
+        if prev is None:
+            return 0.0
+        if prev == "tier":
+            return 0.0 if kind == "tier" else 0.04
+        if kind == "tier":
+            return 0.03 if prev == "panel" else 0.02
+        if kind == "num":
+            return 0.02 if prev == "panel" else 0.0
+        return 0.02 if prev == "num" else 0.0  # a panel after a number row (panel after panel: panel_gap)
+
     body = 0.0
     prev = None
     prev_p = None
     for kind, it in seq:
         if kind == "panel":
-            body += (panel_gap(prev_p, it[0]) if prev == "panel" else 0.02 if prev == "num" else 0.0) + panel_h(it)
+            body += (panel_gap(prev_p, it[0]) if prev == "panel" else step(prev, kind)) + panel_h(it)
             prev_p = it[0]
+        elif kind == "tier":
+            body += step(prev, kind) + tier_h[it]
         else:
-            body += num_h + (0.02 if prev == "panel" else 0.0)
+            body += step(prev, kind) + num_h
         prev = kind
-    total_h = 0.04 + header_h + body + 0.04
+    total_h = 0.04 + body + 0.04
     fig.set_size_inches(total_w, total_h)
     tr = fig.dpi_scale_trans
     arts = []
@@ -727,29 +797,35 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             return text(key, cat, label_x, y, t, ha="right", va="center", **kw)
         return text(key, cat, right_x, y, t, ha="left", va="center", **kw)
 
-    # ---- header tiers
-    y = 0.04
+    # ---- tiers (1.4.9: anywhere in the stack; under a blot they hang upside down: bar on top)
     layout["tiers"] = []
     layout["bars"] = []
-    for ti, (t, h) in enumerate(zip(tiers, tier_h)):
-        layout["tiers"].append({"ti": ti, "kind": t["kind"], "y0": y, "y1": y + h, "auto": bool(t.get("auto"))})
+    layout["nums"] = []
+
+    def draw_tier(ti, y):
+        t, h = tiers[ti], tier_h[ti]
+        pos = str(t.get("pos") or "top")
+        down = pos == "bottom" or pos.startswith("below:")
+        layout["tiers"].append({"ti": ti, "kind": t["kind"], "y0": y, "y1": y + h, "auto": bool(t.get("auto")),
+                                "pos": pos, "down": down, "empty": t["kind"] == "groups" and not t.get("groups")})
         rot = float(t.get("rotation", 0))
         style = "italic" if t.get("italic") else "normal"
         bottom = y + h
+        va = "top" if down else "bottom"
         if t["kind"] == "lanes":
-            base = bottom - 0.02
+            base = y + 0.02 if down else bottom - 0.02
             for li, (x, tx) in enumerate(zip(xs, tier_texts(s, t))):
                 if not np.isfinite(x) or not tx:
                     continue
                 if rot:
-                    text(f"lane:{ti}:{li}", "lane", x, base, tx.replace("|", "\n"), ha="left", va="bottom",
-                         rotation=rot, rotation_mode="anchor", linespacing=1.1, style=style)
+                    text(f"lane:{ti}:{li}", "lane", x, base, tx.replace("|", "\n"), ha="left" if not down else "right",
+                         va=va, rotation=rot, rotation_mode="anchor", linespacing=1.1, style=style)
                 else:
-                    text(f"lane:{ti}:{li}", "lane", x, base, tx.replace("|", "\n"), ha="center", va="bottom",
+                    text(f"lane:{ti}:{li}", "lane", x, base, tx.replace("|", "\n"), ha="center", va=va,
                          linespacing=1.1, style=style)
-            cy = base - (h - 0.03) / 2  # middle of this tier's text block
+            cy = base + (h - 0.03) / 2 if down else base - (h - 0.03) / 2  # middle of this tier's text block
         else:
-            bar_y = bottom - bar_gap
+            bar_y = y + bar_gap if down else bottom - bar_gap
             for gi, g in enumerate(t.get("groups", [])):
                 a_, b_ = int(g["first"]), int(g["last"])
                 if not (np.isfinite(xs[a_]) and np.isfinite(xs[b_])):
@@ -759,30 +835,39 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
                 if t.get("bar", True):
                     hline(xa, xb, bar_y, bar_lw)
                 gx = (xa + xb) / 2
+                ty = bar_y + bar_gap * 0.6 if down else bar_y - bar_gap * (0.8 if rot else 0.6)
                 if rot:
-                    text(f"group:{ti}:{gi}", "group", gx, bar_y - bar_gap * 0.8, str(g["text"]).replace("|", "\n"),
-                         ha="left", va="bottom", rotation=rot, rotation_mode="anchor", linespacing=1.1, style=style)
+                    text(f"group:{ti}:{gi}", "group", gx, ty, str(g["text"]).replace("|", "\n"),
+                         ha="left" if not down else "right", va=va, rotation=rot, rotation_mode="anchor",
+                         linespacing=1.1, style=style)
                 else:
-                    text(f"group:{ti}:{gi}", "group", gx, bar_y - bar_gap * 0.6, str(g["text"]).replace("|", "\n"),
-                         ha="center", va="bottom", linespacing=1.1, style=style)
-            cy = bar_y - bar_gap * 0.6 - max(h - 2 * bar_gap - 0.02, fonts["group"] / 72.0) / 2
+                    text(f"group:{ti}:{gi}", "group", gx, ty, str(g["text"]).replace("|", "\n"),
+                         ha="center", va=va, linespacing=1.1, style=style)
+            half = max(h - 2 * bar_gap - 0.02, fonts["group"] / 72.0) / 2
+            cy = bar_y + bar_gap * 0.6 + half if down else bar_y - bar_gap * 0.6 - half
         if t.get("condition"):
             side_text(f"cond:{ti}", "cond", t.get("cond_side", "left"), cy, str(t["condition"]).replace("|", "\n"),
                       linespacing=1.1)
-        y = bottom
 
     # ---- panels and number rows
     src = signal
     ref_all = src[:, x0px:x1px]
-    y = 0.04 + header_h
+    y = 0.04
     prev = None
     prev_p = None
     for kind, it in seq:
+        if kind == "tier":
+            y += step(prev, kind)
+            draw_tier(it, y)
+            y += tier_h[it]
+            prev = kind
+            continue
         if kind == "num":
             ni, n = it
-            y += 0.02 if prev == "panel" else 0.0
+            y += step(prev, kind)
             cy = y + num_h / 2
             idx = n.get("idx", ni)  # index in the settings' number rows
+            layout["nums"].append({"idx": idx, "y0": y, "y1": y + num_h})
             text(f"numlabel:{idx}", "number", label_x, cy, n["label"], ha="right", va="center")
             for li, (x, t) in enumerate(zip(xs, n["texts"])):
                 if np.isfinite(x):
@@ -791,7 +876,7 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             prev = kind
             continue
         p, ri, y0, y1 = it
-        y += panel_gap(prev_p, p) if prev == "panel" else 0.02 if prev == "num" else 0.0
+        y += panel_gap(prev_p, p) if prev == "panel" else step(prev, kind)
         prev_p = p
         h = panel_h(it)
         foreign = bool(p.get("doc"))
