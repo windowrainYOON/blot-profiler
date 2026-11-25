@@ -62,7 +62,7 @@ FIGURE_DEFAULTS = {
     "lane_match": "name",  # multi-blot: other images' lanes by lane name ("name") or position ("order")
     "show_src": True,  # multi-blot: small grey source tag (I1, I2 …) under each protein name
     "layout": "rows",  # "rows": one crop per protein (western) · "full": the whole gel as one panel (DNA gel)
-    "gel_crop": None,  # [x0, y0, x1, y1] of the full-gel panel (None = around all bands)
+    "gel_box": None,  # [x0, y0, x1, y1] of the full-gel panel (None = the whole selected blot region)
     "gel_label": "",  # text left of the full-gel panel
     "unit": "kDa",  # ladder unit shown next to the ticks' title ("kDa" or "bp")
     # "fonts" (size per text category), "tiers" (header rows) and "overrides"
@@ -108,6 +108,7 @@ def sync_settings(s: dict, a: core.Analysis, shape) -> dict:
     """
     for k, v in FIGURE_DEFAULTS.items():
         s.setdefault(k, copy.deepcopy(v))
+    s.pop("gel_crop", None)  # 1.5.1: the old band-trimmed Full blot crop (see default_gel_crop)
     prev = s.get("panels", [])
     old = {p["row"]: p for p in prev if not p.get("doc")}
     panels = []
@@ -189,15 +190,11 @@ GEL_ROW = "__gel__"
 
 
 def default_gel_crop(a: core.Analysis, shape) -> List[int]:
-    """Around every band box, with a margin of a band pitch."""
-    H, W = shape
-    boxes = [b.box(a.rows) for b in a.bands]
-    x0 = min(x for x, _, _, _ in boxes)
-    x1 = max(x + w for x, _, w, _ in boxes)
-    y0 = min(y for _, y, _, _ in boxes)
-    y1 = max(y + h for _, y, _, h in boxes)
-    m = int(0.05 * max(x1 - x0, y1 - y0)) + 10
-    return [max(0, x0 - m), max(0, y0 - m), min(W, x1 + m), min(H, y1 + m)]
+    """1.5.1: the whole blot region the user selected (the image as rotated / tilt-corrected),
+    not just around the band boxes.  Until 1.5.0 the crop was kept under "gel_crop" and was
+    trimmed around the bands; that key is no longer read, so old projects show the whole region."""
+    H, W = shape[:2]
+    return [0, 0, int(W), int(H)]
 
 
 def layout_panels(a: core.Analysis, s: dict, shape, sources: Optional[dict] = None):
@@ -207,7 +204,7 @@ def layout_panels(a: core.Analysis, s: dict, shape, sources: Optional[dict] = No
     multi-blot figure takes panels from; without it those panels are left out."""
     H, W = shape
     if s.get("layout") == "full":
-        x0, y0, x1, y1 = s.get("gel_crop") or default_gel_crop(a, shape)
+        x0, y0, x1, y1 = s.get("gel_box") or default_gel_crop(a, shape)
         x0, x1 = max(0, int(x0)), min(W, int(x1))
         y0, y1 = max(0, int(y0)), min(H, int(y1))
         if x1 - x0 < 4 or y1 - y0 < 4:
@@ -239,7 +236,7 @@ def _foreign_gels(s: dict, sources: Optional[dict]):
             continue
         sa, (sh, sw) = src["analysis"], src["signal"].shape
         fs = src.get("figure") or {}
-        crop = fs.get("gel_crop") or default_gel_crop(sa, (sh, sw))
+        crop = fs.get("gel_box") or default_gel_crop(sa, (sh, sw))
         y0, y1 = max(0, int(crop[1])), min(sh, int(crop[3]))
         if y1 - y0 < 4:
             _, y0, _, y1 = default_gel_crop(sa, (sh, sw))
@@ -937,7 +934,7 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             span = None
             if p.get("gel"):
                 sa_ = src_d["analysis"]
-                gc = (src_d.get("figure") or {}).get("gel_crop") or default_gel_crop(sa_, src_d["signal"].shape)
+                gc = (src_d.get("figure") or {}).get("gel_box") or default_gel_crop(sa_, src_d["signal"].shape)
                 span = (float(gc[0]), float(gc[2]))
             crop, fa, fb, _ = foreign_shifted(src_d["signal"], src_d["analysis"], y0, y1, centres, x0px, x1px, span,
                                               pairs_of(p["doc"]))

@@ -1821,7 +1821,7 @@ class FigureEditor(QtWidgets.QWidget):
             gv.addRow(lab, hb)
         b = QtWidgets.QPushButton(_t("범위 자동"))
         b.setToolTip(_t("모든 밴드를 감싸는 범위로 되돌립니다"))
-        b.clicked.connect(lambda: (self.s.__setitem__("gel_crop", None), self.load_from_settings()))
+        b.clicked.connect(lambda: (self.s.__setitem__("gel_box", None), self.load_from_settings()))
         gv.addRow(b)
         f.addRow(_t("겔 범위 (px)"), self.gel_crop_row)
         self.w_gel_label = QtWidgets.QLineEdit()
@@ -1845,7 +1845,7 @@ class FigureEditor(QtWidgets.QWidget):
             return
         x0, y0, x1, y1 = (int(v) for v in vals)
         if x1 - x0 >= 4 and y1 - y0 >= 4:
-            self.s["gel_crop"] = [x0, y0, x1, y1]
+            self.s["gel_box"] = [x0, y0, x1, y1]
             self.refresh_reference()
             self.schedule()
 
@@ -2022,7 +2022,7 @@ class FigureEditor(QtWidgets.QWidget):
             self.w_gel_label.setEnabled(full)
             self.w_gel_label.setText(s.get("gel_label", ""))
             if self.doc is not None and self.doc.raw is not None and self.doc.analysis.bands:
-                crop = s.get("gel_crop") or figure.default_gel_crop(self.doc.analysis, self.doc.raw.shape)
+                crop = s.get("gel_box") or figure.default_gel_crop(self.doc.analysis, self.doc.raw.shape)
                 for sp, v in zip(self.w_gc, crop):
                     sp.setValue(int(v))
             self.w_unit.setCurrentText(s.get("unit", "kDa"))
@@ -3761,10 +3761,10 @@ class FigureEditor(QtWidgets.QWidget):
             f = self._p_box(_t("겔 전체 패널"))
             s = self.s
             self._p_line(f, _t("왼쪽 라벨"), s.get("gel_label", ""), lambda v: s.__setitem__("gel_label", v))
-            crop = s.get("gel_crop") or figure.default_gel_crop(self.doc.analysis, self.doc.raw.shape)
-            s["gel_crop"] = list(crop)
+            crop = s.get("gel_box") or figure.default_gel_crop(self.doc.analysis, self.doc.raw.shape)
+            s["gel_box"] = list(crop)
             for i, lab in enumerate((_t("왼쪽 x"), _t("위 y"), _t("오른쪽 x"), _t("아래 y"))):
-                self._p_num(f, lab, int(crop[i]), 0, 100000, 1, None, " px", lambda v, i=i: s["gel_crop"].__setitem__(i, int(v)))
+                self._p_num(f, lab, int(crop[i]), 0, 100000, 1, None, " px", lambda v, i=i: s["gel_box"].__setitem__(i, int(v)))
             self._p_combo(f, _t("형태"), [(_t("겔 전체 한 패널"), "full"), (_t("단백질(행)별 잘라내기"), "rows")], s.get("layout", "rows"),
                           lambda v: s.__setitem__("layout", v))
             return
@@ -3800,7 +3800,7 @@ class FigureEditor(QtWidgets.QWidget):
 
         def reset_crop():
             s["margin_left_px"] = s["margin_right_px"] = None
-            s["gel_crop"] = None
+            s["gel_box"] = None
             for p in s["panels"]:
                 if not p.get("doc"):
                     ri = next((i for i, r in enumerate(self.doc.analysis.rows) if r.name == p["row"]), None)
@@ -3983,7 +3983,7 @@ class FigureEditor(QtWidgets.QWidget):
             if od.figure is None:
                 od.figure = figure.default_settings()
             H, W = sd["signal"].shape
-            x0, y0, x1, y1 = od.figure.get("gel_crop") or figure.default_gel_crop(od.analysis, (H, W))
+            x0, y0, x1, y1 = od.figure.get("gel_box") or figure.default_gel_crop(od.analysis, (H, W))
             if edge == "top":
                 y0 = min(max(0, y0 + d), y1 - 4)
             elif edge == "bottom":
@@ -3992,12 +3992,12 @@ class FigureEditor(QtWidgets.QWidget):
                 x0 = min(max(0, x0 + d), x1 - 4)
             else:
                 x1 = max(min(W, x1 + d), x0 + 4)
-            od.figure["gel_crop"] = [int(x0), int(y0), int(x1), int(y1)]
+            od.figure["gel_box"] = [int(x0), int(y0), int(x1), int(y1)]
             self.render()
             return
         if self.s.get("layout") == "full":
             H, W = self.doc.raw.shape
-            x0, y0, x1, y1 = self.s.get("gel_crop") or figure.default_gel_crop(self.doc.analysis, (H, W))
+            x0, y0, x1, y1 = self.s.get("gel_box") or figure.default_gel_crop(self.doc.analysis, (H, W))
             if edge == "top":
                 y0 = min(max(0, y0 + d), y1 - 4)
             elif edge == "bottom":
@@ -4006,7 +4006,7 @@ class FigureEditor(QtWidgets.QWidget):
                 x0 = min(max(0, x0 + d), x1 - 4)
             else:
                 x1 = max(min(W, x1 + d), x0 + 4)
-            self.s["gel_crop"] = [int(x0), int(y0), int(x1), int(y1)]
+            self.s["gel_box"] = [int(x0), int(y0), int(x1), int(y1)]
             self.load_from_settings()
             self.render()
             return

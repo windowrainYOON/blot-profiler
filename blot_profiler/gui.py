@@ -5482,7 +5482,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._make_signal(d)
         if d.figure:  # positions in pixels belong to the old geometry
             d.figure["kda"] = []
-            d.figure["gel_crop"] = None
+            d.figure["gel_box"] = None
             if d.marker is not None and d.analysis.bands:
                 d.figure["strip_x0"], d.figure["strip_x1"] = 0, 0
         if d is self.doc:
