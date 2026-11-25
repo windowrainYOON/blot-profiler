@@ -192,6 +192,9 @@ class Analysis:
     lane_lines: List[List[List[float]]] = field(default_factory=list)  # blue lane lines: polylines [[x, y], …]
     protein_lines: List[Dict[str, object]] = field(default_factory=list)  # red lines {row, x0, y0, x1, y1}
     lane_roles: List[str] = field(default_factory=list)  # per lane: sample · marker · exclude
+    # 1.5.0: lanes loaded from another blot and linked to it: {"doc": ImageDoc.uid, "start": k,
+    # "name": its name when linked}: this blot's lane j is that blot's lane j + k (Figure lines them up)
+    lane_link: Optional[Dict[str, object]] = None
 
     @property
     def n_lanes(self) -> int:
@@ -272,6 +275,8 @@ class Analysis:
         a.lane_lines = [[[float(x), float(y)] for x, y in ln] for ln in d.get("lane_lines", [])]
         a.protein_lines = [dict(p) for p in d.get("protein_lines", [])]
         a.lane_roles = list(d.get("lane_roles", []))
+        ln = d.get("lane_link")
+        a.lane_link = dict(ln) if isinstance(ln, dict) and ln.get("doc") else None
         sync_groupings(a)
         return a
 

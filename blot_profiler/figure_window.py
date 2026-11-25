@@ -2162,7 +2162,7 @@ class FigureEditor(QtWidgets.QWidget):
             out[self.doc_id(d)] = {"signal": sig, "analysis": d.analysis, "tag": m.doc_key(k), "name": d.name, "doc": d,
                                "figure": d.figure or {}, "marker": getattr(d, "marker", None)}
         if self.doc in m.docs:
-            out["__own__"] = {"tag": m.doc_key(m.docs.index(self.doc)), "name": self.doc.name}
+            out["__own__"] = {"tag": m.doc_key(m.docs.index(self.doc)), "name": self.doc.name, "uid": self.doc.uid}
         return out
 
     def _foreign(self, did):
@@ -4087,7 +4087,8 @@ class FigureEditor(QtWidgets.QWidget):
             d = src[did]["doc"]
             if not d.measurements:
                 continue
-            lm = figure.panel_lane_map(self.doc.analysis, self.s, p, d.analysis)
+            lm = figure.panel_lane_map(self.doc.analysis, self.s, p, d.analysis,
+                                       figure.lane_pairs(self.doc.analysis, self.doc.uid, d.analysis, did))
             res, _ = self.main.image_results(d)
             for name, v in res.items():
                 if np.size(v) <= 1:

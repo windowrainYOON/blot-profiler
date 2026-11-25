@@ -2312,6 +2312,127 @@ KIND_LABELS = {KIND_PROTEIN: _t("단백질"), KIND_LANE: _t("레인")}
 VALUE_LABELS = {"ratio": _t("정규화 비율 (Target ÷ Control)"), "net": "Net intensity"}
 
 
+
+class LaneLoadDialog(QtWidgets.QDialog):
+    """1.5.0: load lane names / roles from another blot, pick which lane this blot's L1 is, and
+    link the lanes so Figure lines them up."""
+
+    def __init__(self, main, docs, pick):
+        super().__init__(main)
+        self.setWindowTitle(_t("다른 블롯에서 레인 불러오기"))
+        self.main, self.docs = main, docs
+        self.target = main.analysis
+        self.target.ensure_lane_labels()
+        v = QtWidgets.QVBoxLayout(self)
+        f = QtWidgets.QFormLayout()
+        self.src = QtWidgets.QComboBox()
+        for d in docs:
+            d.analysis.ensure_lane_labels()
+            self.src.addItem(_t("{0} · {1} (레인 {2}개)").format(main.doc_key(main.docs.index(d)), d.name, d.analysis.n_lanes))
+        self.src.setCurrentIndex(docs.index(pick))
+        f.addRow(_t("가져올 블롯"), self.src)
+        what = QtWidgets.QHBoxLayout()
+        self.take_names = QtWidgets.QCheckBox(_t("이름"))
+        self.take_names.setChecked(True)
+        self.take_roles = QtWidgets.QCheckBox(_t("역할 (시료·마커·제외)"))
+        self.take_roles.setChecked(True)
+        what.addWidget(self.take_names)
+        what.addWidget(self.take_roles)
+        what.addStretch(1)
+        f.addRow(_t("가져올 것"), what)
+        self.start = QtWidgets.QComboBox()
+        f.addRow(_t("시작 레인"), self.start)
+        v.addLayout(f)
+        self.table = QtWidgets.QTableWidget(0, 3)
+        self.table.verticalHeader().hide()
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setColumnWidth(0, 110)
+        self.table.setColumnWidth(1, 110)
+        self.table.setMinimumHeight(220)
+        v.addWidget(self.table, 1)
+        self.link = QtWidgets.QCheckBox()
+        self.link.setChecked(True)
+        v.addWidget(self.link)
+        self.note = controls.hint("")
+        v.addWidget(self.note)
+        bb = QtWidgets.QDialogButtonBox()
+        bb.addButton(_t("취소"), QtWidgets.QDialogButtonBox.RejectRole)
+        ok = controls.prominent(bb.addButton(_t("불러오기"), QtWidgets.QDialogButtonBox.AcceptRole))
+        ok.setDefault(True)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        self.ok = ok
+        v.addWidget(bb)
+        self.src.currentIndexChanged.connect(self._fill_starts)
+        self.start.currentIndexChanged.connect(self._preview)
+        self.take_names.toggled.connect(self._preview)
+        self.take_roles.toggled.connect(self._preview)
+        self._fill_starts()
+        self.resize(560, 580)
+
+    def _doc(self):
+        return self.docs[self.src.currentIndex()]
+
+    def _key(self):
+        return self.main.doc_key(self.main.docs.index(self._doc()))
+
+    def _fill_starts(self):
+        d = self._doc()
+        sa = d.analysis
+        key = self._key()
+        old = self.start.currentData()
+        self.start.blockSignals(True)
+        self.start.clear()
+        for k in range(sa.n_lanes):  # this blot's L1 = their L(k+1)
+            self.start.addItem(_t("이 블롯 L1 = {0}의 L{1} ({2})").format(key, k + 1, sa.lane_labels[k]), k)
+        for k in range(1, self.target.n_lanes):  # their L1 = this blot's L(k+1)
+            self.start.addItem(_t("{0}의 L1 = 이 블롯 L{1}").format(key, k + 1), -k)
+        link = self.target.lane_link or {}
+        want = int(link.get("start", 0)) if link.get("doc") == d.uid else (old if old is not None else 0)
+        self.start.setCurrentIndex(max(0, self.start.findData(want)))
+        self.start.blockSignals(False)
+        self.link.setText(_t("Figure에서 {0}과 같은 레인으로 맞추기 (연결)").format(key))
+        self._preview()
+
+    def _preview(self):
+        sa = self._doc().analysis
+        core.sync_lane_roles(sa)
+        k0 = int(self.start.currentData() or 0)
+        key = self._key()
+        t = self.table
+        t.setHorizontalHeaderLabels([_t("이 블롯"), _t("←  {0} 레인").format(key), _t("이름")])
+        n = self.target.n_lanes
+        t.setRowCount(n)
+        pairs = []
+        for j in range(n):
+            k = j + k0
+            ok = 0 <= k < sa.n_lanes
+            if ok:
+                pairs.append((j, k))
+            name = sa.lane_labels[k] if ok else _t("(그대로: {0})").format(self.target.lane_labels[j])
+            if ok and self.take_roles.isChecked() and sa.lane_roles[k] != core.LANE_SAMPLE:
+                name += f"  · {core.LANE_ROLE_LABELS[sa.lane_roles[k]]}"
+            for c, txt in enumerate((f"L{j + 1}", f"L{k + 1}" if ok else "–", name)):
+                it = QtWidgets.QTableWidgetItem(txt)
+                if not ok:
+                    it.setForeground(self.palette().color(QtGui.QPalette.PlaceholderText))
+                t.setItem(j, c, it)
+        self.ok.setEnabled(bool(pairs))
+        if pairs:
+            mine = f"L{pairs[0][0] + 1}–L{pairs[-1][0] + 1}" if len(pairs) > 1 else f"L{pairs[0][0] + 1}"
+            theirs = f"L{pairs[0][1] + 1}–L{pairs[-1][1] + 1}" if len(pairs) > 1 else f"L{pairs[0][1] + 1}"
+            self.note.setText(_t("연결하면 Figure에서 이 블롯의 레인이 {0}의 같은 레인 바로 아래에 오도록 자동으로 "
+                                 "정렬됩니다. 이 블롯의 {1}이 {0}의 {2}와 짝지어집니다.").format(key, mine, theirs))
+        else:
+            self.note.setText(_t("겹치는 레인이 없습니다. 시작 레인을 바꾸세요."))
+
+    def result_values(self):
+        return (self._doc(), int(self.start.currentData() or 0), self.take_names.isChecked(),
+                self.take_roles.isChecked(), self.link.isChecked())
+
+
 class MainWindow(QtWidgets.QMainWindow):
     # attributes of the image shown in the view
     image_path = _doc_attr("image_path")
@@ -2757,9 +2878,39 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_lanes_inspector(self):
         page = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(page)
+        # 1.5.0: "🔗 I1의 L2–L8과 연결됨 [연결 끊기]" when the lanes were loaded from another blot
+        self.lane_link_chip = QtWidgets.QFrame()
+        self.lane_link_chip.setObjectName("laneLinkChip")
+        ch = QtWidgets.QHBoxLayout(self.lane_link_chip)
+        ch.setContentsMargins(10, 6, 8, 6)
+        self.lane_link_label = QtWidgets.QLabel()
+        self.lane_link_label.setWordWrap(True)
+        ch.addWidget(self.lane_link_label, 1)
+        b = QtWidgets.QPushButton(_t("연결 끊기"))
+        b.setToolTip(_t("Figure에서 이 블롯을 다시 가운데에 맞춥니다. 레인 이름은 그대로 둡니다."))
+        b.clicked.connect(self.unlink_lanes)
+        ch.addWidget(b)
+        self.lane_link_chip.setVisible(False)
+        lay.addWidget(self.lane_link_chip)
         g = QtWidgets.QGroupBox(_t("레인"))
         self.lane_grid = QtWidgets.QGridLayout(g)
         lay.addWidget(g)
+        hb = QtWidgets.QHBoxLayout()
+        b = QtWidgets.QPushButton(_t("복사"))
+        b.setToolTip(_t("레인 이름과 역할을 복사합니다 (엑셀에 붙여넣기도 됩니다)"))
+        b.clicked.connect(self.copy_lanes)
+        hb.addWidget(b)
+        b = QtWidgets.QPushButton(_t("붙여넣기"))
+        b.setToolTip(_t("복사한 레인 이름을 L1부터 넣습니다 (엑셀 열 · 줄마다 이름 하나)"))
+        b.clicked.connect(self.paste_lanes)
+        hb.addWidget(b)
+        hb.addStretch(1)
+        self.lane_load_btn = controls.prominent(QtWidgets.QPushButton(_t("레인 불러오기 ▾")))
+        self.lane_load_btn.setToolTip(_t("다른 블롯에서 등록한 레인 이름·역할을 불러옵니다"))
+        self.lane_load_menu = QtWidgets.QMenu(self.lane_load_btn)
+        self.lane_load_btn.clicked.connect(self.show_lane_load_menu)  # no setMenu: no second arrow
+        hb.addWidget(self.lane_load_btn)
+        lay.addLayout(hb)
         lay.addWidget(controls.hint(_t("역할: 시료 · 마커(ladder) · 제외. 이름이 같은 레인은 반복으로 평균 ± SD.")))
         g = QtWidgets.QGroupBox(_t("단백질"))
         self.prot_grid = QtWidgets.QGridLayout(g)
@@ -2822,6 +2973,7 @@ class MainWindow(QtWidgets.QMainWindow):
             cb.currentIndexChanged.connect(lambda _=None, i=i, cb=cb: self.set_lane_role(i, cb.currentData()))
             g.addWidget(cb, i + 1, 2)
         g.setColumnStretch(1, 1)
+        self.refresh_lane_link()
         self.fill_groupings()
         self.fill_basis_combo()
         self.refresh_steps()
@@ -2846,6 +2998,161 @@ class MainWindow(QtWidgets.QMainWindow):
             g.addWidget(cb, i, 2)
         g.setColumnStretch(1, 1)
         self.update_sel_card()
+
+    # ---- 1.5.0: lane names from another blot (copy · paste · load, linked lanes)
+    def doc_by_uid(self, uid) -> Optional["ImageDoc"]:
+        return next((d for d in self.docs if d.raw is not None and d.uid == uid), None)
+
+    def refresh_lane_link(self):
+        a = self.analysis
+        ln = a.lane_link
+        chip = self.lane_link_chip
+        chip.setVisible(bool(ln))
+        if not ln:
+            return
+        blue = theme.color("blue")
+        bg = QtGui.QColor(blue)
+        bg.setAlphaF(0.12)
+        chip.setStyleSheet(f"#laneLinkChip {{ background: rgba({bg.red()},{bg.green()},{bg.blue()},{bg.alphaF():.2f}); "
+                           f"border-radius: 8px; }}")
+        self.lane_link_label.setStyleSheet(f"color: {theme.color('link').name()};")
+        src = self.doc_by_uid(ln.get("doc"))
+        k = int(ln.get("start", 0))
+        n_src = src.analysis.n_lanes if src is not None else k + a.n_lanes
+        pairs = [(j, j + k) for j in range(a.n_lanes) if 0 <= j + k < n_src]
+        if src is None:
+            self.lane_link_label.setText(_t("🔗 '{0}'과 연결됨 (열려 있지 않음)").format(ln.get("name", "")))
+        elif not pairs:
+            self.lane_link_label.setText(_t("🔗 {0}과 연결됨 (겹치는 레인 없음)").format(self.doc_key(self.docs.index(src))))
+        else:
+            key = self.doc_key(self.docs.index(src))
+            lo, hi = pairs[0][1] + 1, pairs[-1][1] + 1
+            rng = f"L{lo}" if lo == hi else f"L{lo}–L{hi}"
+            if pairs[0][0] == 0 and len(pairs) == a.n_lanes:
+                self.lane_link_label.setText(_t("🔗 {0}의 {1}과 연결됨").format(key, rng))
+            else:
+                mine = f"L{pairs[0][0] + 1}–L{pairs[-1][0] + 1}" if len(pairs) > 1 else f"L{pairs[0][0] + 1}"
+                self.lane_link_label.setText(_t("🔗 {0} ↔ {1}의 {2}과 연결됨").format(mine, key, rng))
+
+    def unlink_lanes(self):
+        self.analysis.lane_link = None
+        self.refresh_lane_link()
+        self._figure_changed(self.doc)
+
+    def _lane_text(self, a) -> str:
+        a.ensure_lane_labels()
+        core.sync_lane_roles(a)
+        return "\n".join(f"{a.lane_labels[i]}\t{core.LANE_ROLE_LABELS.get(a.lane_roles[i], '')}"
+                         for i in range(a.n_lanes))
+
+    def copy_lanes(self):
+        text = self._lane_text(self.analysis)
+        QtWidgets.QApplication.clipboard().setText(text)
+        self._lane_clip = (self.doc.uid, text)
+        self.statusBar().showMessage(_t("레인 {0}개를 복사했습니다. 다른 블롯에서 '붙여넣기'를 누르세요.").format(self.analysis.n_lanes), 4000)
+
+    @staticmethod
+    def parse_lane_text(text: str):
+        """Lines of 'name' or 'name<TAB>role' (Excel column(s)) → [(name, role or None)]."""
+        by_label = {}
+        for r in core.LANE_ROLES:
+            for lab in (core.LANE_ROLE_LABELS[r], r, {"sample": "시료", "marker": "마커", "exclude": "제외"}.get(r, "")):
+                if lab:
+                    by_label[str(lab).strip().lower()] = r
+        for lab, r in (("sample", core.LANE_SAMPLE), ("marker", core.LANE_MARKER), ("ladder", core.LANE_MARKER),
+                       ("exclude", core.LANE_EXCLUDE), ("시료", core.LANE_SAMPLE), ("마커", core.LANE_MARKER),
+                       ("제외", core.LANE_EXCLUDE)):
+            by_label[lab] = r
+        out = []
+        lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if len(lines) == 1 and "\t" in lines[0] and not any(c.strip().lower() in by_label for c in lines[0].split("\t")[1:]):
+            lines = lines[0].split("\t")  # one Excel row: one name per cell
+        for ln in lines:
+            cells = ln.split("\t")
+            name = cells[0].strip()
+            role = by_label.get(cells[1].strip().lower()) if len(cells) > 1 else None
+            out.append((name, role))
+        return out
+
+    def paste_lanes(self):
+        text = QtWidgets.QApplication.clipboard().text()
+        clip = getattr(self, "_lane_clip", None)
+        if clip and clip[1] == text and clip[0] != self.doc.uid and self.doc_by_uid(clip[0]) is not None:
+            self.open_lane_load(self.doc_by_uid(clip[0]))  # copied from another blot: pick the lanes, link them
+            return
+        items = [(n, r) for n, r in self.parse_lane_text(text or "")]
+        if not any(n for n, _ in items):
+            self.statusBar().showMessage(_t("클립보드에 붙여넣을 레인 이름이 없습니다."), 4000)
+            return
+        names = [n for n, _ in items]
+        roles = [r for _, r in items]
+        n = self.apply_lane_info(names, roles if any(roles) else None, 0)
+        self.statusBar().showMessage(_t("레인 {0}개에 이름을 넣었습니다.").format(n), 4000)
+
+    def show_lane_load_menu(self):
+        self.fill_lane_load_menu()
+        b = self.lane_load_btn
+        m = self.lane_load_menu
+        m.popup(b.mapToGlobal(QtCore.QPoint(b.width() - m.sizeHint().width(), b.height())))
+
+    def fill_lane_load_menu(self):
+        m = self.lane_load_menu
+        m.clear()
+        others = [(k, d) for k, d in enumerate(self.docs) if d.raw is not None and d is not self.doc]
+        for k, d in others:
+            d.analysis.ensure_lane_labels()
+            act = m.addAction(_t("{0} · {1}  —  레인 {2}개").format(self.doc_key(k), d.name, d.analysis.n_lanes))
+            act.setEnabled(d.analysis.n_lanes > 0)
+            act.triggered.connect(lambda _=False, d=d: self.open_lane_load(d))
+        if not others:
+            m.addAction(_t("열려 있는 다른 블롯이 없습니다")).setEnabled(False)
+        m.addSeparator()
+        m.addAction(_t("클립보드에서 붙여넣기 (엑셀 열 · 줄마다 이름)")).triggered.connect(self.paste_lanes)
+
+    def open_lane_load(self, src=None):
+        others = [d for d in self.docs if d.raw is not None and d is not self.doc and d.analysis.n_lanes]
+        if not others:
+            return
+        dlg = LaneLoadDialog(self, others, src if src in others else others[0])
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        d, start, take_names, take_roles, link = dlg.result_values()
+        sa = d.analysis
+        sa.ensure_lane_labels()
+        core.sync_lane_roles(sa)
+        names = [sa.lane_labels[i] for i in range(sa.n_lanes)]
+        roles = [sa.lane_roles[i] for i in range(sa.n_lanes)]
+        self.apply_lane_info(names if take_names else None, roles if take_roles else None, start)
+        self.analysis.lane_link = {"doc": d.uid, "start": int(start), "name": d.name} if link else None
+        self.refresh_lane_link()
+        self._figure_changed(self.doc)
+
+    def apply_lane_info(self, names, roles, start: int) -> int:
+        """This blot's lane j takes lane j + start of ``names`` / ``roles`` (None: keep). Returns how many."""
+        a = self.analysis
+        a.ensure_lane_labels()
+        core.sync_lane_roles(a)
+        n = 0
+        for j in range(a.n_lanes):
+            k = j + start
+            src_len = len(names) if names is not None else len(roles or [])
+            if not 0 <= k < src_len:
+                continue
+            if names is not None and k < len(names) and names[k]:
+                a.lane_labels[j] = names[k]
+                if names[k] not in a.named_lanes:
+                    a.named_lanes.append(names[k])
+            if roles is not None and k < len(roles) and roles[k]:
+                a.lane_roles[j] = roles[k]
+            n += 1
+        if roles is not None and self.doc.mode == core.MODE_GEL:
+            core.set_ladder_lanes(a, [k for k, r in enumerate(a.lane_roles) if r == core.LANE_MARKER])
+            core.sync_lane_roles(a)
+        self.view.refresh_items()
+        self.structure_changed()
+        return n
 
     def rename_lane(self, i, text):
         a = self.analysis
@@ -6571,6 +6878,9 @@ class MainWindow(QtWidgets.QMainWindow):
             for p in (d.figure or {}).get("panels", []):
                 if p.get("doc") in renamed:
                     p["doc"] = renamed[p["doc"]]
+            ln = d.analysis.lane_link
+            if ln and ln.get("doc") in renamed:
+                ln["doc"] = renamed[ln["doc"]]
         for d in docs:
             self.resolve_panel_refs(d, docs)
 
