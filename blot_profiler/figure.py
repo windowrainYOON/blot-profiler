@@ -659,7 +659,12 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
         keeps its own marker strip and kDa ticks (1.4.7: also the other images in the figure)."""
         if p.get("doc"):
             src_d = (sources or {}).get(p["doc"]) or {}
-            return src_d.get("marker"), src_d.get("figure") or {}
+            fs_ = src_d.get("figure") or {}
+            if fs_.get("marker_in_blot"):  # 1.5.2: the marker lane of that blot itself
+                return src_d.get("signal"), {**fs_, "marker_invert": True}
+            return src_d.get("marker"), fs_
+        if s.get("marker_in_blot"):
+            return signal, {**s, "marker_invert": True}
         return marker, s
 
     def strip_of(p):  # this figure's switch turns every image's strip on or off

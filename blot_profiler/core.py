@@ -2001,3 +2001,67 @@ def orientation_label(tf: Optional[dict]) -> str:
         if k == int(tf.get("rot90", 0)) % 4 and flip == bool(tf.get("flip", False)):
             return label
     return _t("원래대로")
+
+
+# ---------------------------------------------------------------- 1.5.2 마커 정의
+def find_marker_bands(img: np.ndarray, x0: int, x1: int, min_gap: float = 8.0) -> List[float]:
+    """Heights (top to bottom) of the ladder bands inside the marker strip ``img[:, x0:x1]``.
+
+    Works for a white-light marker photo (dark bands on a light membrane) and for a marker lane
+    of the blot itself (bright or dark bands): the sign with the clearer peaks wins."""
+    from scipy import ndimage as ndi
+    from scipy.signal import find_peaks
+
+    img = np.asarray(img, float)
+    if img.ndim == 3:
+        img = img.mean(axis=2)
+    H, W = img.shape
+    x0, x1 = max(0, int(x0)), min(W, int(x1))
+    if x1 - x0 < 2 or H < 10:
+        return []
+    prof = ndi.gaussian_filter1d(img[:, x0:x1].mean(axis=1), 1.5)
+    base = ndi.median_filter(prof, size=max(15, int(H // 12) | 1), mode="nearest")
+    best: List[float] = []
+    best_score = 0.0
+    for sign in (1.0, -1.0):
+        d = sign * (prof - base)
+        spread = float(np.percentile(np.abs(d), 90)) or 1.0
+        pk, info = find_peaks(d, prominence=max(0.25 * float(d.max()), 2.0 * float(np.median(np.abs(d))) + 1e-9),
+                              distance=max(3, int(min_gap)))
+        if not len(pk):
+            continue
+        score = float(np.sum(info["prominences"])) / spread
+        if score > best_score:
+            best_score, best = score, [float(y) for y in pk]
+    return best
+
+
+def copy_marker_sizes(src: dict, dst: dict) -> None:
+    """Ladder, unit and the sizes of ``src`` (figure settings) into ``dst``, band by band from the
+    top; ``dst`` keeps its own band positions (with none, only the ladder is copied)."""
+    dst["ladder"] = src.get("ladder")
+    dst["unit"] = src.get("unit", "kDa")
+    sizes = [m.get("kda") for m in src.get("kda", [])]
+    marks = dst.setdefault("kda", [])
+    for i, m in enumerate(marks):
+        m["kda"] = sizes[i] if i < len(sizes) else None
+    if marks:
+        dst["show_kda"] = True
+
+
+def marker_strip_lanes(a: "Analysis", x0: float, x1: float) -> List[int]:
+    """Lanes whose centre lies inside the marker strip drawn on the blot (x0 … x1)."""
+    if x1 <= x0:
+        return []
+    out = []
+    for lane in range(a.n_lanes):
+        xs = [b.cx for b in a.bands if b.lane == lane]
+        if xs:
+            cx = float(np.median(xs))
+        elif lane < len(a.lane_lines) and a.lane_lines[lane]:
+            cx = float(np.mean([p[0] for p in a.lane_lines[lane]]))
+        else:
+            continue
+        if x0 <= cx <= x1:
+            out.append(lane)
+    return out

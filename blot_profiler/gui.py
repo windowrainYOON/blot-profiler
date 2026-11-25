@@ -9,7 +9,7 @@ import uuid
 import re
 import sys
 import traceback
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -311,6 +311,7 @@ class BlotView(QtWidgets.QGraphicsView):
         self.sel: Optional[dict] = None
         self._drag: Optional[dict] = None
         self.marker_s: Optional[dict] = None  # figure settings of the image: marker strip and size marks
+        self.marker_in_blot = False  # 1.5.2: the marker strip sits on a marker lane of the blot itself
         self._space = False
         self._pan = None
         self.show_set: Optional[str] = None  # grouping set drawn on the image
@@ -530,12 +531,17 @@ class BlotView(QtWidgets.QGraphicsView):
                 return i, None
         return None
 
+    def _mhost(self):
+        """The picture the marker strip is drawn on: the marker photo, or the blot (1.5.2)."""
+        return self.pix_item if self.marker_in_blot else self.marker_item
+
     def _marker_x(self, x) -> float:
-        return (self.marker_item.x() if self.marker_item is not None else 0.0) + x
+        h = self._mhost()
+        return (h.x() if h is not None else 0.0) + x
 
     def _tick_hit(self, pos):
         s = self.marker_s
-        if not s or self.marker_item is None:
+        if not s or self._mhost() is None:
             return None
         x0, x1 = self._marker_x(s.get("strip_x0", 0)), self._marker_x(s.get("strip_x1", 0))
         for i, k in enumerate(s.get("kda", [])):
@@ -591,7 +597,7 @@ class BlotView(QtWidgets.QGraphicsView):
                         self._handle(x, y, "square", self.PROT_RED, on, 4.0)
                 self._tag(p["x1"] + 6, p["y1"], str(p.get("row", "")), self.PROT_RED, True, below=None)
         s = self.marker_s
-        if self.marker_item is not None and s and (tool == "marker" or s.get("kda")):
+        if self._mhost() is not None and s and (tool == "marker" or (s.get("kda") and not self.marker_in_blot)):
             x0, x1 = self._marker_x(s.get("strip_x0", 0)), self._marker_x(s.get("strip_x1", 0))
             if x1 > x0:
                 pen = QtGui.QPen(QtGui.QColor(self.MARK_ORANGE), 1.5, Qt.DashLine)
@@ -697,8 +703,8 @@ class BlotView(QtWidgets.QGraphicsView):
             self.rebuild_lines()
             return True
         if self.tool == "marker":
-            if self.marker_item is None or not self.marker_s:
-                self.toolHint.emit(_t("마커 이미지가 없습니다 — 오른쪽 '마커' 카드에서 마커 이미지를 넣으세요"))
+            if self._mhost() is None or not self.marker_s:
+                self.toolHint.emit(_t("마커 이미지가 없습니다 — 오른쪽 '마커 위치'에서 마커 이미지를 넣거나 '블롯 안 레인'을 고르세요"))
                 return True
             t = self._tick_hit(pos)
             s = self.marker_s
@@ -706,7 +712,7 @@ class BlotView(QtWidgets.QGraphicsView):
                 self.sel = {"kind": "tick", "i": t}
                 self._drag = {"kind": "tick", "i": t, "p0": p}
                 self.tickSelected.emit(t)
-            elif self.marker_item.sceneBoundingRect().contains(p):
+            elif self._mhost().sceneBoundingRect().contains(p):
                 x0, x1 = self._marker_x(s.get("strip_x0", 0)), self._marker_x(s.get("strip_x1", 0))
                 if x1 > x0 and x0 <= p.x() <= x1:  # inside the strip: a new size mark
                     s.setdefault("kda", []).append({"kda": None, "y": float(p.y())})
@@ -785,9 +791,9 @@ class BlotView(QtWidgets.QGraphicsView):
             if x1 < x0:
                 x0, y0, x1, y1 = x1, y1, x0, y0
             self.proteinDrawn.emit(x0, y0, x1, y1)
-        elif k == "strip" and moved and self.marker_item is not None:
-            mx = self.marker_item.x()
-            w = self.marker_item.pixmap().width()
+        elif k == "strip" and moved and self._mhost() is not None:
+            mx = self._mhost().x()
+            w = self._mhost().pixmap().width()
             xa, xb = sorted((p.x() - mx, st["p0"].x() - mx))
             self.marker_s["strip_x0"], self.marker_s["strip_x1"] = int(max(0, xa)), int(min(w, xb))
             self.marker_s["show_strip"] = True
@@ -2532,7 +2538,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas_note = QtWidgets.QLabel()
         theme.hint(self.canvas_note)
         head.addWidget(self.canvas_note)
-        self.tool_seg = controls.Segmented([("select", _t("선택")), ("lane", _t("레인 선")), ("protein", _t("단백질 선")), ("marker", _t("마커 영역"))])
+        self.tool_seg = controls.Segmented([("select", _t("선택")), ("lane", _t("레인 선")), ("protein", _t("단백질 선"))])  # 마커 영역: step 1 (1.5.2)
         self.tool_seg.changed.connect(self.set_tool)
         head.addWidget(self.tool_seg)
         from .ui.hig_widgets import IconButton  # noqa: PLC0415
@@ -2557,6 +2563,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cl.addLayout(st)
 
         self.inspector = QtWidgets.QStackedWidget()
+        self.inspector.addWidget(self._inspector_page(self._build_marker_inspector()))  # 1.5.2: 1 마커 정의
         self.inspector.addWidget(self._inspector_page(self._build_detect_inspector()))
         self.inspector.addWidget(self._inspector_page(self._build_lanes_inspector()))
         insp = QtWidgets.QWidget()
@@ -2633,7 +2640,7 @@ class MainWindow(QtWidgets.QMainWindow):
         hb.addWidget(b)
         lay.addLayout(hb)
         self.img_list = controls.SideList()
-        self.img_list.currentRowChanged.connect(self.switch_doc)
+        self.img_list.currentRowChanged.connect(self._on_img_row)
         self.img_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.img_list.customContextMenuRequested.connect(self._img_menu)
         lay.addWidget(self.img_list)
@@ -2647,15 +2654,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _img_menu(self, pos):
         row = self.img_list.indexAt(pos).row()
-        if row < 0:
+        rows = getattr(self, "_img_rows", [])
+        if not 0 <= row < len(rows):
             return
+        row = rows[row][0]
         m = QtWidgets.QMenu(self)
         m.addAction(_t("이 이미지 닫기"), lambda: self.close_doc(row))
         m.exec(self.img_list.mapToGlobal(pos))
 
+    STEP_MARKER, STEP_DETECT, STEP_LANES = 0, 1, 2  # 1.5.2: 마커 정의 is the first step
+
     def refresh_steps(self):
         a = self.analysis
-        rows = [(_t("1  검출"), _t("레인 {0} · 줄 {1}").format(a.n_lanes, len(a.rows)) if a.bands else ""), (_t("2  레인 / 단백질"), "")]
+        note = self.marker_status(self.doc)[0] if self.docs and self.doc.raw is not None else ""
+        rows = [(_t("1  마커 정의"), note),
+                (_t("2  검출"), _t("레인 {0} · 줄 {1}").format(a.n_lanes, len(a.rows)) if a.bands else ""),
+                (_t("3  레인 / 단백질"), "")]
         self.step_list.set_rows(rows, self.step)
 
     def set_step(self, i: int):
@@ -2663,16 +2677,27 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.step = i
         self.inspector.setCurrentIndex(i)
-        self.canvas_title.setText(_t("검출") if i == 0 else _t("레인 / 단백질"))
-        self.tool_seg.setVisible(i == 0)
-        self.region_btn.setVisible(i == 0)
-        self.canvas_note.setVisible(i == 1)
-        self.canvas_note.setText(_t("박스를 클릭·드래그로 선택, 더블클릭으로 크기 수정, 끌어서 이동"))
-        if i == 1 and self.view.tool != "select":
+        self.canvas_title.setText({0: _t("마커 정의"), 1: _t("검출")}.get(i, _t("레인 / 단백질")))
+        self.tool_seg.setVisible(i == self.STEP_DETECT)
+        self.region_btn.setVisible(i in (self.STEP_MARKER, self.STEP_DETECT))
+        self.canvas_note.setVisible(i != self.STEP_DETECT)
+        self.canvas_note.setText(_t("끌기: 마커 영역 · 클릭: 밴드 넣기") if i == self.STEP_MARKER
+                                 else _t("박스를 클릭·드래그로 선택, 더블클릭으로 크기 수정, 끌어서 이동"))
+        if i == self.STEP_MARKER:
+            self.view.set_tool("marker")
+            self.refresh_marker_view()
+            self.statusBar().showMessage(_t("마커 정의: 마커 위를 끌어 마커 영역을 정하고, 영역 안을 클릭해 밴드 위치를 넣으세요"))
+        elif self.view.tool not in ("select",) and (i == self.STEP_LANES or self.view.tool == "marker"):
             self.tool_seg.set_value("select")
             self.set_tool("select")
+        if i != self.STEP_MARKER and self.view.marker_in_blot:
+            self.view.rebuild_lines()
         self.refresh_steps()
+        if hasattr(self, "_img_rows"):
+            self.refresh_doc_tabs()
         self.update_key_hint()
+        if hasattr(self, "coach"):
+            self.update_coach()
 
     def set_tool(self, tool: str):
         self.view.set_tool(tool)
@@ -2684,7 +2709,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(msg)
 
     def update_key_hint(self):
-        tail = (_t("드래그: 선택 · ROI 수정 · 영역 설정") if self.step == 0
+        tail = (_t("드래그: 마커 영역 · 클릭: 밴드 넣기 · ⌫ 지우기") if self.step == self.STEP_MARKER
+                else _t("드래그: 선택 · ROI 수정 · 영역 설정") if self.step == self.STEP_DETECT
                 else _t("더블클릭: 크기 수정 · ⌫ 지우기 · 우클릭: 그룹·병합"))
         self.key_hint.setText(_t("[ 축소   ] 확대   Space + 드래그: 화면 이동   {0}").format(tail))
 
@@ -2758,39 +2784,6 @@ class MainWindow(QtWidgets.QMainWindow):
         f.addRow(self.pline_box)
         lay.addWidget(g)
 
-        g, f = controls.card(_t("마커"))
-        hb = QtWidgets.QHBoxLayout()
-        self.marker_name = QtWidgets.QLabel(_t("없음"))
-        self.marker_name.setWordWrap(True)
-        self.marker_name.setMinimumWidth(40)
-        theme.hint(self.marker_name)
-        hb.addWidget(self.marker_name, 1)
-        b = QtWidgets.QPushButton(_t("바꾸기…"))
-        b.clicked.connect(self.open_marker)
-        hb.addWidget(b)
-        f.addRow(_t("마커 이미지"), hb)
-        self.ladder_combo = QtWidgets.QComboBox()
-        self.ladder_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.ladder_combo.setMinimumContentsLength(10)
-        self.ladder_combo.currentIndexChanged.connect(lambda _: self.apply_ladder())
-        f.addRow(_t("래더"), self.ladder_combo)
-        hb = QtWidgets.QHBoxLayout()
-        self.first_kda = QtWidgets.QDoubleSpinBox()
-        self.first_kda.setRange(0, 100000)
-        self.first_kda.setDecimals(0)
-        self.first_kda.setSpecialValueText("—")
-        self.first_kda.setKeyboardTracking(False)
-        self.first_kda.valueChanged.connect(lambda _: self.apply_ladder())
-        hb.addWidget(self.first_kda)
-        self.kda_unit = QtWidgets.QLabel("kDa")
-        hb.addWidget(self.kda_unit)
-        f.addRow(_t("첫 마커 크기"), hb)
-        self.kda_chips = controls.ChipRow()
-        self.kda_chips.clicked.connect(self.edit_kda_chip)
-        f.addRow(controls.hint(_t("마커 영역 도구로 영역을 그리고 밴드를 클릭하세요. 나머지는 래더 순서로 자동 · 칩을 눌러 고침")))
-        f.addRow(self.kda_chips)
-        lay.addWidget(g)
-
         disp = QtWidgets.QWidget()
         dl = QtWidgets.QFormLayout(disp)
         hb = QtWidgets.QHBoxLayout()
@@ -2809,6 +2802,74 @@ class MainWindow(QtWidgets.QMainWindow):
         col = controls.Collapsible(_t("세부 설정"), body)
         col.btn.setToolTip(_t("배경 제거 · 회전·자르기 · 검출 값 · 보기"))
         lay.addWidget(col)
+        lay.addStretch(1)
+        return page
+
+    # ---- inspector: 마커 정의 (1.5.2)
+    def _build_marker_inspector(self):
+        page = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(page)
+        g, f = controls.card(_t("마커 위치"))
+        self.marker_where = controls.Segmented([("photo", _t("따로 찍은 사진")), ("blot", _t("블롯 안 레인"))], small=True)
+        self.marker_where.setToolTip(_t("마커(ladder)가 따로 찍은 사진에 있는지, 블롯 이미지 안의 레인에 있는지 고릅니다"))
+        self.marker_where.changed.connect(self.set_marker_where)
+        f.addRow(_t("마커"), self.marker_where)
+        self.marker_photo_row = QtWidgets.QWidget()
+        hb = QtWidgets.QHBoxLayout(self.marker_photo_row)
+        hb.setContentsMargins(0, 0, 0, 0)
+        cap = QtWidgets.QLabel(_t("마커 이미지"))
+        hb.addWidget(cap)
+        self.marker_name = QtWidgets.QLabel(_t("없음"))
+        self.marker_name.setWordWrap(True)
+        self.marker_name.setMinimumWidth(40)
+        theme.hint(self.marker_name)
+        hb.addWidget(self.marker_name, 1)
+        self.marker_change_btn = QtWidgets.QPushButton(_t("바꾸기…"))
+        self.marker_change_btn.clicked.connect(self.open_marker)
+        hb.addWidget(self.marker_change_btn)
+        f.addRow(self.marker_photo_row)
+        self.marker_where_hint = controls.hint("")
+        f.addRow(self.marker_where_hint)
+        lay.addWidget(g)
+
+        g, f = controls.card(_t("래더"))
+        self.ladder_combo = QtWidgets.QComboBox()
+        self.ladder_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.ladder_combo.setMinimumContentsLength(10)
+        self.ladder_combo.currentIndexChanged.connect(lambda _: self.apply_ladder())
+        f.addRow(_t("래더"), self.ladder_combo)
+        self.kda_unit = QtWidgets.QLabel("kDa")  # unit of the size fields, follows the ladder
+        lay.addWidget(g)
+
+        g, f = controls.card(_t("마커 밴드 크기"))
+        self.size_box = QtWidgets.QWidget()
+        self.size_grid = QtWidgets.QGridLayout(self.size_box)
+        self.size_grid.setContentsMargins(0, 0, 0, 0)
+        self.size_grid.setHorizontalSpacing(8)
+        self.size_grid.setVerticalSpacing(2)
+        self.size_fields: List[QtWidgets.QLineEdit] = []
+        f.addRow(self.size_box)
+        self.size_empty = controls.hint(_t("아직 밴드 표시가 없습니다. 캔버스에서 마커 영역을 끌어 정하고 영역 안을 클릭하거나 '밴드 자동 찾기'를 누르세요."))
+        f.addRow(self.size_empty)
+        hb = QtWidgets.QHBoxLayout()
+        b = QtWidgets.QPushButton(_t("래더 순서로 채우기"))
+        b.setToolTip(_t("크기를 넣은 밴드(선택한 밴드 먼저)를 기준으로 나머지를 래더 순서대로 채웁니다"))
+        b.clicked.connect(self.fill_marker_sizes)
+        self.fill_sizes_btn = b
+        hb.addWidget(b)
+        b = QtWidgets.QPushButton(_t("밴드 자동 찾기"))
+        b.setToolTip(_t("마커 영역 안의 밴드를 찾아 밴드 표시를 새로 넣습니다 (넣어 둔 크기는 순서대로 남깁니다)"))
+        b.clicked.connect(self.auto_marker_bands)
+        self.auto_bands_btn = b
+        hb.addWidget(b)
+        f.addRow(hb)
+        b = QtWidgets.QPushButton(_t("이 래더 · 크기를 다른 이미지에도…"))
+        b.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        b.clicked.connect(self.copy_marker_sizes)
+        self.copy_sizes_btn = b
+        f.addRow(b)
+        f.addRow(controls.hint(_t("크기를 하나만 넣고 '래더 순서로 채우기'를 누르면 나머지가 래더 순서대로 들어갑니다. 캔버스에서 밴드 표시를 끌어 옮기거나 ⌫로 지웁니다.")))
+        lay.addWidget(g)
         lay.addStretch(1)
         self.fill_ladders()
         return page
@@ -2830,7 +2891,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_coach(self):
         d = self.doc if self.docs else None
-        show = d is not None and d.raw is not None and not d.analysis.bands
+        show = (d is not None and d.raw is not None and not d.analysis.bands
+                and getattr(self, "step", 1) == self.STEP_DETECT)  # 1.5.2: not over the 마커 정의 step
         if show:
             self.coach.set_state(len(d.analysis.lane_lines), len(d.analysis.protein_lines))
         self.coach.setVisible(show)
@@ -3214,7 +3276,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def new_protein(self):
         if self.doc.raw is None:
             return
-        self.set_step(1)
+        self.set_step(self.STEP_LANES)
         self.set_draw_mode("box")
         self.statusBar().showMessage(_t("새 단백질: 이미지에서 박스 하나를 드래그로 그리세요 · Esc 취소"))
 
@@ -3387,70 +3449,261 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_marker_edited(self, msg):
         s = self._marker_s()
         s["show_kda"] = bool(s.get("kda"))
+        s.setdefault("marker_in_blot", self.marker_in_blot(self.doc))  # saved with the image from now on
+        if self.apply_blot_marker_lanes(self.doc) and self.analysis.bands:
+            self.fill_lanes_table()
+            self.remeasure()
         self.refresh_marker_card()
+        self.refresh_steps()
+        self.refresh_doc_tabs()
         self._figure_changed(self.doc)
         self.statusBar().showMessage(msg)
 
     def on_tick_selected(self, i):
-        s = self._marker_s()
-        k = s.get("kda", [])
-        self.first_kda.blockSignals(True)
-        self.first_kda.setValue(float(k[i]["kda"]) if 0 <= i < len(k) and k[i].get("kda") else 0)
-        self.first_kda.blockSignals(False)
         self.refresh_marker_card()
+        if 0 <= i < len(self.size_fields):
+            self.size_fields[i].setFocus()
+            self.size_fields[i].selectAll()
 
     def _anchor(self):
+        """The band the ladder order is counted from: the selected one if it has a size, else the
+        first band with a size."""
         sel = self.view.sel or {}
         k = self._marker_s().get("kda", [])
-        if sel.get("kind") == "tick" and 0 <= sel.get("i", -1) < len(k):
+        if sel.get("kind") == "tick" and 0 <= sel.get("i", -1) < len(k) and k[sel["i"]].get("kda"):
             return sel["i"]
-        return 0 if k else None
+        return next((i for i, m_ in enumerate(k) if m_.get("kda")), None)
+
+    def _presets(self):
+        return {**core.LADDER_PRESETS_KDA, **core.LADDER_PRESETS}
 
     def apply_ladder(self):
-        """The size of one marker band (첫 마커 크기) fills the others in the ladder's order."""
-        if not hasattr(self, "docs"):
+        """The ladder chosen for this image; the unit (kDa / bp) follows it."""
+        if not hasattr(self, "docs") or not self.docs:
             return
         s = self._marker_s()
         name = self.ladder_combo.currentData()
         s["ladder"] = name
         s["unit"] = "bp" if name in core.LADDER_PRESETS else "kDa"
         self.kda_unit.setText(s["unit"])
+        self.refresh_marker_card()
+        self._figure_changed(self.doc)
+
+    def fill_marker_sizes(self):
+        """래더 순서로 채우기: one band's size fills the others in the ladder's order."""
+        s = self._marker_s()
         marks = s.get("kda", [])
         i = self._anchor()
-        v = self.first_kda.value()
-        if i is None or not v:
-            self.refresh_marker_card()
+        if i is None:
+            self.statusBar().showMessage(_t("먼저 밴드 하나에 크기를 넣으세요"))
             return
-        presets = {**core.LADDER_PRESETS_KDA, **core.LADDER_PRESETS}
-        sizes = core.fill_ladder(len(marks), i, v, presets.get(name, core.DEFAULT_LADDER))
+        sizes = core.fill_ladder(len(marks), i, float(marks[i]["kda"]), self._presets().get(s.get("ladder"), core.DEFAULT_LADDER))
         for m_, sz in zip(marks, sizes):
             m_["kda"] = sz
-        s["unit"] = "bp" if name in core.LADDER_PRESETS else "kDa"  # the unit follows the ladder
-        self.on_marker_edited(_t("마커 크기를 래더 순서로 채웠습니다 — 칩을 눌러 하나씩 고칠 수 있습니다"))
+        self.on_marker_edited(_t("마커 크기를 래더 순서로 채웠습니다 — 칸을 눌러 하나씩 고칠 수 있습니다"))
         self.view.rebuild_lines()
 
-    def edit_kda_chip(self, i):
-        s = self._marker_s()
-        k = s.get("kda", [])
+    def set_marker_size(self, i, text):
+        k = self._marker_s().get("kda", [])
         if not 0 <= i < len(k):
             return
+        try:
+            v = float(text.replace(",", ".").strip()) if text.strip() else None
+        except ValueError:
+            v = k[i].get("kda")
+        if v is not None and v <= 0:
+            v = None
+        if v == k[i].get("kda"):
+            return
+        k[i]["kda"] = v
         self.view.sel = {"kind": "tick", "i": i}
         self.view.rebuild_lines()
-        v, ok = QtWidgets.QInputDialog.getDouble(self, _t("마커 크기"), _t("{0}번째 밴드 크기 ({1}):").format(i + 1, self.kda_unit.text()),
-                                                 float(k[i].get("kda") or 0), 0, 1e6, 1)
-        if ok:
-            k[i]["kda"] = float(v) if v else None
-            self.on_marker_edited(_t("마커 크기를 고쳤습니다"))
+        self.on_marker_edited(_t("마커 크기를 고쳤습니다"))
+
+    def delete_marker_band(self, i):
+        k = self._marker_s().get("kda", [])
+        if 0 <= i < len(k):
+            del k[i]
+            self.view.sel = None
             self.view.rebuild_lines()
+            self.on_marker_edited(_t("마커 밴드 표시를 지웠습니다"))
+
+    def marker_in_blot(self, d=None) -> bool:
+        """Is the marker of image ``d`` a lane of the blot itself (no separate marker photo)?"""
+        d = d or self.doc
+        f = d.figure or {}
+        return bool(f.get("marker_in_blot", d.marker is None and not f.get("marker_path")))
+
+    def apply_blot_marker_lanes(self, d, a=None) -> List[int]:
+        """1.5.2: lanes under a marker strip drawn on the blot itself are marker lanes
+        (left out of quantification). Returns those lanes."""
+        if d is None or d.raw is None or not self.marker_in_blot(d):
+            return []
+        f = d.figure or {}
+        a = a or d.analysis
+        lanes_ = core.marker_strip_lanes(a, float(f.get("strip_x0", 0)), float(f.get("strip_x1", 0)))
+        if lanes_:
+            core.sync_lane_roles(a)
+            for l in lanes_:
+                if a.lane_roles[l] == core.LANE_SAMPLE:
+                    a.lane_roles[l] = core.LANE_MARKER
+        return lanes_
+
+    def set_marker_where(self, where):
+        d = self.doc
+        if d.raw is None:
+            return
+        s = self._marker_s()
+        inb = where == "blot"
+        if bool(s.get("marker_in_blot", None)) == inb and "marker_in_blot" in s:
+            return
+        s["marker_in_blot"] = inb
+        s["kda"] = []  # band positions belong to the other picture
+        s["strip_x0"] = s["strip_x1"] = 0
+        if inb:
+            s["show_strip"] = False
+        self.refresh_marker_view()
+        self.view.fit()
+        self.on_marker_edited(_t("마커: 블롯 안 레인 — 블롯 위 마커 레인을 끌어 영역을 정하세요") if inb
+                              else _t("마커: 따로 찍은 사진 — 마커 사진 위를 끌어 영역을 정하세요"))
+        if not inb and d.marker is None:
+            self.open_marker()
+
+    def _marker_source(self, d=None):
+        """The picture the strip of image ``d`` lies on (marker photo, or the blot itself)."""
+        d = d or self.doc
+        if self.marker_in_blot(d):
+            return d.signal
+        return d.marker
+
+    def auto_marker_bands(self):
+        d = self.doc
+        s = self._marker_s()
+        img = self._marker_source(d)
+        x0, x1 = int(s.get("strip_x0", 0)), int(s.get("strip_x1", 0))
+        if img is None or x1 <= x0:
+            self.statusBar().showMessage(_t("먼저 캔버스에서 마커 영역을 끌어 정하세요"))
+            return
+        ys = core.find_marker_bands(img, x0, x1)
+        if not ys:
+            self.statusBar().showMessage(_t("마커 영역 안에서 밴드를 찾지 못했습니다 — 영역 안을 클릭해 직접 넣으세요"))
+            return
+        old = [m_.get("kda") for m_ in s.get("kda", [])]
+        s["kda"] = [{"kda": (old[i] if i < len(old) else None), "y": float(y)} for i, y in enumerate(ys)]
+        s["show_strip"] = s.get("show_strip", True) if not self.marker_in_blot(d) else s.get("show_strip", False)
+        self.view.sel = None
+        self.view.rebuild_lines()
+        self.on_marker_edited(_t("마커 밴드 {0}개를 찾았습니다 — 크기를 하나 넣고 '래더 순서로 채우기'를 누르세요").format(len(ys)))
+
+    def copy_marker_sizes(self):
+        """Put this image's ladder and sizes (by band order) into the other images."""
+        src = self._marker_s()
+        sizes = [m_.get("kda") for m_ in src.get("kda", [])]
+        others = [(k, d) for k, d in enumerate(self.docs) if d is not self.doc and d.raw is not None]
+        if not any(v for v in sizes) or not others:
+            self.statusBar().showMessage(_t("넣을 크기가 없거나 다른 이미지가 없습니다"))
+            return
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(_t("다른 이미지에 래더 · 크기 넣기"))
+        v = QtWidgets.QVBoxLayout(dlg)
+        v.addWidget(controls.hint(_t("밴드 순서대로 크기를 넣습니다 (위에서부터 1, 2, 3 …). 밴드 위치는 이미지마다 그대로 둡니다.")))
+        boxes = []
+        for k, d in others:
+            n = len((d.figure or {}).get("kda", []))
+            cb = QtWidgets.QCheckBox(f"{self.doc_key(k)} · {d.name}   " + (_t("밴드 {0}개").format(n) if n else _t("밴드 표시 없음 (래더만)")))
+            cb.setChecked(True)
+            boxes.append((cb, d))
+            v.addWidget(cb)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        if not getattr(self, "_auto_accept", False) and dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        done = []
+        for cb, d in boxes:
+            if not cb.isChecked():
+                continue
+            core.copy_marker_sizes(src, d.figure if d.figure is not None else self._ensure_figure(d))
+            self._figure_changed(d)
+            done.append(self.doc_key(self.docs.index(d)))
+        self.refresh_doc_tabs()
+        self.statusBar().showMessage(_t("래더와 크기를 {0}에 넣었습니다").format(", ".join(done) or _t("없음")))
+
+    def _ensure_figure(self, d):
+        if d.figure is None:
+            d.figure = figure.default_settings()
+        return d.figure
+
+    def marker_status(self, d) -> Tuple[str, str]:
+        """(short note, colour) of an image's marker: ✓ when every band has a size."""
+        if d.raw is None:
+            return "", ""
+        k = (d.figure or {}).get("kda", [])
+        if not k:
+            return _t("마커 —"), "grey"
+        n = sum(1 for m_ in k if m_.get("kda"))
+        if n == len(k):
+            return _t("마커 ✓"), "ok"
+        return _t("크기 {0}/{1}").format(n, len(k)), "warn"
 
     def refresh_marker_card(self):
         d = self.doc
+        if not hasattr(self, "size_grid"):
+            return
+        inb = self.marker_in_blot(d)
+        self.marker_where.set_value("blot" if inb else "photo")
+        self.marker_photo_row.setVisible(not inb)
         m = (d.figure or {}).get("marker_path") if d.marker is not None else None
         self.marker_name.setText(os.path.basename(m) if m else _t("없음"))
+        self.marker_change_btn.setText(_t("바꾸기…") if m else _t("넣기…"))
+        self.marker_where_hint.setText(
+            _t("블롯 위 마커 레인을 끌어 마커 영역을 정하고, 영역 안을 클릭해 밴드 위치를 넣습니다. 이 레인은 정량에서 빠집니다.") if inb
+            else _t("마커 사진 위를 끌어 마커 영역(주황 점선)을 정하고, 영역 안을 클릭해 밴드 위치를 넣습니다."))
         k = (d.figure or {}).get("kda", []) if d.figure else []
+        unit = (d.figure or {}).get("unit", "kDa")
         sel = self.view.sel or {}
         cur = sel.get("i", -1) if sel.get("kind") == "tick" else -1
-        self.kda_chips.set_chips([("?" if t.get("kda") is None else f"{t['kda']:g}") for t in k], cur)
+        grid = self.size_grid
+        while grid.count():
+            it = grid.takeAt(0)
+            if it.widget():
+                it.widget().hide()
+                it.widget().deleteLater()
+        self.size_fields = []
+        for i, t in enumerate(k):
+            on = i == cur
+            dash = QtWidgets.QLabel("━")
+            dash.setStyleSheet(f"color: {'#0a84ff' if on else '#ff9f0a'}; font-weight: 700;")
+            grid.addWidget(dash, i, 0)
+            n = QtWidgets.QLabel(str(i + 1))
+            theme.hint(n)
+            grid.addWidget(n, i, 1)
+            e = QtWidgets.QLineEdit("" if t.get("kda") is None else f"{t['kda']:g}")
+            e.setPlaceholderText("—")
+            e.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            e.setFixedWidth(84)
+            e.setValidator(QtGui.QDoubleValidator(0, 1e7, 2, e))
+            if on:
+                e.setStyleSheet("QLineEdit { border: 2px solid #0a84ff; border-radius: 5px; }")
+            e.editingFinished.connect(lambda i=i, e=e: self.set_marker_size(i, e.text()))
+            grid.addWidget(e, i, 2)
+            self.size_fields.append(e)
+            grid.addWidget(QtWidgets.QLabel(unit), i, 3)
+            y = QtWidgets.QLabel(f"y {t['y']:.0f}")
+            theme.hint(y)
+            grid.addWidget(y, i, 4)
+            x = QtWidgets.QToolButton()
+            x.setText("✕")
+            x.setAutoRaise(True)
+            x.setToolTip(_t("이 밴드 표시 지우기"))
+            x.clicked.connect(lambda _=False, i=i: self.delete_marker_band(i))
+            grid.addWidget(x, i, 5)
+        grid.setColumnStretch(4, 1)
+        self.size_box.setVisible(bool(k))
+        self.size_empty.setVisible(not k)
+        self.fill_sizes_btn.setEnabled(any(t.get("kda") for t in k))
+        self.copy_sizes_btn.setEnabled(any(t.get("kda") for t in k) and len([x for x in self.docs if x.raw is not None]) > 1)
 
     # ---------------------------------------------------------------- images (documents)
     @property
@@ -3469,9 +3722,43 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def refresh_doc_tabs(self):
         """The image list of the sidebar (I1, I2 … with their project)."""
-        rows = [(f"{self.doc_key(k)} · {d.name}", d.project if d.project and self._n_projects() > 1 else "")
-                for k, d in enumerate(self.docs) if d.raw is not None]
-        self.img_list.set_rows(rows or [(_t("(이미지 없음)"), "")], self.cur)
+        rows, self._img_rows = [], []
+        for k, d in enumerate(self.docs):
+            if d.raw is None:
+                continue
+            rows.append((f"{self.doc_key(k)} · {d.name}", d.project if d.project and self._n_projects() > 1 else ""))
+            self._img_rows.append((k, "img"))
+            # 1.5.2: each image's marker under it (photo name, or its marker lane) with how far it is
+            mp = (d.figure or {}).get("marker_path") if d.marker is not None and not self.marker_in_blot(d) else None
+            k_ = (d.figure or {}).get("kda", [])
+            what = os.path.basename(mp) if mp else (_t("마커 레인") if k_ else _t("마커 없음"))
+            n_ = sum(1 for m_ in k_ if m_.get("kda"))
+            note = "" if not k_ else ("✓" if n_ == len(k_) else f"{n_}/{len(k_)}")
+            rows.append(("    └ " + what, note))
+            self._img_rows.append((k, "marker"))
+        self.img_list.set_rows(rows or [(_t("(이미지 없음)"), "")], self._img_row_of(self.cur))
+
+    def _img_row_of(self, k: int) -> int:
+        want = "marker" if getattr(self, "step", 0) == self.STEP_MARKER else "img"
+        rows = getattr(self, "_img_rows", [])
+        for r, (kk, kind) in enumerate(rows):
+            if kk == k and kind == want:
+                return r
+        return next((r for r, (kk, _) in enumerate(rows) if kk == k), -1)
+
+    def _on_img_row(self, row: int):
+        rows = getattr(self, "_img_rows", [])
+        if not 0 <= row < len(rows):
+            return
+        k, kind = rows[row]
+        if k != self.cur:
+            self.switch_doc(k)
+        if kind == "marker" and self.step != self.STEP_MARKER:
+            self.set_step(self.STEP_MARKER)
+        elif kind == "img" and self.step == self.STEP_MARKER:
+            self.set_step(self.STEP_DETECT)
+        else:
+            self.refresh_doc_tabs()
 
     def switch_doc(self, k: int):
         if k < 0 or k >= len(self.docs):
@@ -3502,10 +3789,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.view.pix_item is not None:
                 self.view.set_image(QtGui.QImage(), reset_zoom=False)
         self.set_analysis(d.analysis)
-        if self.img_list.currentRow() != k:
-            self.img_list.blockSignals(True)
-            self.img_list.setCurrentRow(k)
-            self.img_list.blockSignals(False)
+        self.refresh_doc_tabs()
         self.fill_ladders()
         self.refresh_marker_card()
         self.img_info.setText(_t("{0} × {1} · 측정은 원본(raw) 값").format(d.raw.shape[1], d.raw.shape[0]) if d.raw is not None else "")
@@ -5172,6 +5456,9 @@ class MainWindow(QtWidgets.QMainWindow):
             d.figure = figure.default_settings()
         s = d.figure
         s["marker_path"] = path
+        if s.get("marker_in_blot") and not quiet:  # 1.5.2: a marker photo was added: the strip moves onto it
+            s["marker_in_blot"] = False
+            s["kda"] = []
         if not quiet:
             s["marker_invert"] = not core.needs_inversion(m)
             if d.analysis.bands:
@@ -5231,9 +5518,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.marker_label.setText(os.path.basename(d.figure["marker_path"]) if m is not None and d.figure else _t("없음"))
         self.sync_marker_orient()
-        if m is None or not self.show_marker.isChecked():
+        inb = d.raw is not None and self.marker_in_blot(d)
+        self.view.marker_in_blot = inb
+        if inb or m is None or not self.show_marker.isChecked():
             self.view.set_marker(None)
-            self.view.marker_s = None
+            self.view.marker_s = self._marker_s() if inb else None  # 1.5.2: strip on the blot's own marker lane
             self.view.rebuild_lines()
             self.refresh_marker_card()
             return
@@ -5682,6 +5971,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def set_analysis(self, a: core.Analysis):
         self.analysis = a
         a.ensure_lane_labels()
+        self.apply_blot_marker_lanes(self.doc if self.docs else None, a)
         self.view.set_analysis(a)
         self.refresh_all()
         self._figure_changed(self.doc)
