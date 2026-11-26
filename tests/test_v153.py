@@ -6,8 +6,13 @@ from blot_profiler.ui import controls, theme
 
 
 def _overflow(scroll):
-    page = scroll.widget()
-    return page.minimumSizeHint().width() - scroll.viewport().width()
+    """How much wider the page needs to be than the room the fixed box gives it (box margins
+    12 + 4, scroll bar); measured from the sizes, so it holds before the window is painted."""
+    from PySide6 import QtWidgets
+
+    bar = scroll.style().pixelMetric(QtWidgets.QStyle.PM_ScrollBarExtent)
+    room = theme.FIGURE_INSPECTOR_W - 16 - bar
+    return scroll.widget().minimumSizeHint().width() - room
 
 
 def test_inspector_fixed_width_and_nothing_cut(tmp_path):
