@@ -95,8 +95,8 @@ def test_full_blot_images_move_and_resize(tmp_path):
     ed.move_panel_to(rows[1], 0)
     assert [p["row"] for p in ed.preview.layout_["panels"]] == [rows[1], rows[0]]
     h0 = next(p["h"] for p in ed.preview.layout_["panels"] if p["row"] == rows[1])
-    ed.on_crop_dragged("bottom", rows[1], 0.1)
+    ed.on_crop_dragged("bottom", rows[1], -0.1)  # 1.5.1: it starts as the whole region, so trim it
     h1 = next(p["h"] for p in ed.preview.layout_["panels"] if p["row"] == rows[1])
-    assert h1 > h0 + 0.05
+    assert h1 < h0 - 0.05
     other = w.loaded_docs()[0]
-    assert other.figure and other.figure.get("gel_crop")  # its own crop changed, not this image's
+    assert other.figure and other.figure.get("gel_box")  # its own crop changed, not this image's

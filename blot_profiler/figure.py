@@ -62,7 +62,7 @@ FIGURE_DEFAULTS = {
     "lane_match": "name",  # multi-blot: other images' lanes by lane name ("name") or position ("order")
     "show_src": True,  # multi-blot: small grey source tag (I1, I2 …) under each protein name
     "layout": "rows",  # "rows": one crop per protein (western) · "full": the whole gel as one panel (DNA gel)
-    "gel_crop": None,  # [x0, y0, x1, y1] of the full-gel panel (None = around all bands)
+    "gel_box": None,  # [x0, y0, x1, y1] of the full-gel panel (None = the whole selected blot region)
     "gel_label": "",  # text left of the full-gel panel
     "unit": "kDa",  # ladder unit shown next to the ticks' title ("kDa" or "bp")
     # "fonts" (size per text category), "tiers" (header rows) and "overrides"
@@ -108,6 +108,7 @@ def sync_settings(s: dict, a: core.Analysis, shape) -> dict:
     """
     for k, v in FIGURE_DEFAULTS.items():
         s.setdefault(k, copy.deepcopy(v))
+    s.pop("gel_crop", None)  # 1.5.1: the old band-trimmed Full blot crop (see default_gel_crop)
     prev = s.get("panels", [])
     old = {p["row"]: p for p in prev if not p.get("doc")}
     panels = []
@@ -189,15 +190,11 @@ GEL_ROW = "__gel__"
 
 
 def default_gel_crop(a: core.Analysis, shape) -> List[int]:
-    """Around every band box, with a margin of a band pitch."""
-    H, W = shape
-    boxes = [b.box(a.rows) for b in a.bands]
-    x0 = min(x for x, _, _, _ in boxes)
-    x1 = max(x + w for x, _, w, _ in boxes)
-    y0 = min(y for _, y, _, _ in boxes)
-    y1 = max(y + h for _, y, _, h in boxes)
-    m = int(0.05 * max(x1 - x0, y1 - y0)) + 10
-    return [max(0, x0 - m), max(0, y0 - m), min(W, x1 + m), min(H, y1 + m)]
+    """1.5.1: the whole blot region the user selected (the image as rotated / tilt-corrected),
+    not just around the band boxes.  Until 1.5.0 the crop was kept under "gel_crop" and was
+    trimmed around the bands; that key is no longer read, so old projects show the whole region."""
+    H, W = shape[:2]
+    return [0, 0, int(W), int(H)]
 
 
 def layout_panels(a: core.Analysis, s: dict, shape, sources: Optional[dict] = None):
@@ -207,7 +204,7 @@ def layout_panels(a: core.Analysis, s: dict, shape, sources: Optional[dict] = No
     multi-blot figure takes panels from; without it those panels are left out."""
     H, W = shape
     if s.get("layout") == "full":
-        x0, y0, x1, y1 = s.get("gel_crop") or default_gel_crop(a, shape)
+        x0, y0, x1, y1 = s.get("gel_box") or default_gel_crop(a, shape)
         x0, x1 = max(0, int(x0)), min(W, int(x1))
         y0, y1 = max(0, int(y0)), min(H, int(y1))
         if x1 - x0 < 4 or y1 - y0 < 4:
@@ -239,7 +236,7 @@ def _foreign_gels(s: dict, sources: Optional[dict]):
             continue
         sa, (sh, sw) = src["analysis"], src["signal"].shape
         fs = src.get("figure") or {}
-        crop = fs.get("gel_crop") or default_gel_crop(sa, (sh, sw))
+        crop = fs.get("gel_box") or default_gel_crop(sa, (sh, sw))
         y0, y1 = max(0, int(crop[1])), min(sh, int(crop[3]))
         if y1 - y0 < 4:
             _, y0, _, y1 = default_gel_crop(sa, (sh, sw))
@@ -460,8 +457,33 @@ def match_lanes(a: core.Analysis, src: core.Analysis, how: str = "name") -> List
     return out
 
 
-def panel_lane_map(a: core.Analysis, s: dict, p: dict, src: core.Analysis) -> List[Optional[int]]:
-    return p.get("lane_map") or match_lanes(a, src, s.get("lane_match", "name"))
+def panel_lane_map(a: core.Analysis, s: dict, p: dict, src: core.Analysis,
+                   pairs: Optional[List[Tuple[int, int]]] = None) -> List[Optional[int]]:
+    """Source lane of every figure column: the panel's own map, else linked lanes (1.5.0), else
+    lanes matched by name or order."""
+    if p.get("lane_map"):
+        return p["lane_map"]
+    if pairs:
+        by_own = dict(pairs)
+        return [by_own.get(i) for i in range(a.n_lanes)]
+    return match_lanes(a, src, s.get("lane_match", "name"))
+
+
+def lane_pairs(a: core.Analysis, a_uid: Optional[str], b: core.Analysis, b_uid: Optional[str]) -> List[Tuple[int, int]]:
+    """Linked lanes of two blots (1.5.0, lanes loaded from another blot): [(lane of a, lane of b)].
+
+    b linked to a, a linked to b, or both linked to the same third blot; [] when not linked."""
+    la, lb = a.lane_link or {}, b.lane_link or {}
+    shift = None  # lane of b = lane of a + shift
+    if b_uid and la.get("doc") == b_uid:
+        shift = int(la.get("start", 0))
+    elif a_uid and lb.get("doc") == a_uid:
+        shift = -int(lb.get("start", 0))
+    elif la.get("doc") and la.get("doc") == lb.get("doc"):
+        shift = int(la.get("start", 0)) - int(lb.get("start", 0))
+    if shift is None:
+        return []
+    return [(i, i + shift) for i in range(a.n_lanes) if 0 <= i + shift < b.n_lanes]
 
 
 def lane_pitch(a: core.Analysis) -> float:
@@ -469,12 +491,14 @@ def lane_pitch(a: core.Analysis) -> float:
     return float(np.median(np.diff(sorted(c)))) if len(c) > 1 else 0.0
 
 
-def foreign_place(src_a: core.Analysis, own_centres) -> Tuple[float, float, float, float]:
+def foreign_place(src_a: core.Analysis, own_centres, pairs=None) -> Tuple[float, float, float, float]:
     """How a blot from another image sits under this figure's lanes (never cut per lane).
 
     1.4.8: it is scaled so its lane spacing equals this figure's, with its aspect ratio kept
     (the same factor across and down), and moved sideways so its first and last lanes sit as
     near as they can to this figure's first and last lanes.
+    1.5.0: with linked lanes (``pairs`` of (own lane, source lane), see ``lane_pairs``) it is moved
+    so the linked lanes sit under their own lanes instead.
     Returns (f, offset, a, b): own x = f * source x + offset; the source's lane span is [a, b)."""
     own = sorted(c for c in own_centres if np.isfinite(c))
     src = sorted(c for c in lane_centres(src_a) if np.isfinite(c))
@@ -486,18 +510,24 @@ def foreign_place(src_a: core.Analysis, own_centres) -> Tuple[float, float, floa
         if sp > 0 and op > 0:
             f = float(min(5.0, max(0.2, op / sp)))
     off = (own[0] + own[-1]) / 2.0 - f * (src[0] + src[-1]) / 2.0
+    if pairs:
+        oc, sc = list(own_centres), lane_centres(src_a)
+        d = [oc[i] - f * sc[j] for i, j in pairs
+             if i < len(oc) and j < len(sc) and np.isfinite(oc[i]) and np.isfinite(sc[j])]
+        if d:
+            off = float(np.mean(d))
     pitch = float(np.median(np.diff(src))) if len(src) > 1 else (
         float(np.median(np.diff(own))) / f if len(own) > 1 else 20.0)
     return f, off, src[0] - pitch / 2.0, src[-1] + pitch / 2.0
 
 
 def foreign_shifted(src_sig: np.ndarray, src_a: core.Analysis, y0: int, y1: int, own_centres,
-                    x0px: int, x1px: int, span=None):
+                    x0px: int, x1px: int, span=None, pairs=None):
     """The other image's rows y0:y1 as one piece, scaled and moved by ``foreign_place``, on this
     figure's columns x0px:x1px; its rows are scaled by the same factor (aspect ratio kept).
     Columns outside its lane span (or ``span``, in source pixels) are NaN.
     Returns (image, frame start, frame end in this figure's pixels, factor)."""
-    f, off, a, b = foreign_place(src_a, own_centres)
+    f, off, a, b = foreign_place(src_a, own_centres, pairs)
     if span is not None:  # Full blot: the other image's whole-blot crop instead of its lane span
         a, b = span
     width = max(1, x1px - x0px)
@@ -629,7 +659,12 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
         keeps its own marker strip and kDa ticks (1.4.7: also the other images in the figure)."""
         if p.get("doc"):
             src_d = (sources or {}).get(p["doc"]) or {}
-            return src_d.get("marker"), src_d.get("figure") or {}
+            fs_ = src_d.get("figure") or {}
+            if fs_.get("marker_in_blot"):  # 1.5.2: the marker lane of that blot itself
+                return src_d.get("signal"), {**fs_, "marker_invert": True}
+            return src_d.get("marker"), fs_
+        if s.get("marker_in_blot"):
+            return signal, {**s, "marker_invert": True}
         return marker, s
 
     def strip_of(p):  # this figure's switch turns every image's strip on or off
@@ -646,6 +681,12 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
 
     own_c = lane_centres(a)
     _fac = {}
+    own_uid = (sources or {}).get("__own__", {}).get("uid")
+
+    def pairs_of(did):
+        """Lanes linked to another image's (1.5.0)."""
+        sd = (sources or {}).get(did)
+        return lane_pairs(a, own_uid, sd["analysis"], did) if sd else []
 
     def fac(p):
         """Size factor of a panel's blot: 1 for this image; another image's blot is scaled to
@@ -898,9 +939,10 @@ def render(fig, signal: np.ndarray, a: core.Analysis, s: dict, marker: Optional[
             span = None
             if p.get("gel"):
                 sa_ = src_d["analysis"]
-                gc = (src_d.get("figure") or {}).get("gel_crop") or default_gel_crop(sa_, src_d["signal"].shape)
+                gc = (src_d.get("figure") or {}).get("gel_box") or default_gel_crop(sa_, src_d["signal"].shape)
                 span = (float(gc[0]), float(gc[2]))
-            crop, fa, fb, _ = foreign_shifted(src_d["signal"], src_d["analysis"], y0, y1, centres, x0px, x1px, span)
+            crop, fa, fb, _ = foreign_shifted(src_d["signal"], src_d["analysis"], y0, y1, centres, x0px, x1px, span,
+                                              pairs_of(p["doc"]))
             ok = np.isfinite(crop)
             ref = crop[ok] if ok.any() else np.zeros(1)
             if not p.get("auto_range", True):

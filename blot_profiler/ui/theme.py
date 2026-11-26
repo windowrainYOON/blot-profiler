@@ -171,6 +171,7 @@ REGION_GAP = 24  # gap-section: between a region's header and its content
 BOX_RADIUS = 16  # the floating canvas / inspector boxes
 BOX_GAP = 10  # space around them (window edge, between the boxes)
 INSPECTOR_W = 356  # the inspector box (mockup: cards with 12 px around them)
+FIGURE_INSPECTOR_W = 368  # 1.5.3: the Figure window's inspector, fitted to its widest page (fixed)
 INSPECTOR_BOX_MARGINS = (12, 6, 4, 10)  # inside the inspector box; the scroll bar takes the right side
 # token name, or (white, alpha) for the see-through (glass) variant
 _REGIONS = {

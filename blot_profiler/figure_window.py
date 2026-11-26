@@ -14,6 +14,7 @@ from matplotlib.figure import Figure
 from . import core, figure
 from .ui import glass, theme
 from .i18n import _t  # noqa: E402
+from .ui.controls import ElideLabel as _controls_elide, WrapCheckBox as _controls_wrap, fit_inspector, tip_choices  # noqa: E402
 
 FONTS = ["Arial", "Helvetica", "Times New Roman", "AppleGothic"]
 PREVIEW_DPI = 200
@@ -1651,7 +1652,7 @@ class FigureEditor(QtWidgets.QWidget):
         foot = QtWidgets.QHBoxLayout()
         foot.addWidget(self.size_label)
         foot.addStretch(1)
-        self.foot_msg = QtWidgets.QLabel()  # messages of this window (no status line under the boxes)
+        self.foot_msg = _controls_elide()  # messages of this window (no status line under the boxes); long ones end in …
         self.foot_msg.setStyleSheet("font-size: 11px;")
         foot.addWidget(self.foot_msg)
         pl.addLayout(foot)
@@ -1718,6 +1719,7 @@ class FigureEditor(QtWidgets.QWidget):
         for i in range(self.props_tabs.count()):
             self.props_tabs.set_fixed(self.props_tabs.widget(i))
         _theme.unify(whole)
+        fit_inspector(whole)  # 1.5.3: nothing wider than the fixed inspector box
         insp_body = QtWidgets.QWidget()
         il = QtWidgets.QVBoxLayout(insp_body)
         il.setContentsMargins(0, 0, 0, 0)
@@ -1736,7 +1738,7 @@ class FigureEditor(QtWidgets.QWidget):
             return box
 
         insp = boxed(insp_body, "hig_inspector", (12, 12, 4, 10))
-        insp.setFixedWidth(_theme.INSPECTOR_W)
+        insp.setFixedWidth(_theme.FIGURE_INSPECTOR_W)  # 1.5.3: fitted to the widest page, then fixed
         split = PaneSplitter()  # sidebar on the window's floor | preview box | properties box
         split.addWidget(scroll)
         split.addWidget(boxed(center, "hig_content", (20, 14, 20, 12)))
@@ -1821,7 +1823,7 @@ class FigureEditor(QtWidgets.QWidget):
             gv.addRow(lab, hb)
         b = QtWidgets.QPushButton(_t("범위 자동"))
         b.setToolTip(_t("모든 밴드를 감싸는 범위로 되돌립니다"))
-        b.clicked.connect(lambda: (self.s.__setitem__("gel_crop", None), self.load_from_settings()))
+        b.clicked.connect(lambda: (self.s.__setitem__("gel_box", None), self.load_from_settings()))
         gv.addRow(b)
         f.addRow(_t("겔 범위 (px)"), self.gel_crop_row)
         self.w_gel_label = QtWidgets.QLineEdit()
@@ -1845,7 +1847,7 @@ class FigureEditor(QtWidgets.QWidget):
             return
         x0, y0, x1, y1 = (int(v) for v in vals)
         if x1 - x0 >= 4 and y1 - y0 >= 4:
-            self.s["gel_crop"] = [x0, y0, x1, y1]
+            self.s["gel_box"] = [x0, y0, x1, y1]
             self.refresh_reference()
             self.schedule()
 
@@ -1854,7 +1856,17 @@ class FigureEditor(QtWidgets.QWidget):
         l = QtWidgets.QVBoxLayout(g)
         self.panel_table = QtWidgets.QTableWidget(0, 4)
         self.panel_table.setHorizontalHeaderLabels([_t("표시"), _t("라벨"), _t("위 여백"), _t("아래 여백")])
-        self.panel_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        ph = self.panel_table.horizontalHeader()
+        ph.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        ph.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        for col, short, full in ((2, _t("위쪽"), _t("위 여백")), (3, _t("아래쪽"), _t("아래 여백"))):
+            ph.setSectionResizeMode(col, QtWidgets.QHeaderView.Fixed)  # 1.5.3: the label column takes the spare width
+            self.panel_table.setColumnWidth(col, 72)
+            hi = self.panel_table.horizontalHeaderItem(col)
+            hi.setText(short)
+            hi.setToolTip(full)
+        self.panel_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.panel_table.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.panel_table.verticalHeader().setVisible(False)
         self.panel_table.setMaximumHeight(170)
         self.panel_table.itemChanged.connect(self.on_panel_item)
@@ -1871,7 +1883,7 @@ class FigureEditor(QtWidgets.QWidget):
         self.w_font.addItems(FONTS)
         self.w_font.setEditable(True)
         f.addRow(_t("글꼴"), self.w_font)
-        self.w_bold = QtWidgets.QCheckBox(_t("IB 라벨 굵게"))
+        self.w_bold = _controls_wrap(_t("IB 라벨 굵게"))
         f.addRow(self.w_bold)
         self.w_gap = _spin(0.0, 1.0, 0.06, 0.01, 2, " in")
         f.addRow(_t("패널 간격"), self.w_gap)
@@ -1907,9 +1919,9 @@ class FigureEditor(QtWidgets.QWidget):
         self.w_gamma = _spin(0.2, 3.0, 1.0, 0.05, 2)
         self.w_gamma.setToolTip(_t("1보다 작으면 흐린 밴드가 진해집니다"))
         f.addRow(_t("감마"), self.w_gamma)
-        self.w_perpanel = QtWidgets.QCheckBox(_t("패널마다 따로 대비 맞춤"))
+        self.w_perpanel = _controls_wrap(_t("패널마다 따로 대비 맞춤"))
         f.addRow(self.w_perpanel)
-        self.w_corr = QtWidgets.QCheckBox(_t("배경 제거한 이미지로 표시"))
+        self.w_corr = _controls_wrap(_t("배경 제거한 이미지로 표시"))
         f.addRow(self.w_corr)
         for w, key in ((self.w_lo, "lo_pct"), (self.w_hi, "hi_pct"), (self.w_gamma, "gamma")):
             w.valueChanged.connect(lambda v, key=key: self.set(key, v))
@@ -1931,7 +1943,7 @@ class FigureEditor(QtWidgets.QWidget):
         l.addLayout(hb)
         self.ladder_display = self._group(_t("마커 띠 · 크기 눈금 표시"))
         f = QtWidgets.QFormLayout(self.ladder_display)
-        self.w_strip = QtWidgets.QCheckBox(_t("마커 이미지 띠를 패널 왼쪽에 표시"))
+        self.w_strip = _controls_wrap(_t("마커 이미지 띠를 패널 왼쪽에 표시"))
         f.addRow(self.w_strip)
         hb = QtWidgets.QHBoxLayout()
         self.w_sx0 = _spin(0, 100000, 0, 1, None, " px")
@@ -1952,9 +1964,9 @@ class FigureEditor(QtWidgets.QWidget):
         self.w_sdy.setToolTip(_t("마커 사진이 블롯과 위아래로 어긋나 있을 때 마커 띠의 세로 위치를 보정합니다"))
         self.w_sdy.valueChanged.connect(lambda v: self.set("strip_dy", int(v)))
         f.addRow(_t("띠 세로 보정"), self.w_sdy)
-        self.w_minv = QtWidgets.QCheckBox(_t("마커 띠 반전 (어두운 ladder / 흰 배경)"))
+        self.w_minv = _controls_wrap(_t("마커 띠 반전 (어두운 ladder / 흰 배경)"))
         f.addRow(self.w_minv)
-        self.w_kda = QtWidgets.QCheckBox(_t("크기 눈금 표시 (kDa / bp)"))
+        self.w_kda = _controls_wrap(_t("크기 눈금 표시 (kDa / bp)"))
         f.addRow(self.w_kda)
         self.w_unit = QtWidgets.QComboBox()
         self.w_unit.addItems(["kDa", "bp"])
@@ -2022,7 +2034,7 @@ class FigureEditor(QtWidgets.QWidget):
             self.w_gel_label.setEnabled(full)
             self.w_gel_label.setText(s.get("gel_label", ""))
             if self.doc is not None and self.doc.raw is not None and self.doc.analysis.bands:
-                crop = s.get("gel_crop") or figure.default_gel_crop(self.doc.analysis, self.doc.raw.shape)
+                crop = s.get("gel_box") or figure.default_gel_crop(self.doc.analysis, self.doc.raw.shape)
                 for sp, v in zip(self.w_gc, crop):
                     sp.setValue(int(v))
             self.w_unit.setCurrentText(s.get("unit", "kDa"))
@@ -2037,6 +2049,7 @@ class FigureEditor(QtWidgets.QWidget):
             self._update_marker_label()
         finally:
             self._loading = False
+        tip_choices(self.props_tabs.widget(1))  # a cut choice shows its whole text on hover
         self.refresh_reference()
         self.refresh_blots()
         self.refresh_objects()
@@ -2162,7 +2175,7 @@ class FigureEditor(QtWidgets.QWidget):
             out[self.doc_id(d)] = {"signal": sig, "analysis": d.analysis, "tag": m.doc_key(k), "name": d.name, "doc": d,
                                "figure": d.figure or {}, "marker": getattr(d, "marker", None)}
         if self.doc in m.docs:
-            out["__own__"] = {"tag": m.doc_key(m.docs.index(self.doc)), "name": self.doc.name}
+            out["__own__"] = {"tag": m.doc_key(m.docs.index(self.doc)), "name": self.doc.name, "uid": self.doc.uid}
         return out
 
     def _foreign(self, did):
@@ -2416,7 +2429,6 @@ class FigureEditor(QtWidgets.QWidget):
                 sp.valueChanged.connect(lambda v, p=p, key=key: self._panel_pad(p, key, v))
                 t.setCellWidget(i, col, sp)
         t.blockSignals(False)
-        t.resizeColumnToContents(0)
 
     def _panel_pad(self, p, key, v):
         p[key] = int(v)
@@ -2484,7 +2496,7 @@ class FigureEditor(QtWidgets.QWidget):
         b = QtWidgets.QPushButton(_t("선택 그룹 삭제"))
         b.clicked.connect(self.delete_group)
         hb.addWidget(b)
-        self.w_bar = QtWidgets.QCheckBox(_t("막대 표시"))
+        self.w_bar = _controls_wrap(_t("막대 표시"))
         self.w_bar.toggled.connect(self.on_bar_toggled)
         hb.addWidget(self.w_bar)
         hb.addStretch(1)
@@ -3328,7 +3340,7 @@ class FigureEditor(QtWidgets.QWidget):
         f.addRow(_t("글자 크기"), sp)
         hb = QtWidgets.QHBoxLayout()
         for key, label in (("bold", _t("굵게")), ("italic", _t("기울임"))):
-            c = QtWidgets.QCheckBox(label)
+            c = _controls_wrap(label)
             c.setChecked(bool(st.get(key)))
             c.toggled.connect(lambda on, key=key: self.apply_style(sel, **{key: on}))
             hb.addWidget(c)
@@ -3599,7 +3611,7 @@ class FigureEditor(QtWidgets.QWidget):
         return sp
 
     def _p_check(self, f, label, value, on_set, sync=True):
-        c = QtWidgets.QCheckBox(label)
+        c = _controls_wrap(label)
         c.setChecked(bool(value))
         c.toggled.connect(lambda on: (on_set(on), self._p_changed(sync)))
         f.addRow(c)
@@ -3673,6 +3685,7 @@ class FigureEditor(QtWidgets.QWidget):
         self.props_layout.addWidget(b, 0, Qt.AlignLeft)
         self.props_layout.addStretch(1)
         theme.unify(self.props_layout.parentWidget())  # cards like every inspector
+        fit_inspector(self.props_layout.parentWidget())
         _ = s
 
     # text content of a key: (getter, setter) or None for computed texts (numbers)
@@ -3761,10 +3774,10 @@ class FigureEditor(QtWidgets.QWidget):
             f = self._p_box(_t("겔 전체 패널"))
             s = self.s
             self._p_line(f, _t("왼쪽 라벨"), s.get("gel_label", ""), lambda v: s.__setitem__("gel_label", v))
-            crop = s.get("gel_crop") or figure.default_gel_crop(self.doc.analysis, self.doc.raw.shape)
-            s["gel_crop"] = list(crop)
+            crop = s.get("gel_box") or figure.default_gel_crop(self.doc.analysis, self.doc.raw.shape)
+            s["gel_box"] = list(crop)
             for i, lab in enumerate((_t("왼쪽 x"), _t("위 y"), _t("오른쪽 x"), _t("아래 y"))):
-                self._p_num(f, lab, int(crop[i]), 0, 100000, 1, None, " px", lambda v, i=i: s["gel_crop"].__setitem__(i, int(v)))
+                self._p_num(f, lab, int(crop[i]), 0, 100000, 1, None, " px", lambda v, i=i: s["gel_box"].__setitem__(i, int(v)))
             self._p_combo(f, _t("형태"), [(_t("겔 전체 한 패널"), "full"), (_t("단백질(행)별 잘라내기"), "rows")], s.get("layout", "rows"),
                           lambda v: s.__setitem__("layout", v))
             return
@@ -3800,7 +3813,7 @@ class FigureEditor(QtWidgets.QWidget):
 
         def reset_crop():
             s["margin_left_px"] = s["margin_right_px"] = None
-            s["gel_crop"] = None
+            s["gel_box"] = None
             for p in s["panels"]:
                 if not p.get("doc"):
                     ri = next((i for i, r in enumerate(self.doc.analysis.rows) if r.name == p["row"]), None)
@@ -3983,7 +3996,7 @@ class FigureEditor(QtWidgets.QWidget):
             if od.figure is None:
                 od.figure = figure.default_settings()
             H, W = sd["signal"].shape
-            x0, y0, x1, y1 = od.figure.get("gel_crop") or figure.default_gel_crop(od.analysis, (H, W))
+            x0, y0, x1, y1 = od.figure.get("gel_box") or figure.default_gel_crop(od.analysis, (H, W))
             if edge == "top":
                 y0 = min(max(0, y0 + d), y1 - 4)
             elif edge == "bottom":
@@ -3992,12 +4005,12 @@ class FigureEditor(QtWidgets.QWidget):
                 x0 = min(max(0, x0 + d), x1 - 4)
             else:
                 x1 = max(min(W, x1 + d), x0 + 4)
-            od.figure["gel_crop"] = [int(x0), int(y0), int(x1), int(y1)]
+            od.figure["gel_box"] = [int(x0), int(y0), int(x1), int(y1)]
             self.render()
             return
         if self.s.get("layout") == "full":
             H, W = self.doc.raw.shape
-            x0, y0, x1, y1 = self.s.get("gel_crop") or figure.default_gel_crop(self.doc.analysis, (H, W))
+            x0, y0, x1, y1 = self.s.get("gel_box") or figure.default_gel_crop(self.doc.analysis, (H, W))
             if edge == "top":
                 y0 = min(max(0, y0 + d), y1 - 4)
             elif edge == "bottom":
@@ -4006,7 +4019,7 @@ class FigureEditor(QtWidgets.QWidget):
                 x0 = min(max(0, x0 + d), x1 - 4)
             else:
                 x1 = max(min(W, x1 + d), x0 + 4)
-            self.s["gel_crop"] = [int(x0), int(y0), int(x1), int(y1)]
+            self.s["gel_box"] = [int(x0), int(y0), int(x1), int(y1)]
             self.load_from_settings()
             self.render()
             return
@@ -4087,7 +4100,8 @@ class FigureEditor(QtWidgets.QWidget):
             d = src[did]["doc"]
             if not d.measurements:
                 continue
-            lm = figure.panel_lane_map(self.doc.analysis, self.s, p, d.analysis)
+            lm = figure.panel_lane_map(self.doc.analysis, self.s, p, d.analysis,
+                                       figure.lane_pairs(self.doc.analysis, self.doc.uid, d.analysis, did))
             res, _ = self.main.image_results(d)
             for name, v in res.items():
                 if np.size(v) <= 1:
@@ -4330,7 +4344,7 @@ class FigureEditor(QtWidgets.QWidget):
         total = sum(sz)
         if total > 600:
             side = max(220, min(260, sz[0]))
-            insp = theme.INSPECTOR_W
+            insp = theme.FIGURE_INSPECTOR_W
             self.split.setSizes([side, max(200, total - side - insp), insp])
 
     def resizeEvent(self, e):
