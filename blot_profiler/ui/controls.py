@@ -353,14 +353,19 @@ def fit_inspector(page: QtWidgets.QWidget):
             w = it.widget() if it is not None else None
             if isinstance(w, QtWidgets.QComboBox) and w.sizePolicy().horizontalPolicy() == QtWidgets.QSizePolicy.Expanding:
                 it.setAlignment(Qt.Alignment())  # not pinned to the row end: it may take the whole field
-    for b in page.findChildren(QtWidgets.QPushButton):
-        b.setMinimumWidth(0)
-        sp = b.sizePolicy()
-        sp.setHorizontalPolicy(QtWidgets.QSizePolicy.Preferred)
-        b.setSizePolicy(sp)
+    # an explicit minimum width (1, not 0 = unset) makes the layout ignore the width of a long
+    # title or button text (Windows measures these much wider: a 665 px group box in 1.5.3 CI)
+    for b in page.findChildren(QtWidgets.QAbstractButton):
+        if isinstance(b, (QtWidgets.QPushButton, QtWidgets.QToolButton)):
+            b.setMinimumWidth(1)
+            sp = b.sizePolicy()
+            sp.setHorizontalPolicy(QtWidgets.QSizePolicy.Preferred)
+            b.setSizePolicy(sp)
+    for g in page.findChildren(QtWidgets.QGroupBox):
+        g.setMinimumWidth(1)
     for lab in page.findChildren(QtWidgets.QLabel):
         if lab.wordWrap():
-            lab.setMinimumWidth(0)
+            lab.setMinimumWidth(1)
 
 
 class ElideLabel(QtWidgets.QLabel):
