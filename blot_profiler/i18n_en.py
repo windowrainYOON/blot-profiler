@@ -746,6 +746,8 @@ EN = {
     "라벨": "Label",
     "위 여백": "Top margin",
     "아래 여백": "Bottom margin",
+    "위쪽": "Top",
+    "아래쪽": "Bottom",
     "모양": "Look",
     "블롯 패널의 가로 길이 (인치). 전체 그림은 라벨만큼 더 넓습니다.": "Width of the blot panels (inches). The whole figure is wider by the labels.",
     "패널 폭": "Panel width",

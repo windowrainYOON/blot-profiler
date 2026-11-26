@@ -273,3 +273,109 @@ class ZoomChip(QtWidgets.QFrame):
         if obj is self.host and e.type() in (QtCore.QEvent.Resize, QtCore.QEvent.Show):
             self.place()
         return False
+
+
+class WrapCheckBox(QtWidgets.QCheckBox):
+    """A check box whose text wraps onto more lines in a narrow box instead of widening it (1.5.3)."""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        sp = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        sp.setHeightForWidth(True)
+        self.setSizePolicy(sp)
+
+    def _opt(self):
+        o = QtWidgets.QStyleOptionButton()
+        self.initStyleOption(o)
+        return o
+
+    def _indicator(self) -> QtCore.QRect:
+        return self.style().subElementRect(QtWidgets.QStyle.SE_CheckBoxIndicator, self._opt(), self)
+
+    def _text_x(self) -> int:
+        return self._indicator().right() + 1 + 6
+
+    def _text_h(self, w: int) -> int:
+        r = QtCore.QRect(0, 0, max(20, w - self._text_x() - 2), 10000)
+        return self.fontMetrics().boundingRect(r, int(Qt.TextWordWrap), self.text()).height()
+
+    def minimumSizeHint(self):
+        sh = super().minimumSizeHint()
+        return QtCore.QSize(min(sh.width(), self._text_x() + 80), sh.height())
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, w):
+        return max(super().sizeHint().height(), self._text_h(w) + 8)
+
+    def paintEvent(self, e):
+        p = QtWidgets.QStylePainter(self)
+        o = self._opt()
+        r = self._indicator()
+        if self._text_h(self.width()) > self.fontMetrics().height() * 1.5:
+            r.moveTop(4)  # more lines: the box stays beside the first one
+        o.rect = r
+        p.drawPrimitive(QtWidgets.QStyle.PE_IndicatorCheckBox, o)
+        x = self._text_x()
+        group = QtGui.QPalette.Active if self.isEnabled() else QtGui.QPalette.Disabled
+        p.setPen(self.palette().color(group, QtGui.QPalette.WindowText))
+        p.drawText(QtCore.QRect(x, 0, self.width() - x - 2, self.height()),
+                   int(Qt.TextWordWrap | Qt.AlignVCenter | Qt.AlignLeft), self.text())
+
+
+_SHORT_HEADS = {"위 여백": "위", "아래 여백": "아래", "Top margin": "Top", "Bottom margin": "Bottom"}
+
+
+def tip_choices(page: QtWidgets.QWidget):
+    """The whole text of each (maybe cut) choice in its tooltip."""
+    for cb in page.findChildren(QtWidgets.QComboBox):
+        cb.setToolTip(cb.currentText())
+
+
+def fit_inspector(page: QtWidgets.QWidget):
+    """1.5.3: a page of a fixed-width inspector never gets wider than the box: long choices
+    are cut with … (whole text in the tooltip), a field that does not fit beside its title
+    goes under it, buttons and wrapped notes shrink."""
+    for cb in page.findChildren(QtWidgets.QComboBox):
+        cb.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        cb.setMinimumContentsLength(6)
+        fm = cb.fontMetrics()
+        widest = max((fm.horizontalAdvance(cb.itemText(i)) for i in range(cb.count())), default=0)
+        # a long choice takes the free width of its row (and is cut only when that is not enough)
+        cb.setSizePolicy(QtWidgets.QSizePolicy.Expanding if widest > 120 else QtWidgets.QSizePolicy.Preferred,
+                         QtWidgets.QSizePolicy.Fixed)
+    tip_choices(page)
+    for lay in page.findChildren(QtWidgets.QFormLayout):
+        lay.setRowWrapPolicy(QtWidgets.QFormLayout.WrapLongRows)
+        for r in range(lay.rowCount()):
+            it = lay.itemAt(r, QtWidgets.QFormLayout.FieldRole)
+            w = it.widget() if it is not None else None
+            if isinstance(w, QtWidgets.QComboBox) and w.sizePolicy().horizontalPolicy() == QtWidgets.QSizePolicy.Expanding:
+                it.setAlignment(Qt.Alignment())  # not pinned to the row end: it may take the whole field
+    for b in page.findChildren(QtWidgets.QPushButton):
+        b.setMinimumWidth(0)
+        sp = b.sizePolicy()
+        sp.setHorizontalPolicy(QtWidgets.QSizePolicy.Preferred)
+        b.setSizePolicy(sp)
+    for lab in page.findChildren(QtWidgets.QLabel):
+        if lab.wordWrap():
+            lab.setMinimumWidth(0)
+
+
+class ElideLabel(QtWidgets.QLabel):
+    """One line that ends in … when it does not fit (text() keeps the whole message; 1.5.3)."""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        self.setMinimumWidth(0)
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(0, super().minimumSizeHint().height())
+
+    def paintEvent(self, e):
+        p = QtGui.QPainter(self)
+        p.setPen(self.palette().color(QtGui.QPalette.WindowText))
+        r = self.contentsRect()
+        p.drawText(r, int(Qt.AlignVCenter | Qt.AlignRight), self.fontMetrics().elidedText(self.text(), Qt.ElideRight, r.width()))

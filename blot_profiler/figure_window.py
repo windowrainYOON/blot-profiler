@@ -14,6 +14,7 @@ from matplotlib.figure import Figure
 from . import core, figure
 from .ui import glass, theme
 from .i18n import _t  # noqa: E402
+from .ui.controls import ElideLabel as _controls_elide, WrapCheckBox as _controls_wrap, fit_inspector, tip_choices  # noqa: E402
 
 FONTS = ["Arial", "Helvetica", "Times New Roman", "AppleGothic"]
 PREVIEW_DPI = 200
@@ -1651,7 +1652,7 @@ class FigureEditor(QtWidgets.QWidget):
         foot = QtWidgets.QHBoxLayout()
         foot.addWidget(self.size_label)
         foot.addStretch(1)
-        self.foot_msg = QtWidgets.QLabel()  # messages of this window (no status line under the boxes)
+        self.foot_msg = _controls_elide()  # messages of this window (no status line under the boxes); long ones end in …
         self.foot_msg.setStyleSheet("font-size: 11px;")
         foot.addWidget(self.foot_msg)
         pl.addLayout(foot)
@@ -1718,6 +1719,7 @@ class FigureEditor(QtWidgets.QWidget):
         for i in range(self.props_tabs.count()):
             self.props_tabs.set_fixed(self.props_tabs.widget(i))
         _theme.unify(whole)
+        fit_inspector(whole)  # 1.5.3: nothing wider than the fixed inspector box
         insp_body = QtWidgets.QWidget()
         il = QtWidgets.QVBoxLayout(insp_body)
         il.setContentsMargins(0, 0, 0, 0)
@@ -1736,7 +1738,7 @@ class FigureEditor(QtWidgets.QWidget):
             return box
 
         insp = boxed(insp_body, "hig_inspector", (12, 12, 4, 10))
-        insp.setFixedWidth(_theme.INSPECTOR_W)
+        insp.setFixedWidth(_theme.FIGURE_INSPECTOR_W)  # 1.5.3: fitted to the widest page, then fixed
         split = PaneSplitter()  # sidebar on the window's floor | preview box | properties box
         split.addWidget(scroll)
         split.addWidget(boxed(center, "hig_content", (20, 14, 20, 12)))
@@ -1854,7 +1856,17 @@ class FigureEditor(QtWidgets.QWidget):
         l = QtWidgets.QVBoxLayout(g)
         self.panel_table = QtWidgets.QTableWidget(0, 4)
         self.panel_table.setHorizontalHeaderLabels([_t("표시"), _t("라벨"), _t("위 여백"), _t("아래 여백")])
-        self.panel_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        ph = self.panel_table.horizontalHeader()
+        ph.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        ph.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        for col, short, full in ((2, _t("위쪽"), _t("위 여백")), (3, _t("아래쪽"), _t("아래 여백"))):
+            ph.setSectionResizeMode(col, QtWidgets.QHeaderView.Fixed)  # 1.5.3: the label column takes the spare width
+            self.panel_table.setColumnWidth(col, 72)
+            hi = self.panel_table.horizontalHeaderItem(col)
+            hi.setText(short)
+            hi.setToolTip(full)
+        self.panel_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.panel_table.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.panel_table.verticalHeader().setVisible(False)
         self.panel_table.setMaximumHeight(170)
         self.panel_table.itemChanged.connect(self.on_panel_item)
@@ -1871,7 +1883,7 @@ class FigureEditor(QtWidgets.QWidget):
         self.w_font.addItems(FONTS)
         self.w_font.setEditable(True)
         f.addRow(_t("글꼴"), self.w_font)
-        self.w_bold = QtWidgets.QCheckBox(_t("IB 라벨 굵게"))
+        self.w_bold = _controls_wrap(_t("IB 라벨 굵게"))
         f.addRow(self.w_bold)
         self.w_gap = _spin(0.0, 1.0, 0.06, 0.01, 2, " in")
         f.addRow(_t("패널 간격"), self.w_gap)
@@ -1907,9 +1919,9 @@ class FigureEditor(QtWidgets.QWidget):
         self.w_gamma = _spin(0.2, 3.0, 1.0, 0.05, 2)
         self.w_gamma.setToolTip(_t("1보다 작으면 흐린 밴드가 진해집니다"))
         f.addRow(_t("감마"), self.w_gamma)
-        self.w_perpanel = QtWidgets.QCheckBox(_t("패널마다 따로 대비 맞춤"))
+        self.w_perpanel = _controls_wrap(_t("패널마다 따로 대비 맞춤"))
         f.addRow(self.w_perpanel)
-        self.w_corr = QtWidgets.QCheckBox(_t("배경 제거한 이미지로 표시"))
+        self.w_corr = _controls_wrap(_t("배경 제거한 이미지로 표시"))
         f.addRow(self.w_corr)
         for w, key in ((self.w_lo, "lo_pct"), (self.w_hi, "hi_pct"), (self.w_gamma, "gamma")):
             w.valueChanged.connect(lambda v, key=key: self.set(key, v))
@@ -1931,7 +1943,7 @@ class FigureEditor(QtWidgets.QWidget):
         l.addLayout(hb)
         self.ladder_display = self._group(_t("마커 띠 · 크기 눈금 표시"))
         f = QtWidgets.QFormLayout(self.ladder_display)
-        self.w_strip = QtWidgets.QCheckBox(_t("마커 이미지 띠를 패널 왼쪽에 표시"))
+        self.w_strip = _controls_wrap(_t("마커 이미지 띠를 패널 왼쪽에 표시"))
         f.addRow(self.w_strip)
         hb = QtWidgets.QHBoxLayout()
         self.w_sx0 = _spin(0, 100000, 0, 1, None, " px")
@@ -1952,9 +1964,9 @@ class FigureEditor(QtWidgets.QWidget):
         self.w_sdy.setToolTip(_t("마커 사진이 블롯과 위아래로 어긋나 있을 때 마커 띠의 세로 위치를 보정합니다"))
         self.w_sdy.valueChanged.connect(lambda v: self.set("strip_dy", int(v)))
         f.addRow(_t("띠 세로 보정"), self.w_sdy)
-        self.w_minv = QtWidgets.QCheckBox(_t("마커 띠 반전 (어두운 ladder / 흰 배경)"))
+        self.w_minv = _controls_wrap(_t("마커 띠 반전 (어두운 ladder / 흰 배경)"))
         f.addRow(self.w_minv)
-        self.w_kda = QtWidgets.QCheckBox(_t("크기 눈금 표시 (kDa / bp)"))
+        self.w_kda = _controls_wrap(_t("크기 눈금 표시 (kDa / bp)"))
         f.addRow(self.w_kda)
         self.w_unit = QtWidgets.QComboBox()
         self.w_unit.addItems(["kDa", "bp"])
@@ -2037,6 +2049,7 @@ class FigureEditor(QtWidgets.QWidget):
             self._update_marker_label()
         finally:
             self._loading = False
+        tip_choices(self.props_tabs.widget(1))  # a cut choice shows its whole text on hover
         self.refresh_reference()
         self.refresh_blots()
         self.refresh_objects()
@@ -2416,7 +2429,6 @@ class FigureEditor(QtWidgets.QWidget):
                 sp.valueChanged.connect(lambda v, p=p, key=key: self._panel_pad(p, key, v))
                 t.setCellWidget(i, col, sp)
         t.blockSignals(False)
-        t.resizeColumnToContents(0)
 
     def _panel_pad(self, p, key, v):
         p[key] = int(v)
@@ -2484,7 +2496,7 @@ class FigureEditor(QtWidgets.QWidget):
         b = QtWidgets.QPushButton(_t("선택 그룹 삭제"))
         b.clicked.connect(self.delete_group)
         hb.addWidget(b)
-        self.w_bar = QtWidgets.QCheckBox(_t("막대 표시"))
+        self.w_bar = _controls_wrap(_t("막대 표시"))
         self.w_bar.toggled.connect(self.on_bar_toggled)
         hb.addWidget(self.w_bar)
         hb.addStretch(1)
@@ -3328,7 +3340,7 @@ class FigureEditor(QtWidgets.QWidget):
         f.addRow(_t("글자 크기"), sp)
         hb = QtWidgets.QHBoxLayout()
         for key, label in (("bold", _t("굵게")), ("italic", _t("기울임"))):
-            c = QtWidgets.QCheckBox(label)
+            c = _controls_wrap(label)
             c.setChecked(bool(st.get(key)))
             c.toggled.connect(lambda on, key=key: self.apply_style(sel, **{key: on}))
             hb.addWidget(c)
@@ -3599,7 +3611,7 @@ class FigureEditor(QtWidgets.QWidget):
         return sp
 
     def _p_check(self, f, label, value, on_set, sync=True):
-        c = QtWidgets.QCheckBox(label)
+        c = _controls_wrap(label)
         c.setChecked(bool(value))
         c.toggled.connect(lambda on: (on_set(on), self._p_changed(sync)))
         f.addRow(c)
@@ -3673,6 +3685,7 @@ class FigureEditor(QtWidgets.QWidget):
         self.props_layout.addWidget(b, 0, Qt.AlignLeft)
         self.props_layout.addStretch(1)
         theme.unify(self.props_layout.parentWidget())  # cards like every inspector
+        fit_inspector(self.props_layout.parentWidget())
         _ = s
 
     # text content of a key: (getter, setter) or None for computed texts (numbers)
@@ -4331,7 +4344,7 @@ class FigureEditor(QtWidgets.QWidget):
         total = sum(sz)
         if total > 600:
             side = max(220, min(260, sz[0]))
-            insp = theme.INSPECTOR_W
+            insp = theme.FIGURE_INSPECTOR_W
             self.split.setSizes([side, max(200, total - side - insp), insp])
 
     def resizeEvent(self, e):
