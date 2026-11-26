@@ -15,6 +15,18 @@ def _overflow(scroll):
     return scroll.widget().minimumSizeHint().width() - room
 
 
+def _widest(page):
+    """The widest pieces of a page (shown when it does not fit)."""
+    from PySide6 import QtWidgets
+
+    rows = []
+    for c in page.findChildren(QtWidgets.QWidget):
+        if c.isVisibleTo(page):
+            t = c.text() if hasattr(c, "text") and callable(c.text) else (c.title() if hasattr(c, "title") else "")
+            rows.append((c.minimumSizeHint().width(), type(c).__name__, str(t)[:30], c.font().family(), c.font().pointSizeF()))
+    return sorted(rows, reverse=True)[:12]
+
+
 def test_inspector_fixed_width_and_nothing_cut(tmp_path):
     from PySide6.QtTest import QTest
 
@@ -27,7 +39,7 @@ def test_inspector_fixed_width_and_nothing_cut(tmp_path):
         assert insp.width() == theme.FIGURE_INSPECTOR_W
         ed.props_tabs.setCurrentIndex(1)
         QTest.qWait(30)
-        assert _overflow(ed.props_tabs.widget(1)) <= 0  # 그림 전체 fits (was 382 px in a 330 px box)
+        assert _overflow(ed.props_tabs.widget(1)) <= 0, _widest(ed.props_tabs.widget(1).widget())  # was 382 px in a 330 px box
         ed.preview.select({"kind": "blot"})
         ed.on_object_selected({"kind": "blot"})
         QTest.qWait(30)
