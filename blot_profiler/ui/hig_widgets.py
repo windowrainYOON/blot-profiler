@@ -311,9 +311,47 @@ class PaneSplitter(QSplitter):
         g = theme.BOX_GAP
         self.setContentsMargins(0, g, g, g)
         self.setAutoFillBackground(False)
+        self._fitting = False
+        self.splitterMoved.connect(lambda *_: self.fit_panes())
 
     def createHandle(self):
         return _PaneHandle(self.orientation(), self)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.fit_panes()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.fit_panes()
+
+    def fit_panes(self):
+        """1.5.4: each side pane gets exactly the width it may have (a fixed inspector its
+        fixed width, the sidebar within its min/max), and the canvas (pane 1) all the rest,
+        so the inspector sits against the window's right edge with no empty strip beside it."""
+        n = self.count()
+        if self._fitting or n < 2:
+            return
+        sizes = self.sizes()
+        total = sum(sizes)
+        if total <= 0:
+            return
+        new = list(sizes)
+        for i in range(n):
+            if i == 1:
+                continue
+            w = self.widget(i)
+            lo = max(w.minimumWidth(), 0)
+            hi = w.maximumWidth()
+            new[i] = min(max(sizes[i], lo), hi)
+        rest = total - sum(v for i, v in enumerate(new) if i != 1)
+        new[1] = max(self.widget(1).minimumWidth(), rest)
+        if new != sizes:
+            self._fitting = True
+            try:
+                self.setSizes(new)
+            finally:
+                self._fitting = False
 
 
 class RegionShade(QWidget):
